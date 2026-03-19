@@ -1,0 +1,82 @@
+cmake_minimum_required(VERSION 3.20)
+project(AscendPerfModel LANGUAGES CXX C)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+#===----------------------------------------------------------------------===//
+# MLIR/LLVM Configuration
+#===----------------------------------------------------------------------===//
+
+find_package(MLIR REQUIRED CONFIG)
+find_package(LLVM REQUIRED CONFIG)
+
+message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
+message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+
+set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
+set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
+set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
+
+list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+
+include(TableGen)
+include(AddLLVM)
+include(AddMLIR)
+include(HandleLLVMOptions)
+
+include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(${MLIR_INCLUDE_DIRS})
+include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(${PROJECT_BINARY_DIR}/include)
+
+link_directories(${LLVM_BUILD_LIBRARY_DIR})
+add_definitions(${LLVM_DEFINITIONS})
+
+#===----------------------------------------------------------------------===//
+# Ascend910B Hardware Parameters (可配置)
+#===----------------------------------------------------------------------===//
+
+# Cube Core 参数
+set(ASCEND_CUBE_TFLOPS 320 CACHE STRING "Cube Core FP16 TFLOPS")
+set(ASCEND_CUBE_M 16 CACHE STRING "Cube Core M dimension")
+set(ASCEND_CUBE_N 16 CACHE STRING "Cube Core N dimension")
+set(ASCEND_CUBE_K 16 CACHE STRING "Cube Core K dimension")
+
+# Vector Core 参数
+set(ASCEND_VECTOR_TFLOPS 10 CACHE STRING "Vector Core FP32 TFLOPS")
+set(ASCEND_VECTOR_WIDTH 256 CACHE STRING "Vector width in bits")
+
+# Memory 参数
+set(ASCEND_HBM_BW 1555 CACHE STRING "HBM Bandwidth GB/s")
+set(ASCEND_L2_SIZE 192 CACHE STRING "L2 Cache Size MB")
+set(ASCEND_L1_SIZE 1024 CACHE STRING "L1 Buffer Size KB")
+
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/AscendModel/HardwareParams.h.in
+  ${CMAKE_CURRENT_BINARY_DIR}/include/AscendModel/HardwareParams.h
+)
+
+#===----------------------------------------------------------------------===//
+# TableGen targets
+#===----------------------------------------------------------------------===//
+
+set(ASCEND_MODEL_SOURCE_DIR ${PROJECT_SOURCE_DIR})
+set(ASCEND_MODEL_BINARY_DIR ${PROJECT_BINARY_DIR})
+
+add_subdirectory(include/AscendModel)
+add_subdirectory(lib)
+add_subdirectory(tools)
+
+#===----------------------------------------------------------------------===//
+# Testing (optional)
+#===----------------------------------------------------------------------===//
+
+option(ASCEND_MODEL_ENABLE_TESTS "Enable building tests" OFF)
+
+if(ASCEND_MODEL_ENABLE_TESTS)
+  enable_testing()
+  add_subdirectory(test)
+endif()

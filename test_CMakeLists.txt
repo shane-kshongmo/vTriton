@@ -1,0 +1,32 @@
+# Test configuration for AscendModel
+# Note: lit tests require LLVM test tools (FileCheck, count, not)
+# These are only available when building within the LLVM tree or with LLVM_EXTERNAL_LIT
+
+# Only set up tests if we have the necessary tools
+find_program(LLVM_FILECHECK FileCheck HINTS ${LLVM_TOOLS_BINARY_DIR})
+find_program(LLVM_LIT llvm-lit lit HINTS ${LLVM_TOOLS_BINARY_DIR})
+
+if(LLVM_FILECHECK AND LLVM_LIT)
+  configure_lit_site_cfg(
+    ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
+    ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py
+    MAIN_CONFIG
+    ${CMAKE_CURRENT_SOURCE_DIR}/lit.cfg.py
+  )
+
+  set(ASCEND_MODEL_TEST_DEPENDS
+    ascend-perf-model-opt
+  )
+
+  add_lit_testsuite(check-ascend-model "Running the AscendModel regression tests"
+    ${CMAKE_CURRENT_BINARY_DIR}
+    DEPENDS ${ASCEND_MODEL_TEST_DEPENDS}
+  )
+
+  set_target_properties(check-ascend-model PROPERTIES FOLDER "Tests")
+
+  add_lit_testsuites(ASCEND_MODEL ${CMAKE_CURRENT_SOURCE_DIR} DEPENDS ${ASCEND_MODEL_TEST_DEPENDS})
+else()
+  message(STATUS "LLVM test tools not found, skipping lit tests")
+  message(STATUS "  To enable tests, build LLVM with -DLLVM_INSTALL_UTILS=ON")
+endif()
