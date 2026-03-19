@@ -6,110 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 #===----------------------------------------------------------------------===//
-# Build Options
+# MLIR/LLVM Configuration
 #===----------------------------------------------------------------------===//
-
-option(TRITONSIM_ENABLE_TRITON "Enable Triton dialect support" ON)
-option(TRITONSIM_AUTO_BUILD_LLVM
-  "Auto-build LLVM/MLIR from submodule if not found" ON)
-
-set(TRITON_SRC_DIR "" CACHE PATH "Path to triton-ascend source root")
-set(TRITON_BUILD_DIR "" CACHE PATH
-    "Path to triton cmake build dir (optional, reuses generated .inc files)")
-
-#===----------------------------------------------------------------------===//
-# LLVM/MLIR Discovery
-#
-# 优先级:
-#   1. 用户指定 -DMLIR_DIR          → 直接使用
-#   2. submodule 已构建             → 自动检测
-#   3. TRITONSIM_AUTO_BUILD_LLVM=ON → 自动构建 submodule
-#   4. 报错，提示操作方法
-#===----------------------------------------------------------------------===//
-
-set(LLVM_SUBMODULE_SRC "${CMAKE_SOURCE_DIR}/thirdparty/llvm-project")
-set(LLVM_SUBMODULE_BUILD "${LLVM_SUBMODULE_SRC}/build")
-set(LLVM_SUBMODULE_INSTALL "${LLVM_SUBMODULE_BUILD}/install")
-
-if(NOT MLIR_DIR)
-  # ── 自动检测: submodule 是否已构建? ──
-  if(EXISTS "${LLVM_SUBMODULE_INSTALL}/lib/cmake/mlir/MLIRConfig.cmake")
-    set(MLIR_DIR "${LLVM_SUBMODULE_INSTALL}/lib/cmake/mlir" CACHE PATH "" FORCE)
-    message(STATUS "[auto] Found MLIR from submodule: ${MLIR_DIR}")
-
-  # ── 自动构建 ──
-  elseif(TRITONSIM_AUTO_BUILD_LLVM)
-    # 检查 submodule 是否存在
-    if(NOT EXISTS "${LLVM_SUBMODULE_SRC}/llvm/CMakeLists.txt")
-      message(FATAL_ERROR
-        "LLVM submodule not initialized.\n"
-        "Run:\n"
-        "  git submodule update --init thirdparty/llvm-project\n"
-        "Or provide:\n"
-        "  cmake -DMLIR_DIR=<path> ..")
-    endif()
-
-    message(STATUS "")
-    message(STATUS "============================================================")
-    message(STATUS "  Building LLVM/MLIR from submodule (first time only)")
-    message(STATUS "  This may take 30-60 minutes...")
-    message(STATUS "  To skip: cmake -DMLIR_DIR=<path> ..")
-    message(STATUS "  Or run manually: scripts/build_llvm.sh")
-    message(STATUS "============================================================")
-    message(STATUS "")
-
-    # 检测并行度
-    include(ProcessorCount)
-    ProcessorCount(NPROC)
-    if(NPROC EQUAL 0)
-      set(NPROC 4)
-    endif()
-
-    # Configure LLVM
-    execute_process(
-      COMMAND ${CMAKE_COMMAND}
-        -G Ninja
-        -DCMAKE_BUILD_TYPE=Release
-        -DLLVM_ENABLE_ASSERTIONS=ON
-        "-DLLVM_ENABLE_PROJECTS=mlir;llvm"
-        "-DLLVM_TARGETS_TO_BUILD=host;NVPTX;AMDGPU"
-        -DCMAKE_INSTALL_PREFIX=${LLVM_SUBMODULE_INSTALL}
-        -S ${LLVM_SUBMODULE_SRC}/llvm
-        -B ${LLVM_SUBMODULE_BUILD}
-      RESULT_VARIABLE _rc
-    )
-    if(NOT _rc EQUAL 0)
-      message(FATAL_ERROR
-        "LLVM cmake configure failed (rc=${_rc}).\n"
-        "Check output above for details.\n"
-        "You can also build manually: scripts/build_llvm.sh")
-    endif()
-
-    # Build + Install
-    execute_process(
-      COMMAND ${CMAKE_COMMAND} --build ${LLVM_SUBMODULE_BUILD}
-        --target install -- -j${NPROC}
-      RESULT_VARIABLE _rc
-    )
-    if(NOT _rc EQUAL 0)
-      message(FATAL_ERROR
-        "LLVM build failed (rc=${_rc}).\n"
-        "You can also build manually: scripts/build_llvm.sh")
-    endif()
-
-    set(MLIR_DIR "${LLVM_SUBMODULE_INSTALL}/lib/cmake/mlir" CACHE PATH "" FORCE)
-    message(STATUS "LLVM/MLIR built successfully: ${MLIR_DIR}")
-
-  # ── 无法找到，报错 ──
-  else()
-    message(FATAL_ERROR
-      "MLIR_DIR not set and auto-build disabled.\n"
-      "Options:\n"
-      "  1) cmake -DMLIR_DIR=<path> ..\n"
-      "  2) cmake -DTRITONSIM_AUTO_BUILD_LLVM=ON ..\n"
-      "  3) scripts/build_llvm.sh  (then re-run cmake)")
-  endif()
-endif()
 
 find_package(MLIR REQUIRED CONFIG)
 find_package(LLVM REQUIRED CONFIG)
@@ -141,76 +39,69 @@ add_definitions(${LLVM_DEFINITIONS})
 #===----------------------------------------------------------------------===//
 # Triton Integration (Optional)
 #
-# 优先级:
-#   1. 用户指定 -DTRITON_SRC_DIR             → 直接使用
-#   2. submodule thirdparty/triton-ascend 存在 → 自动检测
-#   3. 不启用 Triton (仅解析 ascend dialect)
+# 从 Triton-Ascend 源码直接编译 Triton Dialect 为静态库。
+# 避免链接 libtriton.so 的复杂依赖问题。
 #
-# Triton dialect 从源码编译为静态库 (thirdparty/triton-dialect/)，
-# 不链接 libtriton.so。
+# 配置:
+#   -DTRITON_SRC_DIR=<triton-ascend 源码根目录>
+#   -DTRITON_BUILD_DIR=<triton cmake 构建目录> (可选，加速：复用已生成的.inc)
+#
+# 禁用: -DTRITONSIM_ENABLE_TRITON=OFF
 #===----------------------------------------------------------------------===//
 
-set(TRITON_SUBMODULE_SRC "${CMAKE_SOURCE_DIR}/thirdparty/triton-ascend")
+option(TRITONSIM_ENABLE_TRITON "Enable Triton dialect support" ON)
+
+set(TRITON_SRC_DIR "" CACHE PATH "Path to triton-ascend source root")
+set(TRITON_BUILD_DIR "" CACHE PATH
+    "Path to triton CMake build dir (optional, reuses generated .inc files)")
 
 set(TRITONSIM_HAS_TRITON OFF)
 set(TRITON_DIALECT_LIB "")
 
-if(TRITONSIM_ENABLE_TRITON)
-  # ── 自动检测 Triton 源码 ──
-  if(NOT TRITON_SRC_DIR)
-    if(EXISTS "${TRITON_SUBMODULE_SRC}")
-      set(TRITON_SRC_DIR "${TRITON_SUBMODULE_SRC}" CACHE PATH "" FORCE)
-      message(STATUS "[auto] Found Triton source from submodule: ${TRITON_SRC_DIR}")
+if(TRITONSIM_ENABLE_TRITON AND TRITON_SRC_DIR)
+  # 查找 Triton 源码头文件
+  set(_triton_inc_candidates
+    "${TRITON_SRC_DIR}/include"
+    "${TRITON_SRC_DIR}/triton/include"
+  )
+  
+  set(TRITON_INCLUDE_DIR "")
+  foreach(_candidate ${_triton_inc_candidates})
+    if(EXISTS "${_candidate}/triton/Dialect/Triton/IR/Dialect.h")
+      set(TRITON_INCLUDE_DIR "${_candidate}")
+      break()
     endif()
-  endif()
+  endforeach()
 
-  if(TRITON_SRC_DIR)
-    # 查找 Triton 头文件
-    set(_triton_inc_candidates
-      "${TRITON_SRC_DIR}/include"
-      "${TRITON_SRC_DIR}/triton/include"
-    )
-
-    set(TRITON_INCLUDE_DIR "")
-    foreach(_candidate ${_triton_inc_candidates})
-      if(EXISTS "${_candidate}/triton/Dialect/Triton/IR/Dialect.h")
-        set(TRITON_INCLUDE_DIR "${_candidate}")
-        break()
-      endif()
-    endforeach()
-
-    if(NOT TRITON_INCLUDE_DIR)
-      message(WARNING
-        "Triton headers not found under TRITON_SRC_DIR=${TRITON_SRC_DIR}\n"
-        "Looked for: triton/Dialect/Triton/IR/Dialect.h\n"
-        "If using submodule, ensure it is initialized:\n"
-        "  git submodule update --init --recursive thirdparty/triton-ascend\n"
-        "Triton support DISABLED.")
-    else()
-      message(STATUS "Found Triton headers: ${TRITON_INCLUDE_DIR}")
-
-      # 从源码编译 Triton Dialect
-      add_subdirectory(thirdparty/triton-dialect)
-
-      set(TRITONSIM_HAS_TRITON ON)
-      set(TRITON_DIALECT_LIB TritonDialectIR)
-
-      include_directories(${TRITON_INCLUDE_DIR})
-      if(TRITON_GEN_INC_DIR)
-        include_directories(${TRITON_GEN_INC_DIR})
-      endif()
-
-      add_definitions(-DTRITONSIM_HAS_TRITON=1)
-      message(STATUS "=== Triton Integration ENABLED ===")
-    endif()
+  if(NOT TRITON_INCLUDE_DIR)
+    message(WARNING
+      "Triton headers not found under TRITON_SRC_DIR=${TRITON_SRC_DIR}\n"
+      "Looked for: triton/Dialect/Triton/IR/Dialect.h\n"
+      "Triton support DISABLED.")
   else()
-    message(STATUS
-      "Triton support requested but source not found.\n"
-      "Building WITHOUT Triton. Tool will only parse ascend dialect.\n"
-      "To enable:\n"
-      "  git submodule update --init thirdparty/triton-ascend\n"
-      "  Or: cmake -DTRITON_SRC_DIR=<path> ..")
+    message(STATUS "Found Triton headers: ${TRITON_INCLUDE_DIR}")
+    
+    # 从源码编译 Triton Dialect (thirdparty/triton-dialect/CMakeLists.txt)
+    add_subdirectory(thirdparty/triton-dialect)
+    
+    set(TRITONSIM_HAS_TRITON ON)
+    set(TRITON_DIALECT_LIB TritonDialectIR)
+    
+    # TritonDialectIR 的 target_include_directories 已经设置了
+    # 这里只需把 include 传播到全局，让其他源码也能 #include triton 头文件
+    include_directories(${TRITON_INCLUDE_DIR})
+    if(TRITON_GEN_INC_DIR)
+      include_directories(${TRITON_GEN_INC_DIR})
+    endif()
+    
+    add_definitions(-DTRITONSIM_HAS_TRITON=1)
+    message(STATUS "=== Triton Integration ENABLED ===")
   endif()
+elseif(TRITONSIM_ENABLE_TRITON)
+  message(STATUS
+    "Triton support requested but TRITON_SRC_DIR not set.\n"
+    "Building WITHOUT Triton. Tool will only parse ascend dialect.\n"
+    "To enable: -DTRITON_SRC_DIR=<path>")
 endif()
 
 message(STATUS "TRITONSIM_HAS_TRITON: ${TRITONSIM_HAS_TRITON}")
@@ -263,16 +154,7 @@ endif()
 message(STATUS "")
 message(STATUS "======= AscendPerfModel Build Summary =======")
 message(STATUS "  LLVM version:     ${LLVM_PACKAGE_VERSION}")
-message(STATUS "  MLIR_DIR:         ${MLIR_DIR}")
 message(STATUS "  Triton support:   ${TRITONSIM_HAS_TRITON}")
-if(TRITONSIM_HAS_TRITON)
-  message(STATUS "  Triton source:    ${TRITON_SRC_DIR}")
-  if(TRITON_BUILD_DIR)
-    message(STATUS "  Triton .inc:      ${TRITON_BUILD_DIR} (Mode A)")
-  else()
-    message(STATUS "  Triton .inc:      mlir-tblgen (Mode B)")
-  endif()
-endif()
 message(STATUS "  Build type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "=============================================")
 message(STATUS "")
