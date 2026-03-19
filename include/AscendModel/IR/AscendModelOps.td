@@ -300,8 +300,12 @@ def Ascend_RsqrtOp : Ascend_VectorUnaryComplex<"rsqrt", 2> {
   let summary = "Element-wise reciprocal square root on Vector Core";
 }
 
-// Complex unary ops (4 cycles)
-def Ascend_ExpOp : Ascend_VectorUnaryComplex<"exp", 4> {
+// Complex unary ops — differentiated cycle costs based on 910B Vector unit
+// exp: 3 cycles (hardware-accelerated exponential)
+// log: 4 cycles (iterative approximation)
+// tanh: 6 cycles (computed via multiple exp operations internally)
+// sigmoid: 5 cycles (computed as 1/(1+exp(-x)), reuses exp hardware)
+def Ascend_ExpOp : Ascend_VectorUnaryComplex<"exp", 3> {
   let summary = "Element-wise exponential on Vector Core";
 }
 
@@ -309,11 +313,11 @@ def Ascend_LogOp : Ascend_VectorUnaryComplex<"log", 4> {
   let summary = "Element-wise natural logarithm on Vector Core";
 }
 
-def Ascend_TanhOp : Ascend_VectorUnaryComplex<"tanh", 4> {
+def Ascend_TanhOp : Ascend_VectorUnaryComplex<"tanh", 6> {
   let summary = "Element-wise hyperbolic tangent on Vector Core";
 }
 
-def Ascend_SigmoidOp : Ascend_VectorUnaryComplex<"sigmoid", 4> {
+def Ascend_SigmoidOp : Ascend_VectorUnaryComplex<"sigmoid", 5> {
   let summary = "Element-wise sigmoid activation on Vector Core";
 }
 

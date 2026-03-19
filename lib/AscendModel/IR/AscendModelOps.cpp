@@ -272,10 +272,15 @@ IMPL_SIMPLE_VECTOR_UNARY(CastOp)
 
 IMPL_COMPLEX_VECTOR_UNARY(SqrtOp, 2)
 IMPL_COMPLEX_VECTOR_UNARY(RsqrtOp, 2)
-IMPL_COMPLEX_VECTOR_UNARY(ExpOp, 4)
+// Differentiated transcendental costs for Ascend 910B Vector unit:
+// exp: 3 cycles (hardware-accelerated)
+// log: 4 cycles (iterative approximation)
+// tanh: 6 cycles (multiple exp operations internally)
+// sigmoid: 5 cycles (1/(1+exp(-x)), reuses exp hardware)
+IMPL_COMPLEX_VECTOR_UNARY(ExpOp, 3)
 IMPL_COMPLEX_VECTOR_UNARY(LogOp, 4)
-IMPL_COMPLEX_VECTOR_UNARY(TanhOp, 4)
-IMPL_COMPLEX_VECTOR_UNARY(SigmoidOp, 4)
+IMPL_COMPLEX_VECTOR_UNARY(TanhOp, 6)
+IMPL_COMPLEX_VECTOR_UNARY(SigmoidOp, 5)
 
 #undef IMPL_COMPLEX_VECTOR_UNARY
 
