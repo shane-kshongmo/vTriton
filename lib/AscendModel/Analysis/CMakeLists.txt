@@ -1,7 +1,7 @@
 add_mlir_library(AscendModelAnalysis
+  PARTIAL_SOURCES_INTENDED
   HardwareConfig.cpp
   PipelineAnalysis.cpp
-  RooflineAnalysis.cpp
   UnifiedTilingCostModel.cpp
   MemoryTilingOptimizer.cpp
   

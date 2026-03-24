@@ -130,12 +130,14 @@ struct PerfReportPass
     auto scheduledCyclesAttr = module->getAttrOfType<IntegerAttr>("ascend.scheduled_cycles");
     int64_t scheduledCycles = scheduledCyclesAttr ? scheduledCyclesAttr.getInt() : totalCycles;
     
-    double timeUs = scheduledCycles / ::ascend::hw::CYCLES_PER_US;
+      // Ascend 910B clock: 1.85 GHz = 1850 cycles/us
+    constexpr double CYCLES_PER_US = 1850.0;
+    double timeUs = scheduledCycles / CYCLES_PER_US;
     double achievedTFLOPS = (totalFLOPs / 1e12) / (timeUs / 1e6);
     double achievedBandwidth = (totalBytes / 1e9) / (timeUs / 1e6);
     double arithmeticIntensity = totalBytes > 0 ? static_cast<double>(totalFLOPs) / totalBytes : 0;
     
-    double ridgePoint = ::ascend::hw::CUBE_TFLOPS / ::ascend::hw::HBM_BANDWIDTH_GBS;
+    double ridgePoint = CUBE_TFLOPS / HBM_BANDWIDTH_GBS;
     bool isComputeBound = arithmeticIntensity > ridgePoint;
     
     HWUnit bottleneck = HWUnit::Scalar;
@@ -163,13 +165,13 @@ struct PerfReportPass
     os << "|  ---------------                                             |\n";
     os << llvm::format("|  Total FLOPs:         %12ld                        |\n", totalFLOPs);
     os << llvm::format("|  Achieved TFLOPS:     %12.3f                        |\n", achievedTFLOPS);
-    os << llvm::format("|  Peak TFLOPS (Cube):  %12.1f                        |\n", ::ascend::hw::CUBE_TFLOPS);
+    os << llvm::format("|  Peak TFLOPS (Cube):  %12.1f                        |\n", CUBE_TFLOPS);
     os << "|                                                              |\n";
     os << "|  Memory Summary                                              |\n";
     os << "|  --------------                                              |\n";
     os << llvm::format("|  Total Bytes:         %12ld                        |\n", totalBytes);
     os << llvm::format("|  Achieved BW (GB/s):  %12.3f                        |\n", achievedBandwidth);
-    os << llvm::format("|  Peak BW (GB/s):      %12.1f                        |\n", ::ascend::hw::HBM_BANDWIDTH_GBS);
+    os << llvm::format("|  Peak BW (GB/s):      %12.1f                        |\n", HBM_BANDWIDTH_GBS);
     os << "|                                                              |\n";
     os << "|  Roofline Analysis                                           |\n";
     os << "|  -----------------                                           |\n";

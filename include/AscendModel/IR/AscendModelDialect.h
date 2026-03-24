@@ -15,11 +15,10 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 
-// Forward declarations for interface
+// Forward declarations
 namespace mlir {
 namespace ascend {
 class HardwareConfig;
-enum class HWUnit : uint8_t;
 } // namespace ascend
 } // namespace mlir
 

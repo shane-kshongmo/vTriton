@@ -72,10 +72,26 @@ void RooflineAnalyzer::computeMetrics() {
         totalFLOPs += getNumElementsFromType(mlirOp->getResult(0).getType());
       }
     }
-    // Transcendental functions - expensive
-    else if (isa<ExpOp, LogOp, TanhOp, SigmoidOp>(mlirOp)) {
+    // Transcendental functions — differentiated FLOP costs
+    // Reflects relative complexity on Ascend 910B Vector unit
+    else if (isa<ExpOp>(mlirOp)) {
+      if (mlirOp->getNumResults() > 0) {
+        totalFLOPs += getNumElementsFromType(mlirOp->getResult(0).getType()) * 15;
+      }
+    }
+    else if (isa<LogOp>(mlirOp)) {
       if (mlirOp->getNumResults() > 0) {
         totalFLOPs += getNumElementsFromType(mlirOp->getResult(0).getType()) * 20;
+      }
+    }
+    else if (isa<TanhOp>(mlirOp)) {
+      if (mlirOp->getNumResults() > 0) {
+        totalFLOPs += getNumElementsFromType(mlirOp->getResult(0).getType()) * 30;
+      }
+    }
+    else if (isa<SigmoidOp>(mlirOp)) {
+      if (mlirOp->getNumResults() > 0) {
+        totalFLOPs += getNumElementsFromType(mlirOp->getResult(0).getType()) * 25;
       }
     }
     // Sqrt operations
@@ -88,6 +104,18 @@ void RooflineAnalyzer::computeMetrics() {
     else if (isa<ReduceSumOp, ReduceMaxOp, ReduceMinOp, ReduceProdOp>(mlirOp)) {
       if (mlirOp->getNumOperands() > 0) {
         totalFLOPs += getNumElementsFromType(mlirOp->getOperand(0).getType());
+      }
+    }
+    // Select/where op — 1 FLOP per element (comparison + select)
+    else if (isa<SelectOp>(mlirOp)) {
+      if (mlirOp->getNumResults() > 0) {
+        totalFLOPs += getNumElementsFromType(mlirOp->getResult(0).getType());
+      }
+    }
+    // Comparison ops — 1 FLOP per element
+    else if (isa<CmpEqOp, CmpNeOp, CmpLtOp, CmpLeOp, CmpGtOp, CmpGeOp>(mlirOp)) {
+      if (mlirOp->getNumResults() > 0) {
+        totalFLOPs += getNumElementsFromType(mlirOp->getResult(0).getType());
       }
     }
     

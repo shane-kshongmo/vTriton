@@ -54,7 +54,7 @@ module {
       : tensor<1024xf32> -> tensor<1024xf32>
     
     // Find max for numerical stability
-    %max = ascend.reduce_max %x_loaded axis = 0 : tensor<1024xf32> -> tensor<1xf32>
+    %max = ascend.reduce_max %x_loaded axis 0 : tensor<1024xf32> -> tensor<1xf32>
     
     // Broadcast max
     %max_broadcast = ascend.broadcast %max to [1024] : tensor<1xf32> -> tensor<1024xf32>
@@ -67,7 +67,7 @@ module {
     %exp = ascend.exp %x_shifted : tensor<1024xf32> -> tensor<1024xf32>
     
     // Sum
-    %sum = ascend.reduce_sum %exp axis = 0 : tensor<1024xf32> -> tensor<1xf32>
+    %sum = ascend.reduce_sum %exp axis 0 : tensor<1024xf32> -> tensor<1xf32>
     
     // Broadcast sum
     %sum_broadcast = ascend.broadcast %sum to [1024] : tensor<1xf32> -> tensor<1024xf32>

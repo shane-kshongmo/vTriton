@@ -14,7 +14,7 @@ namespace ascend {
 
 // Forward declarations
 class HardwareConfig;
-enum class HWUnit : uint8_t;
+enum class HWUnit : uint32_t;
 
 } // namespace ascend
 } // namespace mlir

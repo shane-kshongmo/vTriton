@@ -12,7 +12,7 @@
 // - Respecting buffer constraints (critical for feasibility)
 //===----------------------------------------------------------------------===//
 
-#include "UnifiedTilingCostModel.h"
+#include "AscendModel/Analysis/UnifiedTilingCostModel.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -132,8 +132,10 @@ UnifiedTilingCostModel::UnifiedTilingCostModel(const HardwareConfig &config)
   clockFreqGHz = config.getClockFrequencyGHz();
   if (clockFreqGHz == 0) clockFreqGHz = 1.8;
   
-  cubePeakThroughput = config.getCubePeakThroughput();
-  if (cubePeakThroughput == 0) cubePeakThroughput = 256;  // MACs/cycle
+  // Cube peak throughput in MACs/cycle: TFLOPS * 1e12 / (freq_GHz * 1e9) / 2
+  // For 910B: 320 TFLOPS / (1.85 GHz * 2) = ~86486 MACs/cycle
+  // But this is the aggregate; per-cube-core it's typically 256 MACs/cycle
+  cubePeakThroughput = 256;  // MACs/cycle for a single cube core
   
   vectorWidth = config.getVectorWidthElements();
   if (vectorWidth == 0) vectorWidth = 128;
@@ -900,6 +902,84 @@ UnifiedTilingOptimizer::exhaustiveSearch(
     llvm::outs() << "Pareto frontier size: " << result.paretoFrontier.size() << "\n";
   }
   
+  return result;
+}
+
+UnifiedTilingOptimizer::SearchResult
+UnifiedTilingOptimizer::optimizeFused(
+    const std::vector<OpDesc> &ops,
+    TilingCostFunction::Objective objective) {
+
+  SearchResult result;
+  result.configurationsExplored = 0;
+  double bestCost = std::numeric_limits<double>::max();
+
+  if (ops.empty())
+    return result;
+
+  // Use the first op's dims to drive the search space
+  const OpDesc &primary = ops[0];
+  std::vector<std::pair<char, DimDesc>> tileDims;
+  for (const auto &[label, dim] : primary.dims)
+    tileDims.push_back({label, dim});
+
+  auto enumerate = [](int64_t min, int64_t max, int64_t step) {
+    std::vector<int64_t> values;
+    for (int64_t v = min; v <= max; v += step)
+      values.push_back(v);
+    return values;
+  };
+
+  std::vector<std::tuple<int64_t, int64_t, int64_t>> ranges;
+  for (const auto &[label, dim] : tileDims) {
+    auto rangeIt = searchRanges.find(label);
+    if (rangeIt != searchRanges.end())
+      ranges.push_back(rangeIt->second);
+    else
+      ranges.push_back({defaultMinTile,
+                        std::min(dim.size, defaultMaxTile),
+                        defaultStep});
+  }
+
+  if (tileDims.size() >= 3) {
+    auto mValues = enumerate(std::get<0>(ranges[0]), std::get<1>(ranges[0]), std::get<2>(ranges[0]));
+    auto nValues = enumerate(std::get<0>(ranges[1]), std::get<1>(ranges[1]), std::get<2>(ranges[1]));
+    auto kValues = enumerate(std::get<0>(ranges[2]), std::get<1>(ranges[2]), std::get<2>(ranges[2]));
+
+    for (int64_t m : mValues) {
+      for (int64_t n : nValues) {
+        for (int64_t k : kValues) {
+          UnifiedTilingConfig config;
+          config.tileSizes[tileDims[0].first] = m;
+          config.tileSizes[tileDims[1].first] = n;
+          config.tileSizes[tileDims[2].first] = k;
+
+          auto breakdown = costModel.evaluateFused(ops, config);
+          result.configurationsExplored++;
+
+          double cost = static_cast<double>(breakdown.totalCycles);
+          if (objective == TilingCostFunction::Objective::MinMemoryAccess)
+            cost = static_cast<double>(breakdown.totalMemoryAccesses);
+
+          if (cost < bestCost) {
+            bestCost = cost;
+            result.bestConfig = config;
+            result.bestCost = breakdown;
+          }
+
+          if (breakdown.totalCycles < INT64_MAX)
+            result.paretoFrontier.push_back({config, breakdown});
+        }
+      }
+    }
+  }
+
+  if (verbose) {
+    llvm::outs() << "Explored " << result.configurationsExplored
+                 << " fused configurations\n";
+    llvm::outs() << "Best cost: " << bestCost << "\n";
+  }
+
   return result;
 }
 

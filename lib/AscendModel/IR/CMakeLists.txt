@@ -1,20 +1,20 @@
-set(LLVM_TARGET_DEFINITIONS AscendModelInterfaces.td)
-mlir_tablegen(AscendModelInterfaces.h.inc -gen-op-interface-decls)
-mlir_tablegen(AscendModelInterfaces.cpp.inc -gen-op-interface-defs)
-add_public_tablegen_target(AscendModelInterfacesIncGen)
+# The AscendModelIR library contains the dialect and ops implementation.
+# TableGen targets are defined in include/AscendModel/CMakeLists.txt.
 
-set(LLVM_TARGET_DEFINITIONS AscendModelOps.td)
-mlir_tablegen(AscendModelOps.h.inc -gen-op-decls)
-mlir_tablegen(AscendModelOps.cpp.inc -gen-op-defs)
-mlir_tablegen(AscendModelOpsEnums.h.inc -gen-enum-decls)
-mlir_tablegen(AscendModelOpsEnums.cpp.inc -gen-enum-defs)
-mlir_tablegen(AscendModelDialect.h.inc -gen-dialect-decls)
-mlir_tablegen(AscendModelDialect.cpp.inc -gen-dialect-defs)
-mlir_tablegen(AscendModelOpsAttrDefs.h.inc -gen-attrdef-decls)
-mlir_tablegen(AscendModelOpsAttrDefs.cpp.inc -gen-attrdef-defs)
-mlir_tablegen(AscendModelOpsTypes.h.inc -gen-typedef-decls)
-mlir_tablegen(AscendModelOpsTypes.cpp.inc -gen-typedef-defs)
-add_public_tablegen_target(AscendModelOpsIncGen)
-add_dependencies(AscendModelOpsIncGen AscendModelInterfacesIncGen)
+add_mlir_library(AscendModelIR
+  AscendModelDialect.cpp
+  AscendModelOps.cpp
 
-add_mlir_doc(AscendModelOps AscendModelOps AscendModel/ -gen-op-doc)
+  ADDITIONAL_HEADER_DIRS
+  ${PROJECT_SOURCE_DIR}/include/AscendModel/IR
+ 
+  DEPENDS
+  AscendModelOpsIncGen
+  AscendModelInterfacesIncGen
+ 
+  LINK_LIBS PUBLIC
+  MLIRIR
+  MLIRSupport
+  MLIRSideEffectInterfaces
+  MLIRInferTypeOpInterface
+)

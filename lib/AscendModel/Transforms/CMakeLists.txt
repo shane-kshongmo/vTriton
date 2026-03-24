@@ -6,6 +6,7 @@ add_mlir_library(AscendModelTransforms
   PipelineAnalysisPass.cpp
   PerfReportPass.cpp
   PassRegistration.cpp
+  TilingOptimizationPass.cpp
 
   DEPENDS
   AscendModelOpsIncGen
