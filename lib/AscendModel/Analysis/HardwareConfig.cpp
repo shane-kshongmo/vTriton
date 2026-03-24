@@ -747,7 +747,13 @@ double HardwareConfig::getVectorTFLOPS() const {
 }
 
 int HardwareConfig::getMTE2StartupLatency() const {
-  return 50;
+  // Calibrated: 320 cycles (was 50).
+  // Profiled aiv_mte2_time for BM=64 (1 AIV wave, 24 programs) is 2.78 μs
+  // ≈ 5 149 cycles per program.  With ~6 MTE2 bursts per program, the
+  // per-burst overhead is ~858 cycles, dominated by pipe_barrier fill rather
+  // than peak HBM bandwidth.  Using 320 cycles keeps the bandwidth term
+  // while significantly closing the gap on small-transfer latency.
+  return 320;
 }
 
 int HardwareConfig::getMTE3StartupLatency() const {
@@ -763,7 +769,37 @@ int HardwareConfig::getCubeStartupLatency() const {
 }
 
 int HardwareConfig::getVectorStartupLatency() const {
-  return 10;
+  // Calibrated: 35 cycles (was 10).
+  // Reflects UB read-after-write penalty between dependent vector instructions
+  // in a serial dependency chain (e.g., sub → exp → reduce in softmax).
+  return 35;
+}
+
+double HardwareConfig::getAIVScalarOverheadFactor() const {
+  // Calibrated from _attn_fwd profiling (BM=48/64 steady-state):
+  //   aiv_vec_ratio = 0.211  →  scalar+overhead fraction = 1 - 0.211 = 0.789
+  //   effective factor = (1 - vec_ratio) / vec_ratio = 0.789 / 0.211 ≈ 3.74
+  // Applying this to vec_cycles gives total_aiv_cycles that matches the
+  // observed aiv_time, capturing scalar (loop/barrier) + idle fractions.
+  return 3.74;
+}
+
+int HardwareConfig::getNumAICCores() const {
+  // Block Dim = 20 in profiling runs.
+  return 20;
+}
+
+int HardwareConfig::getNumAIVCores() const {
+  // Mix Block Dim = 40 → 40 AIV cores (2 per AIC block × 20 blocks).
+  return 40;
+}
+
+int HardwareConfig::getPipeBarrierCyclesPerIter() const {
+  // Calibrated from BM=64, 1-wave execution:
+  //   AIV wall time = 31.993 μs = 59 187 cycles
+  //   Active fraction (vec+scalar+mte) = 61.1% → idle = 38.9% = 23 044 cycles
+  //   With N_iter = 3 inner iterations → 23 044 / 3 ≈ 7 500 cycles per barrier.
+  return 7500;
 }
 
 const DataMover *HardwareConfig::getDataMover(llvm::StringRef name) const {

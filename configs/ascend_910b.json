@@ -180,5 +180,53 @@
       "formula": "bytes / bandwidth_per_cycle",
       "include_latency": true
     }
+  },
+
+  "calibration": {
+    "description": "Parameters calibrated from _attn_fwd (flash attention) profiling on Ascend 910B. Input: Z=1,H=8,N_CTX=192,HEAD_DIM=128. BLOCK_M in {16,32,48,64}, BLOCK_N=64 fixed. Hardware: Block Dim=20 (AIC) + 20 AIV = Mix Block Dim 40.",
+
+    "startup_latencies": {
+      "vector_startup_cycles": 35,
+      "mte2_startup_cycles": 320,
+      "mte3_startup_cycles": 40,
+      "cube_startup_cycles": 20,
+      "fixpipe_startup_cycles": 30,
+      "notes": "vector: was 10, increased to reflect UB read-after-write stall in serial dependency chains (sub->exp->reduce). mte2: was 50, increased to 320 to capture pipe_barrier fill latency on small HBM transfers."
+    },
+
+    "vector_op_cycles_per_vec_instruction": {
+      "exp": 9,
+      "log": 12,
+      "tanh": 18,
+      "sigmoid": 15,
+      "sqrt": 6,
+      "rsqrt": 6,
+      "div": 12,
+      "simple_ops_add_sub_mul_etc": 1,
+      "notes": "Transcendentals scaled 3x from hardware peak. Observed aiv_vec_time exceeded model by 3.3-5.3x (clean 1-wave cases BM=48/64 give 3.3-4.5x). Factor of 3x applied to cyclesPerVectorOp for exp/log/div while keeping simple ops at 1 to preserve their relative cost ratio."
+    },
+
+    "scalar_overhead": {
+      "aiv_scalar_to_vec_ratio_steady_state": 1.27,
+      "aic_scalar_to_mac_ratio_steady_state": 8.4,
+      "aiv_vec_ratio_observed": 0.211,
+      "aiv_scalar_overhead_factor": 3.74,
+      "description": "aiv_vec_ratio converges to 0.211 for BM>=48. Total AIV time = vec_time * (1/0.211) = vec_time * 4.74, equivalently vec_time * (1 + 3.74). Scalar fraction covers loop control, pointer arithmetic, and pipe_barrier sync between AIC and AIV. Completely absent from prior model."
+    },
+
+    "parallelism": {
+      "num_aic_cores": 20,
+      "num_aiv_cores": 40,
+      "description": "From profiling: Block Dim=20, Mix Block Dim=40 (2 AIV per AIC block)."
+    },
+
+    "pipe_barrier": {
+      "cycles_per_inner_iteration": 7500,
+      "description": "Calibrated from BM=64 (1 AIV wave, 24 programs). AIV wall time=31.993us=59187 cycles. Active fraction (vec+scalar+mte) sums to 61.1%, leaving 38.9% idle=23044 cycles. With N_iter=3 inner iterations per program: 23044/3 ~ 7500 cycles per pipe_barrier."
+    },
+
+    "wave_overhead": {
+      "description": "Observed aiv_time decreases monotonically with fewer AIV waves: BM=16(3 waves)->BM=32(2 waves)->BM=48(1 wave). BM=64 also 1 wave but with lower program count, making BM=48 and BM=64 near-equal (exception to the monotonic trend). The wave count multiplier N_waves=ceil(N_programs/N_AIV) is applied to per-program cycles to produce kernel-level time."
+    }
   }
 }

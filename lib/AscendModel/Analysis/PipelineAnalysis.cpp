@@ -228,6 +228,26 @@ bool PipelineScheduler::schedule() {
   return true;
 }
 
+int64_t PipelineScheduler::getKernelCycles(int64_t numPrograms,
+                                            int64_t numParallelUnits,
+                                            int64_t numInnerIters) const {
+  if (numPrograms <= 0 || numParallelUnits <= 0)
+    return totalCycles;
+
+  // Step 1: add pipe_barrier sync cost for the inner loop iterations.
+  int64_t barrierCycles = numInnerIters * hwConfig->getPipeBarrierCyclesPerIter();
+
+  // Step 2: apply scalar overhead factor (captures loop control, address
+  // arithmetic, and AIC↔AIV synchronisation bubbles).
+  double scalarFactor = hwConfig->getAIVScalarOverheadFactor();
+  int64_t perProgramCycles =
+      static_cast<int64_t>((totalCycles + barrierCycles) * (1.0 + scalarFactor));
+
+  // Step 3: multiply by number of waves (wave serialisation).
+  int64_t numWaves = (numPrograms + numParallelUnits - 1) / numParallelUnits;
+  return perProgramCycles * numWaves;
+}
+
 const HWUnitPipeline& PipelineScheduler::getPipeline(HWUnit unit) const {
   static HWUnitPipeline emptyPipeline(HWUnit::Scalar);
   auto it = pipelines.find(unit);
@@ -368,8 +388,17 @@ void PerformanceReport::print(llvm::raw_ostream &os) const {
   // Timing
   os << "║  Timing Summary                                              ║\n";
   os << llvm::format("║    Clock Frequency:       %8.2f GHz                       ║\n", clockFreqGHz);
-  os << llvm::format("║    Total Cycles:          %12ld                       ║\n", totalCycles);
+  os << llvm::format("║    Total Cycles (compute):%12ld                       ║\n", totalCycles);
   os << llvm::format("║    Estimated Time:        %12.3f μs                    ║\n", totalTimeUs);
+  if (kernelTotalCycles > 0) {
+    double kernelTimeUs = kernelTotalCycles / (clockFreqGHz * 1000.0);
+    os << llvm::format("║    Kernel Cycles (+ovhd): %12ld                       ║\n",
+                       kernelTotalCycles);
+    os << llvm::format("║    Kernel Time (+ovhd):   %12.3f μs                    ║\n",
+                       kernelTimeUs);
+    os << llvm::format("║    Num Waves:             %12ld                       ║\n",
+                       numWaves);
+  }
   
   os << "║                                                              ║\n";
   

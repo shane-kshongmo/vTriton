@@ -144,8 +144,20 @@ public:
   /// Get scheduled operations for a specific hardware unit.
   const HWUnitPipeline& getPipeline(HWUnit unit) const;
   
-  /// Get total execution time in cycles.
+  /// Get total execution time in cycles (single-program critical path,
+  /// no scalar overhead applied).
   int64_t getTotalCycles() const { return totalCycles; }
+
+  /// Get estimated kernel wall-clock cycles accounting for:
+  ///   1. Scalar overhead (loop control, pipe_barrier sync) via
+  ///      HardwareConfig::getAIVScalarOverheadFactor().
+  ///   2. Wave serialisation: ceil(numPrograms / numParallelUnits) waves.
+  ///
+  /// numPrograms  – total programs launched (e.g. Z*H*ceil(N_CTX/BLOCK_M)).
+  /// numParallelUnits – hardware cores executing in parallel (e.g. N_AIV).
+  /// numInnerIters – inner-loop iterations per program (for pipe_barrier cost).
+  int64_t getKernelCycles(int64_t numPrograms, int64_t numParallelUnits,
+                          int64_t numInnerIters = 0) const;
   
   /// Get all operations in scheduled order.
   const std::vector<PipelineOp>& getAllOps() const { return operations; }
@@ -189,8 +201,10 @@ struct PerformanceReport {
   double clockFreqGHz;
   
   // Timing information
-  int64_t totalCycles;
-  double totalTimeUs;
+  int64_t totalCycles;      // Critical-path cycles (single program, no overhead)
+  double totalTimeUs;       // Corresponding wall time
+  int64_t kernelTotalCycles = 0;  // With scalar overhead + wave serialisation
+  int64_t numWaves = 0;           // ceil(numPrograms / numParallelUnits)
   
   // Per-unit utilization
   std::map<HWUnit, double> unitUtilization;
