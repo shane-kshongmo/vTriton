@@ -537,12 +537,12 @@ struct ConvertArithBinaryOp : public RewritePattern {
                name == "arith.divui") {
       newOp = rewriter.create<DivOp>(loc, resultType, lhs, rhs,
                                      nullptr, nullptr);
-    } else if (name == "arith.maxnumf" || name == "arith.maxsi" ||
-               name == "arith.maxui") {
+    } else if (name == "arith.maxnumf" || name == "arith.maximumf" ||
+               name == "arith.maxsi" || name == "arith.maxui") {
       newOp = rewriter.create<MaxOp>(loc, resultType, lhs, rhs,
                                      nullptr, nullptr);
-    } else if (name == "arith.minnumf" || name == "arith.minsi" ||
-               name == "arith.minui") {
+    } else if (name == "arith.minnumf" || name == "arith.minimumf" ||
+               name == "arith.minsi" || name == "arith.minui") {
       newOp = rewriter.create<MinOp>(loc, resultType, lhs, rhs,
                                      nullptr, nullptr);
     } else {

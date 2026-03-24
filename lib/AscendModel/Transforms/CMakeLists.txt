@@ -21,6 +21,8 @@ add_mlir_library(AscendModelTransforms
   MLIRTransformUtils
   MLIRSCFDialect
   MLIRArithDialect
+  MLIRMathDialect
+  MLIRTensorDialect
 )
 
 # Conditionally link Triton dialect library and add dependency

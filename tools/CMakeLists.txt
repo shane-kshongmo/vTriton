@@ -30,6 +30,7 @@ target_link_libraries(tritonsim-opt
   MLIRSCFDialect
   MLIRArithDialect
   MLIRMathDialect
+  MLIRTensorDialect
   LLVMSupport
 )
 
