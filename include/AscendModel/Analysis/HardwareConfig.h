@@ -181,6 +181,26 @@ public:
   int getCubeStartupLatency() const;
   int getVectorStartupLatency() const;
 
+  // Calibrated overhead parameters (derived from profiling _attn_fwd,
+  // BLOCK_M={16,32,48,64} on Ascend 910B with 20 AIC + 20 AIV cores).
+  //
+  // Scalar overhead: loop control, pointer arithmetic, and pipe_barrier
+  // synchronisation account for 27-36% of AIV wall time and 42-48% of AIC
+  // wall time.  The factor below converts pure vector/MAC cycles to the
+  // estimated total path time: total_aiv ≈ vec_cycles * (1 + scalar_factor).
+  // Calibrated to aiv_vec_ratio = 0.211 in steady state → factor = 3.74.
+  double getAIVScalarOverheadFactor() const;
+
+  // Number of AIC / AIV execution cores per block.
+  // Profiling was run with Block Dim=20 (AIC) + 20 AIV = Mix Block Dim 40.
+  int getNumAICCores() const;
+  int getNumAIVCores() const;
+
+  // Cycles spent in pipe_barrier per inner-loop iteration (AIC↔AIV sync).
+  // Calibrated from the 39% idle fraction observed on AIV for BM=64, 1 wave:
+  // idle_cycles ≈ 23 000 cycles / 3 iterations ≈ 7 500 cycles per iteration.
+  int getPipeBarrierCyclesPerIter() const;
+
   // Data movers
   const DataMover *getDataMover(llvm::StringRef name) const;
   std::vector<std::string> getDataMoverNames() const;

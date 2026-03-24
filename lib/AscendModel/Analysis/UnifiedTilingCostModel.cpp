@@ -397,7 +397,17 @@ UnifiedTilingCostModel::computePipelineCost(
   } else {
     cost.cvBalance = 1.0;  // Only one unit used, "perfect" balance
   }
-  
+
+  // Apply scalar overhead factor.
+  // Profiling of _attn_fwd (flash attention) shows that scalar instructions
+  // (loop control, pointer arithmetic, pipe_barrier sync) account for 27–36%
+  // of AIV time and 42–48% of AIC time in steady state.  The factor converts
+  // the pure compute pipeline time into an estimate of total path time:
+  //   total ≈ pipelined_cycles * (1 + scalar_overhead_factor)
+  double scalarFactor = hwConfig.getAIVScalarOverheadFactor();
+  cost.pipelinedCycles =
+      static_cast<int64_t>(cost.pipelinedCycles * (1.0 + scalarFactor));
+
   return cost;
 }
 
@@ -541,9 +551,25 @@ CostBreakdown UnifiedTilingCostModel::evaluate(
       (2.0 * pipelineCost.pipelinedCycles) : 0.5;
   result.cvBalanceRatio = pipelineCost.cvBalance;
   
-  // 6. Final total cycles
+  // 6. Final total cycles (per-program, scalar overhead already included)
   result.totalCycles = pipelineCost.pipelinedCycles;
-  
+
+  // Wave serialisation: each wave runs ceil(numTiles / N_parallel) programs.
+  // For vector-bound kernels (flash attention, softmax) use N_AIV cores;
+  // for cube-bound kernels use N_AIC cores.  We pick the bottleneck side.
+  {
+    int64_t numParallelUnits = (result.vectorCycles >= result.cubeCycles)
+                                   ? hwConfig.getNumAIVCores()
+                                   : hwConfig.getNumAICCores();
+    int64_t numWaves =
+        (result.numTiles + numParallelUnits - 1) / numParallelUnits;
+    result.numPrograms = result.numTiles;
+    result.numParallelUnits = numParallelUnits;
+    result.numWaves = numWaves;
+    // Scale total cycles: the hardware serialises waves one after another.
+    result.totalCycles *= numWaves;
+  }
+
   // 7. Derived metrics
   int64_t flops = op.getTotalFlops();
   result.operationalIntensity = static_cast<double>(flops) / 

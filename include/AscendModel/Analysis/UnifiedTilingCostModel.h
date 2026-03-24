@@ -189,6 +189,14 @@ struct CostBreakdown {
   int64_t cyclesPerTile = 0;
   double cvBalanceRatio = 0.0;         // min(C,V) / max(C,V), 1.0 = perfect
   double memComputeRatio = 0.0;        // mem_cycles / compute_cycles
+
+  //=== Wave / Occupancy Metrics ===//
+  // Populated when the caller supplies numPrograms and numParallelUnits.
+  // numWaves = ceil(numPrograms / numParallelUnits).
+  // totalCycles already incorporates scalar overhead and wave serialisation.
+  int64_t numPrograms = 0;
+  int64_t numParallelUnits = 0;
+  int64_t numWaves = 0;
   
   //=== Final Cost ===//
   int64_t totalCycles = 0;             // Final estimated cycles

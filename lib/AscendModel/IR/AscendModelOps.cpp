@@ -207,10 +207,11 @@ IMPL_SIMPLE_VECTOR_BINARY(MinOp)
 int64_t DivOp::estimateCycles(const HardwareConfig &config) {
   int64_t n = getNumElementsFromType(getLhs().getType());
   int bits = getElementBitsFromType(getLhs().getType());
-  return estimateVectorCycles(n, 4, bits, config.getVectorStartupLatency());
+  // Calibrated: 12 cycles (was 4). Division is latency-limited on Ascend 910B.
+  return estimateVectorCycles(n, 12, bits, config.getVectorStartupLatency());
 }
 HWUnit DivOp::getHWUnit() { return HWUnit::Vector; }
-int DivOp::getCyclesPerVectorOp() { return 4; }
+int DivOp::getCyclesPerVectorOp() { return 12; }
 int64_t DivOp::getFlops() { return getNumElementsFromType(getLhs().getType()); }
 
 //===----------------------------------------------------------------------===//
@@ -270,17 +271,23 @@ IMPL_SIMPLE_VECTOR_UNARY(CastOp)
   int OpClass::getCyclesPerVectorOp() { return CyclesPerOp; }                    \
   int64_t OpClass::getFlops() { return getNumElementsFromType(getInput().getType()); }
 
-IMPL_COMPLEX_VECTOR_UNARY(SqrtOp, 2)
-IMPL_COMPLEX_VECTOR_UNARY(RsqrtOp, 2)
-// Differentiated transcendental costs for Ascend 910B Vector unit:
-// exp: 3 cycles (hardware-accelerated)
-// log: 4 cycles (iterative approximation)
-// tanh: 6 cycles (multiple exp operations internally)
-// sigmoid: 5 cycles (1/(1+exp(-x)), reuses exp hardware)
-IMPL_COMPLEX_VECTOR_UNARY(ExpOp, 3)
-IMPL_COMPLEX_VECTOR_UNARY(LogOp, 4)
-IMPL_COMPLEX_VECTOR_UNARY(TanhOp, 6)
-IMPL_COMPLEX_VECTOR_UNARY(SigmoidOp, 5)
+IMPL_COMPLEX_VECTOR_UNARY(SqrtOp, 6)
+IMPL_COMPLEX_VECTOR_UNARY(RsqrtOp, 6)
+// Calibrated transcendental costs for Ascend 910B Vector unit.
+// Profiling of _attn_fwd (flash attention) across BLOCK_M={16,32,48,64}
+// showed the model underestimated vector time by ~3-4x vs. observed aiv_vec_time.
+// Root cause: each vector instruction in a dependency chain stalls until the
+// previous result is written back to UB (read-after-write penalty), and the
+// Triton-Ascend compiler emits more instructions than the idealised model counts.
+// Calibration factor: 3x applied uniformly to all transcendental ops.
+// exp: 9 cycles  (was 3, hardware-accelerated but latency-limited in chains)
+// log: 12 cycles (was 4)
+// tanh: 18 cycles (was 6, internally uses multiple exp steps)
+// sigmoid: 15 cycles (was 5, 1/(1+exp(-x)))
+IMPL_COMPLEX_VECTOR_UNARY(ExpOp, 9)
+IMPL_COMPLEX_VECTOR_UNARY(LogOp, 12)
+IMPL_COMPLEX_VECTOR_UNARY(TanhOp, 18)
+IMPL_COMPLEX_VECTOR_UNARY(SigmoidOp, 15)
 
 #undef IMPL_COMPLEX_VECTOR_UNARY
 
