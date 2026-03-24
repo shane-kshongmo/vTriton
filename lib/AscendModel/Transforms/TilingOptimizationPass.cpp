@@ -860,9 +860,9 @@ struct TilingOptimizationPass
     bool hasVectorOps = false;
     
     module.walk([&](MatmulOp matmul) {
-      problemM = std::max(problemM, matmul.getM());
-      problemN = std::max(problemN, matmul.getN());
-      problemK = std::max(problemK, matmul.getK());
+      problemM = std::max(problemM, static_cast<int64_t>(matmul.getM()));
+      problemN = std::max(problemN, static_cast<int64_t>(matmul.getN()));
+      problemK = std::max(problemK, static_cast<int64_t>(matmul.getK()));
       
       // Get element type
       if (auto tensorType = dyn_cast<RankedTensorType>(matmul.getLhs().getType())) {
@@ -875,7 +875,7 @@ struct TilingOptimizationPass
     
     // Check if there are Vector operations (CV fusion candidate)
     module.walk([&](Operation *op) {
-      if (auto cycleOp = dyn_cast<CycleEstimatable>(op)) {
+      if (auto cycleOp = dyn_cast<EstimateCyclesOpInterface>(op)) {
         if (cycleOp.getHWUnit() == HWUnit::Vector) {
           hasVectorOps = true;
         }

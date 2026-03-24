@@ -619,8 +619,7 @@ public:
   
   void print(llvm::raw_ostream &os) const {
     os << "\n===== Pareto Frontier (Buffer Size vs Memory Accesses) =====\n";
-    os << llvm::format("%12s %15s %12s %8s\n", 
-                       "Buffer(KB)", "Accesses(MB)", "OI", "Reuse");
+    os << "  Buffer(KB)    Accesses(MB)           OI    Reuse\n";
     os << "-------------------------------------------------------------\n";
     
     // Sort by buffer size

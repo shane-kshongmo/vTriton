@@ -127,7 +127,7 @@ private:
 class PipelineScheduler {
 public:
   /// Construct with optional hardware config (uses default 910B if null).
-  PipelineScheduler(HardwareConfig *config = nullptr);
+  PipelineScheduler(const HardwareConfig *config = nullptr);
   
   /// Add an operation to be scheduled.
   void addOperation(PipelineOp op);
@@ -160,7 +160,7 @@ public:
   void printUtilizationReport(llvm::raw_ostream &os) const;
   
 private:
-  HardwareConfig *hwConfig;
+  const HardwareConfig *hwConfig;
   bool ownsConfig;
   
   std::vector<PipelineOp> operations;
@@ -251,7 +251,7 @@ public:
 private:
   const PipelineScheduler &scheduler;
   const HardwareConfig &config;
-  
+
   int64_t totalFLOPs;
   int64_t totalBytes;
   

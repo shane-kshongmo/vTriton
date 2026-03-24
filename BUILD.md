@@ -33,17 +33,33 @@
 
 ---
 
+## Step 0: 获取子模块
+ 
+所有外部依赖通过 git submodules 管理:
+ 
+```bash
+git submodule update --init --recursive
+```
+ 
+这会拉取 `thirdparty/llvm-project` (pinned at commit `b5cc222d`) 和 `thirdparty/triton-ascend`。
+ 
+---
+ 
 ## Step 1: 编译 LLVM/MLIR
 
-Triton-Ascend 指定了特定的 LLVM commit:
+使用仓库内置的构建脚本:
 
 ```bash
 export LLVM_INSTALL_PREFIX=$HOME/llvm-install  # 自定义安装路径
+./scripts/build_llvm.sh
+```
+ 
+或者手动编译 (submodule 已包含正确的 LLVM commit):
 
-git clone --no-checkout https://github.com/llvm/llvm-project.git
-cd llvm-project
-git checkout b5cc222d7429fe6f18c787f633d5262fac2e676f
+```bash
+export LLVM_INSTALL_PREFIX=$HOME/llvm-install
 
+cd thirdparty/llvm-project
 mkdir build && cd build
 cmake -G Ninja ../llvm \
   -DCMAKE_BUILD_TYPE=Release \
@@ -53,15 +69,18 @@ cmake -G Ninja ../llvm \
   -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX}
 
 ninja install
+cd ../../..
 ```
 
 ---
 
 ## Step 2: 编译 Triton-Ascend
 
+triton-ascend 已作为子模块位于 `thirdparty/triton-ascend`:
+
 ```bash
-git clone https://gitcode.com/Ascend/triton-ascend.git
-cd triton-ascend && git submodule update --init --depth 1
+cd thirdparty/triton-ascend
+git submodule update --init --depth 1
 
 LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} \
 TRITON_PLUGIN_DIRS=./ascend \
@@ -77,28 +96,29 @@ python3 setup.py develop
 ```bash
 export TRITON_BUILD_DIR=$(ls -d $PWD/python/build/cmake.* | head -1)
 echo "Triton build dir: $TRITON_BUILD_DIR"
+cd ../..
 ```
 
 ---
 
 ## Step 3: 编译 TritonSim
 
-### 方式 A: 启用 Triton 支持
+### 方式 A: 启用 Triton 支持 (子模块自动发现)
 
 ```bash
-cd TritonSim
 mkdir build && cd build
 
 cmake -G Ninja .. \
   -DCMAKE_BUILD_TYPE=Release \
   -DMLIR_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/mlir \
   -DLLVM_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/llvm \
-  -DTRITON_SRC_DIR=$HOME/triton-ascend \
   -DTRITON_BUILD_DIR=${TRITON_BUILD_DIR}
 
 ninja
 ```
 
+> CMake 会自动从 `thirdparty/triton-ascend` 发现 Triton 源码。如需指定外部路径，可传 `-DTRITON_SRC_DIR=<path>`。
+ 
 ### 方式 B: 不启用 Triton
 
 ```bash

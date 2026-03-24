@@ -51,7 +51,12 @@ add_definitions(${LLVM_DEFINITIONS})
 
 option(TRITONSIM_ENABLE_TRITON "Enable Triton dialect support" ON)
 
-set(TRITON_SRC_DIR "" CACHE PATH "Path to triton-ascend source root")
+# Default to submodule path if not explicitly set
+set(_default_triton_src "")
+if(EXISTS "${PROJECT_SOURCE_DIR}/thirdparty/triton-ascend/CMakeLists.txt")
+  set(_default_triton_src "${PROJECT_SOURCE_DIR}/thirdparty/triton-ascend")
+endif()
+set(TRITON_SRC_DIR "${_default_triton_src}" CACHE PATH "Path to triton-ascend source root")
 set(TRITON_BUILD_DIR "" CACHE PATH
     "Path to triton CMake build dir (optional, reuses generated .inc files)")
 

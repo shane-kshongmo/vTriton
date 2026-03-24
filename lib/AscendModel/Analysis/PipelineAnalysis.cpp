@@ -133,11 +133,11 @@ bool DependencyGraph::hasCycle() const {
 // PipelineScheduler Implementation
 //===----------------------------------------------------------------------===//
 
-PipelineScheduler::PipelineScheduler(HardwareConfig *config)
+PipelineScheduler::PipelineScheduler(const HardwareConfig *config)
     : hwConfig(config), ownsConfig(false), totalCycles(0) {
   if (!hwConfig) {
     // Use global config or create default
-    hwConfig = &getHardwareConfig();
+    hwConfig = static_cast<const HardwareConfig*>(&getHardwareConfig());
   }
   initPipelines();
 }
@@ -273,9 +273,9 @@ void PipelineScheduler::printTimeline(llvm::raw_ostream &os) const {
     std::string hwUnitStr = stringifyHWUnit(op->hwUnit).str();
     hwUnitStr.resize(10, ' ');
     
-    os << llvm::format("│ %6ld │ %s │ %s │ %12ld │ %12ld │\n",
-                       op->opId, opName.c_str(), hwUnitStr.c_str(),
-                       op->startCycle, op->endCycle);
+    os << "| " << llvm::format("%6ld", op->opId) << " | " << opName
+       << " | " << hwUnitStr << " | " << llvm::format("%12ld", op->startCycle)
+       << " | " << llvm::format("%12ld", op->endCycle) << " |\n";
   }
   
   os << "└────────┴──────────────────────┴────────────┴──────────────┴──────────────┘\n";
@@ -290,7 +290,7 @@ void PipelineScheduler::printUtilizationReport(llvm::raw_ostream &os) const {
   os << "All units can execute in parallel (fully pipelined)\n\n";
   
   // Group by path for clarity
-  os << "Cube Path (HBM → L1 → L0A/B → Cube → L0C → HBM):\n";
+  os << "Cube Path (HBM -> L1 -> L0A/B -> Cube -> L0C -> HBM):\n";
   for (HWUnit unit : {HWUnit::CubeMTE2, HWUnit::Cube, HWUnit::FixPipe}) {
     auto it = pipelines.find(unit);
     if (it == pipelines.end()) continue;
@@ -303,31 +303,33 @@ void PipelineScheduler::printUtilizationReport(llvm::raw_ostream &os) const {
       unitStr.resize(12, ' ');
       
       int barWidth = static_cast<int>(utilization / 5);
-      std::string bar(barWidth, '█');
-      bar.resize(20, '░');
-      
-      os << llvm::format("  %s [%s] %6.2f%% (%ld cycles)\n",
-                         unitStr.c_str(), bar.c_str(), utilization, busyCycles);
+      std::string bar(barWidth, '#');
+      bar.resize(20, '-');
+ 
+      os << "  " << unitStr << " [" << bar << "] "
+         << llvm::format("%6.2f", utilization) << "% ("
+         << busyCycles << " cycles)\n";
     }
   }
   
-  os << "\nVector Path (HBM → UB → Vector → UB → HBM):\n";
+   os << "\nVector Path (HBM -> UB -> Vector -> UB -> HBM):\n";
   for (HWUnit unit : {HWUnit::VecMTE2, HWUnit::Vector, HWUnit::MTE3}) {
     auto it = pipelines.find(unit);
     if (it == pipelines.end()) continue;
-    
+
     const auto &pipeline = it->second;
     int64_t busyCycles = pipeline.getTotalBusyCycles();
     double utilization = pipeline.getUtilization(totalCycles);
     std::string unitStr = stringifyHWUnit(unit).str();
     unitStr.resize(12, ' ');
-    
+
     int barWidth = static_cast<int>(utilization / 5);
-    std::string bar(barWidth, '█');
-    bar.resize(20, '░');
-    
-    os << llvm::format("  %s [%s] %6.2f%% (%ld cycles)\n",
-                       unitStr.c_str(), bar.c_str(), utilization, busyCycles);
+    std::string bar(barWidth, '#');
+    bar.resize(20, '-');
+ 
+    os << "  " << unitStr << " [" << bar << "] "
+       << llvm::format("%6.2f", utilization) << "% ("
+       << busyCycles << " cycles)\n";
   }
   
   // Find bottleneck (unit with highest utilization)
@@ -391,8 +393,8 @@ void PerformanceReport::print(llvm::raw_ostream &os) const {
       unitStr.resize(12, ' ');
       
       int barWidth = static_cast<int>(util / 5);
-      std::string bar(barWidth, '█');
-      bar.resize(20, '░');
+      std::string bar(barWidth, '#');
+      bar.resize(20, '-');
       
       os << "║    " << unitStr << " [" << bar << "] " 
          << llvm::format("%5.1f%%", util) << "         ║\n";

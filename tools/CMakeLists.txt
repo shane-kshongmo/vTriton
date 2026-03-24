@@ -19,13 +19,17 @@ target_link_libraries(tritonsim-opt
   AscendModelIR
   AscendModelTransforms
   AscendModelAnalysis
-  
+
   MLIROptLib
   MLIRIR
   MLIRParser
   MLIRPass
   MLIRSupport
   MLIRTransforms
+  MLIRFuncDialect
+  MLIRSCFDialect
+  MLIRArithDialect
+  MLIRMathDialect
   LLVMSupport
 )
 
@@ -46,11 +50,19 @@ add_llvm_executable(ascend-tiling-opt
 target_link_libraries(ascend-tiling-opt
   PRIVATE
   AscendModelIR
+  AscendModelTransforms
   AscendModelAnalysis
-  
+
+  MLIROptLib
   MLIRIR
+  MLIRParser
+  MLIRPass
   MLIRSupport
-  LLVMSupport
+  MLIRTransforms
+  MLIRFuncDialect
+  MLIRSCFDialect
+  MLIRArithDialect
+  MLIRMathDialect
 )
 
 mlir_check_all_link_libraries(ascend-tiling-opt)
