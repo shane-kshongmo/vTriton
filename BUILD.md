@@ -151,21 +151,56 @@ TritonSim 支持通过 JSON 配置文件定义目标硬件:
 
 ## 使用示例
 
-```bash
-# 完整 pipeline
-./bin/tritonsim-opt test/softmax.ttir \
-  --hardware-config=configs/ascend_910b.json \
-  -convert-triton-to-ascend \
-  -assign-op-ids \
-  -estimate-cycles \
-  -analyze-pipeline \
-  -perf-report
+### AscendModel dialect (.mlir) — 方式A/B 均可
 
-# 仅分析 ascend dialect
+```bash
+# 完整 pipeline (推荐, 使用内置 910B 配置)
+./bin/tritonsim-opt test/ascend_ops.mlir -ascend-perf-model
+
+# 自定义硬件配置 (选项传入 pipeline，不是全局 flag)
 ./bin/tritonsim-opt test/ascend_ops.mlir \
-  --hardware-config=configs/ascend_910b.json \
+  -ascend-perf-model="hardware-config=configs/ascend_910b.json"
+
+# 分步执行各 pass
+./bin/tritonsim-opt test/ascend_ops.mlir \
   -assign-op-ids \
   -estimate-cycles \
   -analyze-pipeline \
   -perf-report
+```
+
+### Triton IR (.ttir) — 方式A (启用 Triton 支持)
+
+```bash
+# tritonsim-opt 直接接受 .ttir (tt dialect 已注册)
+./bin/tritonsim-opt kernel.ttir -ascend-perf-model
+```
+
+### Triton IR (.ttir) — 方式B (未启用 Triton 支持)
+
+方式B 构建不包含 `tt` dialect，需先用 triton-ascend 的 `triton-opt` 将 `.ttir`
+转为通用 MLIR generic 格式，再传入 `tritonsim-opt`:
+
+```bash
+# 设置 triton-opt 路径 (来自 triton-ascend 构建)
+TRITON_OPT=$(ls -d /path/to/triton-ascend/python/build/cmake.*/bin/triton-opt)
+
+# 两阶段 pipeline
+$TRITON_OPT kernel.ttir \
+  --allow-unregistered-dialect --mlir-print-op-generic | \
+./bin/tritonsim-opt - \
+  --allow-unregistered-dialect \
+  -ascend-perf-model="loop-trip-counts=<N>"
+```
+
+`loop-trip-counts=N` 指定 kernel 主循环的实际迭代次数 (运行时值)。
+
+**示例: 分析 Flash Attention dump**
+
+```bash
+$TRITON_OPT triton_dumps_fa/<hash>/_attn_fwd.ttir \
+  --allow-unregistered-dialect --mlir-print-op-generic | \
+./bin/tritonsim-opt - \
+  --allow-unregistered-dialect \
+  -ascend-perf-model='loop-trip-counts=1'
 ```
