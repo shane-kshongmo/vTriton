@@ -1,0 +1,12 @@
+node_modules/
+vendor/
+dist/
+build/
+*.min.js
+*.bundle.js
+package-lock.json
+*.log
+tmp/
+.idea/
+*.csv
+data/fixtures/

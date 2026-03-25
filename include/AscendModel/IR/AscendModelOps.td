@@ -52,14 +52,14 @@ def Ascend_CubeLoadOp : AscendModel_Op<"cube_load", [DeclareOpInterfaceMethods<E
   }];
   
   let arguments = (ins
-    AnyTensor:$source,
+    AnyType:$source,
     I64Attr:$bytes,
     OptionalAttr<I64Attr>:$estimated_cycles,
     OptionalAttr<I64Attr>:$op_id
   );
-  
-  let results = (outs AnyTensor:$result);
-  
+
+  let results = (outs AnyType:$result);
+
   let assemblyFormat = [{
     $source attr-dict `:` type($source) `->` type($result)
   }];
@@ -70,16 +70,16 @@ def Ascend_CubeStoreOp : AscendModel_Op<"cube_store", [DeclareOpInterfaceMethods
   let description = [{
     Stores Cube Core computation results to memory via FixPipe.
   }];
-  
+
   let arguments = (ins
-    AnyTensor:$data,
+    AnyType:$data,
     I64Attr:$bytes,
     OptionalAttr<I64Attr>:$estimated_cycles,
     OptionalAttr<I64Attr>:$op_id
   );
-  
+
   let results = (outs);
-  
+
   let assemblyFormat = [{
     $data attr-dict `:` type($data)
   }];
@@ -90,16 +90,16 @@ def Ascend_VectorLoadOp : AscendModel_Op<"vector_load", [DeclareOpInterfaceMetho
   let description = [{
     Loads tensor data for Vector Core operations via dedicated MTE2.
   }];
-  
+
   let arguments = (ins
-    AnyTensor:$source,
+    AnyType:$source,
     I64Attr:$bytes,
     OptionalAttr<I64Attr>:$estimated_cycles,
     OptionalAttr<I64Attr>:$op_id
   );
-  
-  let results = (outs AnyTensor:$result);
-  
+
+  let results = (outs AnyType:$result);
+
   let assemblyFormat = [{
     $source attr-dict `:` type($source) `->` type($result)
   }];
@@ -110,9 +110,9 @@ def Ascend_VectorStoreOp : AscendModel_Op<"vector_store", [DeclareOpInterfaceMet
   let description = [{
     Stores Vector Core computation results to memory via MTE3.
   }];
-  
+
   let arguments = (ins
-    AnyTensor:$data,
+    AnyType:$data,
     I64Attr:$bytes,
     OptionalAttr<I64Attr>:$estimated_cycles,
     OptionalAttr<I64Attr>:$op_id
@@ -334,8 +334,8 @@ class Ascend_ReduceOp<string mnemonic>
     OptionalAttr<I64Attr>:$op_id
   );
   
-  let results = (outs AnyTensor:$result);
-  
+  let results = (outs AnyType:$result);
+
   let assemblyFormat = [{
     $input `axis` $axis attr-dict `:` type($input) `->` type($result)
   }];
