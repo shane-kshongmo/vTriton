@@ -1,0 +1,3 @@
+[submodule "thirdparty/triton-ascend"]
+	path = thirdparty/triton-ascend
+	url = https://github.com/shane-kshongmo/Trtiton-Ascend
