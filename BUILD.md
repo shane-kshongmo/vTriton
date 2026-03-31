@@ -42,6 +42,9 @@ git submodule update --init --recursive
 ```
  
 这会拉取 `thirdparty/llvm-project` (pinned at commit `b5cc222d`) 和 `thirdparty/triton-ascend`。
+
+当前 `thirdparty/triton-ascend` 绑定到 mocked 仓库
+`https://github.com/shane-kshongmo/Trtiton-Ascend`，也是 CMake 默认自动发现的 Triton 源码路径。
  
 ---
  
@@ -76,7 +79,8 @@ cd ../../..
 
 ## Step 2: 编译 Triton-Ascend
 
-triton-ascend 已作为子模块位于 `thirdparty/triton-ascend`:
+triton-ascend 已作为子模块位于 `thirdparty/triton-ascend`。如果未做额外覆盖，
+下面命令会直接使用该 mocked 子模块源码:
 
 ```bash
 cd thirdparty/triton-ascend
