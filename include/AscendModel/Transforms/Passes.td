@@ -138,6 +138,41 @@ def PipelineAnalysisPass : Pass<"analyze-pipeline", "ModuleOp"> {
 }
 
 //===----------------------------------------------------------------------===//
+// HIVMAnalysis
+//===----------------------------------------------------------------------===//
+
+def HIVMAnalysisPass : Pass<"analyze-hivm", "ModuleOp"> {
+  let summary = "Analyze native HIVM IR scheduling and synchronization";
+  let description = [{
+    This pass runs the HIVM-native scheduler directly on parsed HIVM IR.
+    It expects `hivm.hir.*` ops to be available as native MLIR ops, and
+    reports per-pipe utilization, sync costs, and critical-path timing.
+
+    Example:
+      tritonsim-opt --analyze-hivm input.npuir.mlir
+      tritonsim-opt --analyze-hivm="hardware-config=configs/ascend_910b.json arg-bindings=arg10=128" input.npuir.mlir
+  }];
+
+  let options = [
+    Option<"schedulerMode", "scheduler", "std::string",
+           /*default=*/"\"static\"",
+           "Scheduler backend: static or des">,
+    Option<"argBindingsStr", "arg-bindings", "std::string",
+           /*default=*/"\"\"",
+           "Bindings for dynamic HIVM values (e.g., 'arg10=128,arg11=64')">,
+    Option<"hardwareConfigPath", "hardware-config", "std::string",
+           /*default=*/"\"\"",
+           "Path to hardware configuration JSON file">,
+    Option<"reportFile", "report-file", "std::string",
+           /*default=*/"\"\"",
+           "Optional file to write the textual HIVM report to">,
+    Option<"perfettoTraceFile", "perfetto-trace-file", "std::string",
+           /*default=*/"\"\"",
+           "Optional Perfetto-compatible JSON trace output file">
+  ];
+}
+
+//===----------------------------------------------------------------------===//
 // PerfReport
 //===----------------------------------------------------------------------===//
 def PerfReportPass : Pass<"perf-report", "ModuleOp"> {

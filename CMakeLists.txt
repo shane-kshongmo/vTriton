@@ -50,6 +50,9 @@ add_definitions(${LLVM_DEFINITIONS})
 #===----------------------------------------------------------------------===//
 
 option(TRITONSIM_ENABLE_TRITON "Enable Triton dialect support" ON)
+option(TRITONSIM_ENABLE_BISHENGIR_HIVM
+  "Enable typed BiShengIR HIVM dialect ingestion when local triton-ascend artifacts are available"
+  ON)
 
 # Default to submodule path if not explicitly set
 set(_default_triton_src "")
@@ -112,6 +115,88 @@ endif()
 message(STATUS "TRITONSIM_HAS_TRITON: ${TRITONSIM_HAS_TRITON}")
 
 #===----------------------------------------------------------------------===//
+# Optional BiShengIR HIVM integration
+#===----------------------------------------------------------------------===//
+
+set(TRITONSIM_HAS_BISHENGIR_HIVM OFF)
+set(TRITONSIM_BISHENGIR_INCLUDE_DIRS "")
+set(TRITONSIM_BISHENGIR_HIVM_LIBS "")
+
+set(_default_bishengir_src "")
+if(EXISTS "/mnt/d/work/git/triton-ascend/third_party/ascend/AscendNPU-IR/bishengir/include/bishengir/Dialect/HIVM/IR/HIVM.h")
+  set(_default_bishengir_src
+      "/mnt/d/work/git/triton-ascend/third_party/ascend/AscendNPU-IR/bishengir")
+endif()
+
+set(_default_bishengir_build "")
+if(EXISTS "/mnt/d/work/git/triton-ascend/python/build/cmake.linux-x86_64-cpython-3.12/third_party/ascend/AscendNPU-IR/bishengir/lib/Dialect/HIVM/IR/libBiShengIRHIVMDialect.a")
+  set(_default_bishengir_build
+      "/mnt/d/work/git/triton-ascend/python/build/cmake.linux-x86_64-cpython-3.12/third_party/ascend/AscendNPU-IR/bishengir")
+endif()
+
+set(TRITONSIM_BISHENGIR_SRC_DIR "${_default_bishengir_src}" CACHE PATH
+    "Path to BiShengIR source root (contains include/bishengir/...)")
+set(TRITONSIM_BISHENGIR_BUILD_DIR "${_default_bishengir_build}" CACHE PATH
+    "Path to BiShengIR build root (contains generated include/bishengir/... and lib/...)")
+
+if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
+  set(_bishengir_src_inc "${TRITONSIM_BISHENGIR_SRC_DIR}/include")
+  set(_bishengir_build_inc "${TRITONSIM_BISHENGIR_BUILD_DIR}/include")
+  set(_bishengir_hivm_lib
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/HIVM/IR/libBiShengIRHIVMDialect.a")
+
+  if(EXISTS "${_bishengir_src_inc}/bishengir/Dialect/HIVM/IR/HIVM.h" AND
+     EXISTS "${_bishengir_build_inc}/bishengir/Dialect/HIVM/IR/HIVMOps.h.inc" AND
+     EXISTS "${_bishengir_hivm_lib}")
+    file(GLOB_RECURSE _bishengir_all_libs
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/libBiShengIR*.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/**/*.a")
+    list(SORT _bishengir_all_libs)
+    set(_bishengir_preferred_libs
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/HIVM/IR/libBiShengIRHIVMDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/HIVM/Utils/libBiShengIRHIVMUtils.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/HACC/IR/libBiShengIRHACCDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/HACC/Utils/libBiShengIRHACCUtils.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/Annotation/IR/libBiShengIRAnnotationDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/HFusion/IR/libBiShengIRHFusionDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/MemRef/IR/libBiShengIRMemRefDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/MemRefExt/IR/libBiShengIRMemRefExtDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/Tensor/IR/libBiShengIRTensorDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/Scope/IR/libBiShengIRScopeDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/Symbol/IR/libBiShengIRSymbolDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/Math/IR/libBiShengIRMathExtDialect.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/Utils/libBiShengIRDialectUtils.a"
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/Dialect/HACC/Transforms/libBiShengIRHACCTransforms.a")
+    set(TRITONSIM_BISHENGIR_HIVM_LIBS "")
+    foreach(_lib IN LISTS _bishengir_preferred_libs)
+      if(EXISTS "${_lib}")
+        list(APPEND TRITONSIM_BISHENGIR_HIVM_LIBS "${_lib}")
+        list(REMOVE_ITEM _bishengir_all_libs "${_lib}")
+      endif()
+    endforeach()
+    list(APPEND TRITONSIM_BISHENGIR_HIVM_LIBS ${_bishengir_all_libs})
+    list(APPEND TRITONSIM_BISHENGIR_HIVM_LIBS ${TRITONSIM_BISHENGIR_HIVM_LIBS})
+    set(TRITONSIM_BISHENGIR_INCLUDE_DIRS
+      "${_bishengir_src_inc}"
+      "${_bishengir_build_inc}")
+    set(TRITONSIM_HAS_BISHENGIR_HIVM ON)
+    include_directories(${TRITONSIM_BISHENGIR_INCLUDE_DIRS})
+    add_definitions(-DTRITONSIM_HAS_BISHENGIR_HIVM=1)
+    message(STATUS "=== BiShengIR HIVM integration ENABLED ===")
+    message(STATUS "BiShengIR source: ${TRITONSIM_BISHENGIR_SRC_DIR}")
+    message(STATUS "BiShengIR build:  ${TRITONSIM_BISHENGIR_BUILD_DIR}")
+  else()
+    message(STATUS
+      "BiShengIR HIVM support requested but local headers/libs were not found.\n"
+      "Looked for:\n"
+      "  ${_bishengir_src_inc}/bishengir/Dialect/HIVM/IR/HIVM.h\n"
+      "  ${_bishengir_build_inc}/bishengir/Dialect/HIVM/IR/HIVMOps.h.inc\n"
+      "  ${_bishengir_hivm_lib}\n"
+      "Continuing with generic/unregistered HIVM parsing.")
+  endif()
+endif()
+
+#===----------------------------------------------------------------------===//
 # Ascend910B Hardware Parameters
 #===----------------------------------------------------------------------===//
 
@@ -160,6 +245,7 @@ message(STATUS "")
 message(STATUS "======= AscendPerfModel Build Summary =======")
 message(STATUS "  LLVM version:     ${LLVM_PACKAGE_VERSION}")
 message(STATUS "  Triton support:   ${TRITONSIM_HAS_TRITON}")
+message(STATUS "  BiShengIR HIVM:   ${TRITONSIM_HAS_BISHENGIR_HIVM}")
 message(STATUS "  Build type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "=============================================")
 message(STATUS "")

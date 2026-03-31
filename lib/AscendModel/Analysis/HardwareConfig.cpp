@@ -816,6 +816,47 @@ std::vector<std::string> HardwareConfig::getDataMoverNames() const {
 }
 
 //===----------------------------------------------------------------------===//
+// Performance Estimation
+//===----------------------------------------------------------------------===//
+
+int64_t HardwareConfig::estimateCubeCycles(int64_t M, int64_t N, int64_t K) const {
+  int tileM = 16;
+  int tileN = 16;
+  int tileK = 16;
+  getCubeTileSize(tileM, tileN, tileK);
+  auto ceilDiv = [](int64_t a, int64_t b) -> int64_t {
+    return b > 0 ? (a + b - 1) / b : 0;
+  };
+  return std::max<int64_t>(1, ceilDiv(M, tileM) * ceilDiv(N, tileN) * ceilDiv(K, tileK));
+}
+
+int64_t HardwareConfig::estimateVectorCycles(int64_t numElements) const {
+  int width = getVectorWidthElements();
+  if (width <= 0)
+    return std::max<int64_t>(1, numElements);
+  return std::max<int64_t>(1, (numElements + width - 1) / width);
+}
+
+int64_t HardwareConfig::estimateMemoryCycles(llvm::StringRef moverName,
+                                             int64_t bytes) const {
+  const DataMover *mover = getDataMover(moverName);
+  if (!mover || mover->bandwidthBytesPerCycle <= 0.0)
+    return std::max<int64_t>(1, bytes);
+  return std::max<int64_t>(
+      1, static_cast<int64_t>(std::ceil(bytes / mover->bandwidthBytesPerCycle)));
+}
+
+int64_t HardwareConfig::estimateMemoryCyclesWithLatency(llvm::StringRef space,
+                                                        int64_t bytes) const {
+  const MemorySpace *mem = getMemorySpace(space);
+  if (!mem || mem->bandwidthBytesPerCycle <= 0.0)
+    return std::max<int64_t>(1, bytes);
+  return std::max<int64_t>(
+      1, mem->latencyCycles +
+             static_cast<int64_t>(std::ceil(bytes / mem->bandwidthBytesPerCycle)));
+}
+
+//===----------------------------------------------------------------------===//
 // Pipeline
 //===----------------------------------------------------------------------===//
 
