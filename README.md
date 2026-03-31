@@ -56,6 +56,76 @@ ninja
   -ascend-perf-model="hardware-config=configs/ascend_910b.json"
 ```
 
+### 直接分析 HIVM IR (.npuir.mlir)
+
+新增的 `tritonsim-hivm` 工具直接消费 `triton-ascend` 转储出的
+`kernel.npuir.mlir`，基于显式的 `set_flag` / `wait_flag` /
+`pipe_barrier` 和 pipe 资源做调度分析。分析器优先走 MLIR 解析路径，
+若本机存在 `triton-ascend` 已构建出的 BiShengIR HIVM dialect 头文件与静态库，
+会优先按真实 `hivm.hir.*` typed op 解析 `sync_block_*`、DMA、macro op 和
+pipe/core attrs；遇到当前本地仍未注册的 HIVM 语法时才回退到兼容导入器。
+
+```bash
+./bin/tritonsim-hivm --npuir-file test/hivm_add_kernel.npuir.mlir
+./bin/tritonsim-hivm --npuir-file test/hivm_mixed_cv_kernel.npuir.mlir
+./bin/tritonsim-hivm \
+  --npuir-file test/hivm_add_kernel.npuir.mlir \
+  --perfetto-trace-file /tmp/hivm_add_trace.json
+```
+
+### 从 Triton DSL 生成 HIVM IR 并分析
+
+`tritonsim-hivm` 也可以可选地调用 `triton-ascend` 的 compile-only
+dump 流程。该模式依赖可工作的 Python + triton-ascend 环境，以及本机可用
+的 CANN 工具链。
+
+```bash
+./bin/tritonsim-hivm \
+  --triton-script test/triton_smoke.py \
+  --python /mnt/c/Users/shane/bin/python
+```
+
+可通过 `--script-arg <arg>` 透传脚本参数；若 HIVM 中存在动态 loop bound，
+可通过 `--arg-bindings=arg10=128,arg11=64` 为分析器提供绑定。若需要时序可视化，
+可追加 `--perfetto-trace-file /path/to/trace.json`，输出可直接导入 Perfetto /
+Chrome trace viewer 的事件文件。
+
+若环境不完整，工具会在真正执行脚本前做 preflight，并明确提示
+`triton` / `torch` / `torch_npu` 依赖缺失，而不是只返回笼统的 Python 失败。
+运行时会自动:
+
+- 为 compile-only 模式注入 `TORCH_DEVICE_BACKEND_AUTOLOAD=0`
+- 设置默认 `TRITON_ASCEND_ARCH=Ascend910_9599`
+- 将 Triton cache 重定向到临时目录，避免污染或依赖用户目录权限
+- 尝试从常见安装路径探测 CANN，并补齐 `ASCEND_HOME_PATH` / `PATH` / `LD_LIBRARY_PATH`
+
+`--triton-ascend-root` 仍然保留为兼容选项，但当前 DSL 路径优先使用已安装
+的 `triton-ascend` wheel，而不是直接从源码树导入 Python 包，以避免 source tree
+shadowing。
+
+### 以 MLIR Pass 方式分析 HIVM IR
+
+`HIVMAnalysis` 现在也作为 `tritonsim-opt` 的原生 `ModuleOp` pass 提供，可直接对
+已解析的 HIVM IR 运行调度与同步分析，而不是先走文本扫描器。
+当前模型已将 Vector 与 Cube 侧的 `MTE2` 资源拆分为独立资源
+`PIPE_MTE2_V` 与 `PIPE_MTE2_C`，避免把两侧 DMA 错误地建模成同一条共享 pipe。
+
+```bash
+./build/bin/tritonsim-opt --analyze-hivm test/hivm_mixed_cv_kernel.npuir.mlir
+./build/bin/tritonsim-opt \
+  --analyze-hivm="scheduler=des hardware-config=configs/ascend_910b.json arg-bindings=arg10=128 perfetto-trace-file=/tmp/hivm_trace.json" \
+  /path/to/kernel.npuir.mlir
+```
+
+若 `.npuir.mlir` 中包含非 MLIR 内容，例如某些编译转储在文件尾部直接拼接了
+LLVM warning 文本，`mlir-opt` 会在 pass 执行前就解析失败。这种情况下需要先清洗
+输入文件，只保留合法 MLIR 模块内容，例如：
+
+```bash
+sed '/^warning: /,$d' raw.kernel.npuir.mlir > clean.kernel.npuir.mlir
+./build/bin/tritonsim-opt -allow-unregistered-dialect --analyze-hivm clean.kernel.npuir.mlir
+```
+
 ### 分析 Triton IR (.ttir)
 
 **方式 A: 启用 Triton 支持构建 (详见 BUILD.md 方式A)**

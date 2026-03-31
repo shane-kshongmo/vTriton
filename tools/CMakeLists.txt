@@ -41,6 +41,28 @@ endif()
 mlir_check_all_link_libraries(tritonsim-opt)
 
 #===----------------------------------------------------------------------===//
+# tritonsim-hivm - HIVM-based Performance Modeling Tool
+#===----------------------------------------------------------------------===//
+
+add_llvm_executable(tritonsim-hivm
+  tritonsim-hivm/tritonsim-hivm.cpp
+)
+
+target_link_libraries(tritonsim-hivm
+  PRIVATE
+  AscendModelAnalysis
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRIR
+  MLIRParser
+  MLIRSCFDialect
+  MLIRSupport
+  LLVMSupport
+)
+
+mlir_check_all_link_libraries(tritonsim-hivm)
+
+#===----------------------------------------------------------------------===//
 # ascend-tiling-opt - Tiling Optimization Tool
 #===----------------------------------------------------------------------===//
 
@@ -72,6 +94,6 @@ mlir_check_all_link_libraries(ascend-tiling-opt)
 # Install
 #===----------------------------------------------------------------------===//
 
-install(TARGETS tritonsim-opt ascend-tiling-opt
+install(TARGETS tritonsim-opt tritonsim-hivm ascend-tiling-opt
   RUNTIME DESTINATION bin
 )
