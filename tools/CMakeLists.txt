@@ -6,39 +6,44 @@
 # - ascend-tiling-opt: Tiling optimization (finds optimal tile configurations)
 #===----------------------------------------------------------------------===//
 
+set(_installed_tools tritonsim-hivm)
+
 #===----------------------------------------------------------------------===//
 # tritonsim-opt - Performance Modeling Tool
 #===----------------------------------------------------------------------===//
 
-add_llvm_executable(tritonsim-opt
-  tritonsim-opt/tritonsim-opt.cpp
-)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tritonsim-opt/tritonsim-opt.cpp")
+  add_llvm_executable(tritonsim-opt
+    tritonsim-opt/tritonsim-opt.cpp
+  )
 
-target_link_libraries(tritonsim-opt
-  PRIVATE
-  AscendModelIR
-  AscendModelTransforms
-  AscendModelAnalysis
+  target_link_libraries(tritonsim-opt
+    PRIVATE
+    AscendModelIR
+    AscendModelTransforms
+    AscendModelAnalysis
 
-  MLIROptLib
-  MLIRIR
-  MLIRParser
-  MLIRPass
-  MLIRSupport
-  MLIRTransforms
-  MLIRFuncDialect
-  MLIRSCFDialect
-  MLIRArithDialect
-  MLIRMathDialect
-  MLIRTensorDialect
-  LLVMSupport
-)
+    MLIROptLib
+    MLIRIR
+    MLIRParser
+    MLIRPass
+    MLIRSupport
+    MLIRTransforms
+    MLIRFuncDialect
+    MLIRSCFDialect
+    MLIRArithDialect
+    MLIRMathDialect
+    MLIRTensorDialect
+    LLVMSupport
+  )
 
-if(TRITONSIM_HAS_TRITON)
-  target_link_libraries(tritonsim-opt PRIVATE ${TRITON_DIALECT_LIB})
+  if(TRITONSIM_HAS_TRITON)
+    target_link_libraries(tritonsim-opt PRIVATE ${TRITON_DIALECT_LIB})
+  endif()
+
+  mlir_check_all_link_libraries(tritonsim-opt)
+  list(APPEND _installed_tools tritonsim-opt)
 endif()
-
-mlir_check_all_link_libraries(tritonsim-opt)
 
 #===----------------------------------------------------------------------===//
 # tritonsim-hivm - HIVM-based Performance Modeling Tool
@@ -66,34 +71,37 @@ mlir_check_all_link_libraries(tritonsim-hivm)
 # ascend-tiling-opt - Tiling Optimization Tool
 #===----------------------------------------------------------------------===//
 
-add_llvm_executable(ascend-tiling-opt
-  ascend-tiling-opt/ascend-tiling-opt.cpp
-)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ascend-tiling-opt/ascend-tiling-opt.cpp")
+  add_llvm_executable(ascend-tiling-opt
+    ascend-tiling-opt/ascend-tiling-opt.cpp
+  )
 
-target_link_libraries(ascend-tiling-opt
-  PRIVATE
-  AscendModelIR
-  AscendModelTransforms
-  AscendModelAnalysis
+  target_link_libraries(ascend-tiling-opt
+    PRIVATE
+    AscendModelIR
+    AscendModelTransforms
+    AscendModelAnalysis
 
-  MLIROptLib
-  MLIRIR
-  MLIRParser
-  MLIRPass
-  MLIRSupport
-  MLIRTransforms
-  MLIRFuncDialect
-  MLIRSCFDialect
-  MLIRArithDialect
-  MLIRMathDialect
-)
+    MLIROptLib
+    MLIRIR
+    MLIRParser
+    MLIRPass
+    MLIRSupport
+    MLIRTransforms
+    MLIRFuncDialect
+    MLIRSCFDialect
+    MLIRArithDialect
+    MLIRMathDialect
+  )
 
-mlir_check_all_link_libraries(ascend-tiling-opt)
+  mlir_check_all_link_libraries(ascend-tiling-opt)
+  list(APPEND _installed_tools ascend-tiling-opt)
+endif()
 
 #===----------------------------------------------------------------------===//
 # Install
 #===----------------------------------------------------------------------===//
 
-install(TARGETS tritonsim-opt tritonsim-hivm ascend-tiling-opt
+install(TARGETS ${_installed_tools}
   RUNTIME DESTINATION bin
 )
