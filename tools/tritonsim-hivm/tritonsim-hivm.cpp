@@ -6,16 +6,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "AscendModel/Analysis/HIVMAnalysis.h"
+#include "AscendModel/Analysis/Utils.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/FileSystem.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -82,6 +84,9 @@ llvm::cl::opt<std::string> desGraphFile(
     llvm::cl::desc("Export the parsed operation graph as JSON for external DES simulation"),
     llvm::cl::init(""), llvm::cl::value_desc("path"));
 
+constexpr llvm::StringLiteral tritonBindingsFileName =
+    "tritonsim_hivm_bindings.txt";
+
 std::optional<std::string> findLatestNpuirUnder(llvm::StringRef root) {
   std::error_code ec;
   llvm::sys::fs::recursive_directory_iterator it(root, ec), end;
@@ -139,10 +144,114 @@ std::optional<std::string> detectAscendHome() {
   return std::nullopt;
 }
 
+std::optional<std::string> readCapturedBindings(llvm::StringRef dumpDir) {
+  llvm::SmallString<256> path(dumpDir);
+  llvm::sys::path::append(path, tritonBindingsFileName);
+  auto buffer = llvm::MemoryBuffer::getFileAsStream(path);
+  if (!buffer)
+    return std::nullopt;
+  return buffer.get()->getBuffer().trim().str();
+}
+
+std::string mergeBindingStrings(llvm::StringRef autoBindings,
+                                llvm::StringRef explicitBindings,
+                                std::string &error) {
+  utils::Bindings merged;
+
+  auto apply = [&](llvm::StringRef input) -> bool {
+    auto parsed = utils::parseBindings(input);
+    if (!parsed) {
+      error = llvm::toString(parsed.takeError());
+      return false;
+    }
+    for (const auto &entry : *parsed) {
+      if (entry.second.isInt()) {
+        merged.set(entry.first(), entry.second.asInt());
+      } else if (entry.second.isFloat()) {
+        merged.set(entry.first(), entry.second.asFloat());
+      } else {
+        merged.set(entry.first(), entry.second.asString());
+      }
+    }
+    return true;
+  };
+
+  if (!apply(autoBindings) || !apply(explicitBindings))
+    return "";
+
+  std::vector<std::pair<std::string, std::string>> ordered;
+  ordered.reserve(merged.size());
+  for (const auto &entry : merged)
+    ordered.emplace_back(entry.first().str(), entry.second.toString());
+  std::sort(ordered.begin(), ordered.end(),
+            [](const auto &lhs, const auto &rhs) {
+              return lhs.first < rhs.first;
+            });
+
+  std::string result;
+  llvm::raw_string_ostream os(result);
+  for (size_t i = 0; i < ordered.size(); ++i) {
+    if (i)
+      os << ",";
+    os << ordered[i].first << "=" << ordered[i].second;
+  }
+  return os.str();
+}
+
 std::string prependEnvValue(llvm::StringRef prefix, const char *existing) {
   if (!existing || !*existing)
     return prefix.str();
   return (prefix + ":" + existing).str();
+}
+
+std::optional<std::string> detectRepoTritonAscendRoot() {
+  llvm::SmallString<256> repoRoot(__FILE__);
+  llvm::sys::path::remove_filename(repoRoot);
+  llvm::sys::path::remove_filename(repoRoot);
+  llvm::sys::path::remove_filename(repoRoot);
+  llvm::sys::path::append(repoRoot, "thirdparty", "triton-ascend");
+  if (llvm::sys::fs::exists(repoRoot))
+    return repoRoot.str().str();
+  return std::nullopt;
+}
+
+llvm::SmallVector<std::string, 4>
+collectTritonPythonPathEntries(llvm::StringRef tritonRoot) {
+  llvm::SmallVector<std::string, 4> entries;
+
+  llvm::SmallString<256> buildRoot(tritonRoot);
+  llvm::sys::path::append(buildRoot, "python", "build");
+  std::error_code ec;
+  llvm::sys::fs::directory_iterator it(buildRoot, ec), end;
+  for (; !ec && it != end; it.increment(ec)) {
+    if (!llvm::sys::fs::is_directory(it->path()))
+      continue;
+
+    llvm::SmallString<256> candidate(it->path());
+    llvm::sys::path::append(candidate, "triton", "_C", "libtriton.so");
+    if (!llvm::sys::fs::exists(candidate))
+      continue;
+
+    entries.push_back(it->path());
+    break;
+  }
+
+  if (!entries.empty()) {
+    llvm::SmallString<256> pythonDir(tritonRoot);
+    llvm::sys::path::append(pythonDir, "python");
+    entries.push_back(pythonDir.str().str());
+  }
+
+  return entries;
+}
+
+std::optional<std::string> locateLauncherScript() {
+  llvm::SmallString<256> launcher(__FILE__);
+  llvm::sys::path::remove_filename(launcher);
+  llvm::sys::path::append(launcher, "triton_hivm_launcher.py");
+  if (llvm::sys::fs::exists(launcher))
+    return launcher.str().str();
+  return std::nullopt;
 }
 
 bool runPythonPreflight(const llvm::SmallVectorImpl<llvm::StringRef> &envRefs,
@@ -174,6 +283,7 @@ bool runPythonPreflight(const llvm::SmallVectorImpl<llvm::StringRef> &envRefs,
 }
 
 bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
+                           std::string &capturedBindings,
                            std::string &error) {
   if (tritonScript.empty()) {
     error = "missing --triton-script";
@@ -189,6 +299,11 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
       return false;
   }
   llvm::StringRef resolvedPython = *resolvedProgram;
+  auto launcherScript = locateLauncherScript();
+  if (!launcherScript) {
+    error = "failed to locate Triton HIVM launcher script";
+    return false;
+  }
 
   llvm::SmallString<128> uniqueDir;
   if (std::error_code ec =
@@ -200,7 +315,12 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
 
   llvm::SmallVector<llvm::StringRef, 16> args;
   args.push_back(resolvedPython);
+  args.push_back(*launcherScript);
+  args.push_back("--script");
   args.push_back(tritonScript);
+  args.push_back("--dump-dir");
+  args.push_back(tempDir);
+  args.push_back("--");
   for (const std::string &arg : scriptArgs)
     args.push_back(arg);
 
@@ -236,8 +356,24 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
                             std::getenv("LD_LIBRARY_PATH")));
   }
 
+  llvm::SmallVector<std::string, 4> pythonPathEntries;
+  if (!tritonAscendRoot.empty()) {
+    pythonPathEntries = collectTritonPythonPathEntries(tritonAscendRoot);
+  } else if (std::optional<std::string> repoRoot = detectRepoTritonAscendRoot()) {
+    pythonPathEntries = collectTritonPythonPathEntries(*repoRoot);
+  }
+
   const char *existingPythonPath = std::getenv("PYTHONPATH");
-  if (existingPythonPath && *existingPythonPath) {
+  if (!pythonPathEntries.empty()) {
+    std::string joined;
+    llvm::raw_string_ostream os(joined);
+    for (size_t i = 0; i < pythonPathEntries.size(); ++i) {
+      if (i)
+        os << ":";
+      os << pythonPathEntries[i];
+    }
+    pushEnv("PYTHONPATH", prependEnvValue(os.str(), existingPythonPath));
+  } else if (existingPythonPath && *existingPythonPath) {
     pushEnv("PYTHONPATH", existingPythonPath);
   }
 
@@ -264,6 +400,8 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   }
 
   outNpuirPath = *latest;
+  if (std::optional<std::string> bindings = readCapturedBindings(tempDir))
+    capturedBindings = *bindings;
   return true;
 }
 
@@ -288,9 +426,11 @@ int main(int argc, char **argv) {
 
   std::string npuirPath = npuirFile;
   std::string tempDumpDir;
+  std::string inferredBindings;
   if (!tritonScript.empty()) {
     std::string dumpError;
-    if (!runTritonScriptToDump(npuirPath, tempDumpDir, dumpError)) {
+    if (!runTritonScriptToDump(npuirPath, tempDumpDir, inferredBindings,
+                               dumpError)) {
       llvm::errs() << dumpError << "\n";
       return 1;
     }
@@ -303,7 +443,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  HIVMAnalyzer analyzer(getHardwareConfig(), argBindings, *parsedSchedulerMode);
+  std::string mergedBindingsError;
+  std::string effectiveArgBindings =
+      mergeBindingStrings(inferredBindings, argBindings, mergedBindingsError);
+  if (!mergedBindingsError.empty()) {
+    llvm::errs() << "failed to parse bindings: " << mergedBindingsError << "\n";
+    return 1;
+  }
+
+  HIVMAnalyzer analyzer(getHardwareConfig(), effectiveArgBindings,
+                        *parsedSchedulerMode);
   HIVMAnalysisReport report;
   std::string error;
   if (!analyzer.analyzeFile(npuirPath, report, error)) {
@@ -314,6 +463,8 @@ int main(int argc, char **argv) {
   if (!tritonScript.empty()) {
     report.sourceMode = "triton-dsl";
     report.sourcePath = npuirPath;
+    if (!inferredBindings.empty())
+      llvm::outs() << "Inferred bindings: " << inferredBindings << "\n";
   }
 
   report.print(llvm::outs(), getHardwareConfig());
