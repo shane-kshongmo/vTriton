@@ -187,11 +187,11 @@
 
     "startup_latencies": {
       "vector_startup_cycles": 35,
-      "mte2_startup_cycles": 320,
+      "mte2_startup_cycles": 50,
       "mte3_startup_cycles": 40,
       "cube_startup_cycles": 20,
       "fixpipe_startup_cycles": 30,
-      "notes": "vector: was 10, increased to reflect UB read-after-write stall in serial dependency chains (sub->exp->reduce). mte2: was 50, increased to 320 to capture pipe_barrier fill latency on small HBM transfers."
+      "notes": "vector: was 10, increased to reflect UB read-after-write stall in serial dependency chains (sub->exp->reduce). mte2: restored to 50 (actual DMA startup); pipe_barrier overhead now modeled separately in estimateDuration."
     },
 
     "vector_op_cycles_per_vec_instruction": {

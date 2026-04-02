@@ -77,6 +77,11 @@ llvm::cl::opt<std::string> perfettoTraceFile(
     llvm::cl::desc("Write a Perfetto-compatible JSON trace for the scheduled HIVM ops"),
     llvm::cl::init(""), llvm::cl::value_desc("path"));
 
+llvm::cl::opt<std::string> desGraphFile(
+    "des-graph-file",
+    llvm::cl::desc("Export the parsed operation graph as JSON for external DES simulation"),
+    llvm::cl::init(""), llvm::cl::value_desc("path"));
+
 std::optional<std::string> findLatestNpuirUnder(llvm::StringRef root) {
   std::error_code ec;
   llvm::sys::fs::recursive_directory_iterator it(root, ec), end;
@@ -323,6 +328,18 @@ int main(int argc, char **argv) {
     }
     report.emitPerfettoTrace(traceOS, getHardwareConfig());
     llvm::outs() << "\nPerfetto trace: " << perfettoTraceFile << "\n";
+  }
+
+  if (!desGraphFile.empty()) {
+    std::error_code ec;
+    llvm::raw_fd_ostream graphOS(desGraphFile, ec, llvm::sys::fs::OF_Text);
+    if (ec) {
+      llvm::errs() << "failed to open DES graph file " << desGraphFile
+                   << ": " << ec.message() << "\n";
+      return 1;
+    }
+    report.emitDESGraph(graphOS, getHardwareConfig());
+    llvm::outs() << "\nDES graph: " << desGraphFile << "\n";
   }
 
   if (!tempDumpDir.empty() && keepDumpDir) {

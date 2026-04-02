@@ -68,6 +68,8 @@ static std::vector<HIVMOp> expandMacroOp(const ParsedOp &parsed,
   std::vector<HIVMOp> ops;
   llvm::StringRef name = parsed.op.opName;
   if (name == "mmadL1") {
+    // MTE1 (L1 -> L0A/L0B) and Cube (compute on L0) are on different pipes
+    // and overlap in the hardware pipeline.  Each gets its own duration.
     HIVMOp mte = parsed.op;
     mte.opName = "mmadL1.mte1";
     mte.pipe = HIVMPipe::MTE1;
@@ -78,7 +80,9 @@ static std::vector<HIVMOp> expandMacroOp(const ParsedOp &parsed,
     HIVMOp cube = parsed.op;
     cube.opName = "mmadL1.cube";
     cube.pipe = HIVMPipe::Cube;
-    cube.duration = std::max<int64_t>(1, parsed.op.duration - mte.duration);
+    // Cube gets the full compute duration (startup + tile cycles), NOT the
+    // leftover after subtracting MTE1.  The two pipes overlap.
+    cube.duration = std::max<int64_t>(1, parsed.op.duration);
     cube.isSyncOp = false;
     cube.isBarrier = false;
     ops.push_back(std::move(mte));
@@ -174,6 +178,25 @@ static int64_t ceilDiv(int64_t num, int64_t den) {
   if (den <= 0)
     return 0;
   return (num + den - 1) / den;
+}
+
+/// Resolve an ambiguous core type (empty or "CUBE_OR_VECTOR") by inspecting the
+/// enclosing func.func's name for AIC/AIV markers.
+static llvm::StringRef resolveCoreTypeFromFunc(mlir::Operation *op,
+                                               llvm::StringRef current) {
+  if (current == "CUBE" || current == "AIC" || current == "VECTOR" ||
+      current == "AIV")
+    return current;
+  if (auto parentFunc = op->getParentOfType<mlir::func::FuncOp>()) {
+    llvm::StringRef funcName = parentFunc.getName();
+    if (funcName.contains("aic") || funcName.contains("AIC") ||
+        funcName.contains("cube"))
+      return "CUBE";
+    if (funcName.contains("aiv") || funcName.contains("AIV") ||
+        funcName.contains("vector") || funcName.contains("mix"))
+      return "VECTOR";
+  }
+  return current;
 }
 
 static bool isVectorDomainPipe(HIVMPipe pipe) {
@@ -411,6 +434,10 @@ static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
     llvm::StringRef trimmed = line.trim();
     if (trimmed.starts_with("warning: ") || trimmed.ends_with("warning generated."))
       break;
+    // Skip non-MLIR noise: linker warnings, error messages, etc.
+    if (trimmed.starts_with("ld.lld:") || trimmed.starts_with("[ERROR]") ||
+        trimmed.starts_with("[WARNING]") || trimmed.starts_with("[INFO]"))
+      continue;
     os << line << "\n";
   }
   os.flush();
@@ -509,6 +536,11 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     if (auto inferIface = llvm::dyn_cast<mlir::hivm::InferCoreTypeInterface>(op))
       parsed.op.coreType = stringifyTypedCore(inferIface.inferCoreType());
   }
+  // Resolve "CUBE_OR_VECTOR" to a concrete core type using the enclosing
+  // function name.  This is critical for disambiguating PIPE_MTE2 into
+  // PIPE_MTE2_C vs PIPE_MTE2_V for pipe_barrier ops.
+  parsed.op.coreType =
+      resolveCoreTypeFromFunc(op, parsed.op.coreType).str();
 
   if (llvm::isa<mlir::hivm::LoadOp>(op))
     parsed.op.pipe = selectMTE2PipeForSpaces(
@@ -548,7 +580,9 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     parsed.op.opName = "pipe_barrier";
     parsed.op.isSyncOp = true;
     parsed.op.isBarrier = true;
-    parsed.op.pipe = convertTypedPipe(barrier.getPipe().getPipe());
+    HIVMPipe rawPipe = convertTypedPipe(barrier.getPipe().getPipe());
+    parsed.op.pipe = disambiguateMTE2Pipe(rawPipe, HIVMPipe::Unknown,
+                                          parsed.op.coreType);
     parsed.barrierPipes.push_back(parsed.op.pipe);
     return true;
   }
@@ -892,26 +926,28 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
     return std::max<int64_t>(config.getPipeBarrierCyclesPerIter(),
                              config.getVectorStartupLatency());
 
+  // pipe_barrier drains the in-flight instructions on the target pipe.
+  // Cost is the pipeline depth, NOT the full startup latency.
   if (opName == "pipe_barrier") {
     if (parsed.barrierPipes.empty())
-      return config.getVectorStartupLatency();
+      return 8;
     if (llvm::is_contained(parsed.barrierPipes, HIVMPipe::All))
-      return config.getPipeBarrierCyclesPerIter();
+      return 64;
     HIVMPipe pipe = parsed.barrierPipes.front();
     switch (pipe) {
     case HIVMPipe::Vector:
-      return config.getVectorStartupLatency();
+      return 4;
     case HIVMPipe::VectorMTE2:
     case HIVMPipe::CubeMTE2:
-      return config.getMTE2StartupLatency();
+      return 16;
     case HIVMPipe::MTE3:
-      return config.getMTE3StartupLatency();
+      return 16;
     case HIVMPipe::FixPipe:
-      return config.getFixPipeStartupLatency();
+      return 8;
     case HIVMPipe::Cube:
-      return config.getCubeStartupLatency();
+      return 8;
     default:
-      return config.getVectorStartupLatency();
+      return 8;
     }
   }
 
@@ -1045,6 +1081,13 @@ static void ingestParsedOp(const ParsedOp &parsed, AnalysisState &state,
   EventKey opEventKey{mutableParsed.senderPipe, mutableParsed.receiverPipe,
                       mutableParsed.eventId};
 
+  // Enforce program order within each pipe: every op depends on the previous
+  // op on the same pipe, matching hardware sequential execution semantics.
+  if (mutableParsed.op.pipe != HIVMPipe::Unknown &&
+      mutableParsed.op.pipe != HIVMPipe::All)
+    addLatestPipeDependency(mutableParsed.op.pipe, state.latestPipeProducer,
+                            mutableParsed);
+
   mutableParsed.op.readBufferVersions.reserve(mutableParsed.op.readBuffers.size());
   for (const std::string &root : mutableParsed.op.readBuffers) {
     auto it = state.bufferVersions.find(root);
@@ -1089,6 +1132,15 @@ static void ingestParsedOp(const ParsedOp &parsed, AnalysisState &state,
     expanded.id = report.operations.size();
     if (previousExpandedId != std::numeric_limits<size_t>::max())
       expanded.dependsOn.push_back(previousExpandedId);
+    // Expanded sub-ops may land on a different pipe than the parsed op;
+    // enforce program order on each sub-op's actual pipe.
+    if (expanded.pipe != mutableParsed.op.pipe &&
+        expanded.pipe != HIVMPipe::Unknown &&
+        expanded.pipe != HIVMPipe::All) {
+      auto it = state.latestPipeProducer.find(expanded.pipe);
+      if (it != state.latestPipeProducer.end())
+        expanded.dependsOn.push_back(it->second);
+    }
     previousExpandedId = expanded.id;
     report.operations.push_back(std::move(expanded));
   }
@@ -1255,13 +1307,18 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
   captureBufferMetadata(op, state);
 
   if (auto funcOp = llvm::dyn_cast<mlir::func::FuncOp>(op)) {
+    // Each function (AIC / AIV) runs on its own core in parallel.  Use a
+    // fresh per-function state so that pipe-ordering and event tracking do
+    // not bleed across functions.  Only preserve arg-bindings.
+    AnalysisState funcState;
+    funcState.argBindings = state.argBindings;
     for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
-      auto bindIt = state.argBindings.find("arg" + std::to_string(idx));
-      if (bindIt != state.argBindings.end())
-        state.boundValues[arg] = bindIt->second;
+      auto bindIt = funcState.argBindings.find("arg" + std::to_string(idx));
+      if (bindIt != funcState.argBindings.end())
+        funcState.boundValues[arg] = bindIt->second;
     }
-    analyzeParsedRegion(funcOp.getBody(), loopMultiplier, state, report, config,
-                        replayIterations);
+    analyzeParsedRegion(funcOp.getBody(), loopMultiplier, funcState, report,
+                        config, replayIterations);
     return;
   }
 
@@ -1332,6 +1389,40 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
     attachSyncMetadata(parsed);
     attachBufferAccessMetadata(op, parsed, state);
     parsed.op.duration = estimateDuration(parsed, config);
+    ingestParsedOp(parsed, state, report, config);
+  } else if (!llvm::isa<mlir::scf::YieldOp>(op) &&
+             !llvm::isa<mlir::func::ReturnOp>(op) &&
+             op->getNumResults() > 0) {
+    // Non-hivm ops with results are scalar operations (arith, memref, etc.)
+    // that execute on PIPE_S.  They produce SSA values consumed by hivm.hir
+    // ops, creating cross-pipe dependencies via def-use chains.
+    ParsedOp parsed;
+    parsed.op.opName = getLeafOpName(op).str();
+    parsed.op.pipe = HIVMPipe::Scalar;
+    parsed.op.loopMultiplier = loopMultiplier;
+    parsed.op.lineNumber = getLineNumberFromLocation(op->getLoc());
+    parsed.op.text = renderOperation(op);
+    parsed.op.duration = 1;  // scalar ops take 1 cycle
+    parsed.mlirResults.assign(op->result_begin(), op->result_end());
+
+    // Determine core type from function context
+    if (auto parentFunc = op->getParentOfType<mlir::func::FuncOp>()) {
+      llvm::StringRef funcName = parentFunc.getName();
+      if (funcName.contains("aic") || funcName.contains("AIC") ||
+          funcName.contains("cube"))
+        parsed.op.coreType = "CUBE";
+      else if (funcName.contains("aiv") || funcName.contains("AIV") ||
+               funcName.contains("vector") || funcName.contains("mix"))
+        parsed.op.coreType = "VECTOR";
+    }
+
+    // SSA dependencies: if this op uses a value produced by a previous op
+    for (mlir::Value operand : op->getOperands()) {
+      auto it = state.valueProducers.find(operand);
+      if (it != state.valueProducers.end())
+        parsed.op.dependsOn.push_back(it->second);
+    }
+
     ingestParsedOp(parsed, state, report, config);
   }
 
@@ -2008,4 +2099,79 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
   }
 
   os << "\n  ],\n  \"displayTimeUnit\": \"us\"\n}\n";
+}
+
+void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
+                                      const HardwareConfig &config) const {
+  auto joinStrVec = [](const std::vector<std::string> &v) {
+    std::string s;
+    llvm::raw_string_ostream ss(s);
+    ss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (i) ss << ",";
+      ss << "\"" << v[i] << "\"";
+    }
+    ss << "]";
+    ss.flush();
+    return s;
+  };
+  auto joinIntVec = [](const std::vector<int64_t> &v) {
+    std::string s;
+    llvm::raw_string_ostream ss(s);
+    ss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (i) ss << ",";
+      ss << v[i];
+    }
+    ss << "]";
+    ss.flush();
+    return s;
+  };
+  auto joinSizeVec = [](const std::vector<size_t> &v) {
+    std::string s;
+    llvm::raw_string_ostream ss(s);
+    ss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (i) ss << ",";
+      ss << v[i];
+    }
+    ss << "]";
+    ss.flush();
+    return s;
+  };
+
+  os << "{\n";
+  os << "  \"clock_ghz\": " << llvm::format("%.3f", config.getClockFrequencyGHz())
+     << ",\n";
+  os << "  \"operations\": [\n";
+  for (size_t i = 0; i < operations.size(); ++i) {
+    const HIVMOp &op = operations[i];
+    if (i) os << ",\n";
+    os << "    {"
+       << "\"id\":" << op.id
+       << ",\"name\":\"" << op.opName << "\""
+       << ",\"pipe\":\"" << HIVMAnalyzer::stringifyPipe(op.pipe) << "\""
+       << ",\"duration\":" << op.duration
+       << ",\"line\":" << op.lineNumber
+       << ",\"depends_on\":" << joinSizeVec(op.dependsOn)
+       << ",\"is_sync\":" << (op.isSyncOp ? "true" : "false")
+       << ",\"is_barrier\":" << (op.isBarrier ? "true" : "false")
+       << ",\"event_id\":\"" << op.eventId << "\""
+       << ",\"event_generation\":" << op.eventGeneration
+       << ",\"sender_pipe\":\"" << HIVMAnalyzer::stringifyPipe(op.senderPipe)
+       << "\""
+       << ",\"receiver_pipe\":\"" << HIVMAnalyzer::stringifyPipe(op.receiverPipe)
+       << "\""
+       << ",\"core_type\":\"" << op.coreType << "\""
+       << ",\"bytes\":" << op.bytes
+       << ",\"elements\":" << op.elements
+       << ",\"loop_multiplier\":" << op.loopMultiplier
+       << ",\"multi_buffer_slots\":" << op.multiBufferSlots
+       << ",\"read_buffers\":" << joinStrVec(op.readBuffers)
+       << ",\"write_buffers\":" << joinStrVec(op.writeBuffers)
+       << ",\"read_versions\":" << joinIntVec(op.readBufferVersions)
+       << ",\"write_versions\":" << joinIntVec(op.writeBufferVersions)
+       << "}";
+  }
+  os << "\n  ]\n}\n";
 }

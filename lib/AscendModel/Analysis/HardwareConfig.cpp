@@ -747,13 +747,11 @@ double HardwareConfig::getVectorTFLOPS() const {
 }
 
 int HardwareConfig::getMTE2StartupLatency() const {
-  // Calibrated: 320 cycles (was 50).
-  // Profiled aiv_mte2_time for BM=64 (1 AIV wave, 24 programs) is 2.78 μs
-  // ≈ 5 149 cycles per program.  With ~6 MTE2 bursts per program, the
-  // per-burst overhead is ~858 cycles, dominated by pipe_barrier fill rather
-  // than peak HBM bandwidth.  Using 320 cycles keeps the bandwidth term
-  // while significantly closing the gap on small-transfer latency.
-  return 320;
+  // MTE2 DMA pipeline startup: address translation + HBM access setup.
+  // Previously inflated to 320 to absorb pipe_barrier fill latency, but
+  // pipe_barrier now has its own cost model.  Restored to reflect actual
+  // MTE2 transfer startup overhead.
+  return 50;
 }
 
 int HardwareConfig::getMTE3StartupLatency() const {
