@@ -54,6 +54,16 @@ llvm::cl::list<std::string> scriptArgs(
     "script-arg", llvm::cl::desc("Extra argument passed through to --triton-script"),
     llvm::cl::ZeroOrMore, llvm::cl::value_desc("arg"));
 
+llvm::cl::opt<std::string> tritonEntryFunc(
+    "triton-entry",
+    llvm::cl::desc("Optional function inside --triton-script to invoke explicitly"),
+    llvm::cl::init(""), llvm::cl::value_desc("name"));
+
+llvm::cl::list<std::string> tritonEntryArgs(
+    "entry-arg",
+    llvm::cl::desc("Argument expression passed to --triton-entry; may be repeated"),
+    llvm::cl::ZeroOrMore, llvm::cl::value_desc("expr"));
+
 llvm::cl::opt<std::string> hardwareConfig(
     "hardware-config",
     llvm::cl::desc("Path to hardware configuration JSON file"),
@@ -85,7 +95,7 @@ llvm::cl::opt<std::string> desGraphFile(
     llvm::cl::init(""), llvm::cl::value_desc("path"));
 
 constexpr llvm::StringLiteral tritonBindingsFileName =
-    "tritonsim_hivm_bindings.txt";
+    "tritonsim_hivm_bindings.jsonl";
 
 std::optional<std::string> findLatestNpuirUnder(llvm::StringRef root) {
   std::error_code ec;
@@ -144,13 +154,97 @@ std::optional<std::string> detectAscendHome() {
   return std::nullopt;
 }
 
-std::optional<std::string> readCapturedBindings(llvm::StringRef dumpDir) {
+std::optional<std::string> findCapturedKernelName(llvm::StringRef dumpDir) {
+  llvm::SmallString<256> cacheDir(dumpDir);
+  llvm::sys::path::append(cacheDir, "cache");
+  if (!llvm::sys::fs::exists(cacheDir))
+    return std::nullopt;
+
+  std::error_code ec;
+  for (llvm::sys::fs::recursive_directory_iterator it(cacheDir, ec), end;
+       !ec && it != end; it.increment(ec)) {
+    if (it->type() != llvm::sys::fs::file_type::regular_file)
+      continue;
+    llvm::StringRef path = it->path();
+    if (!path.ends_with(".json"))
+      continue;
+    llvm::StringRef stem = llvm::sys::path::stem(path);
+    if (stem.starts_with("__grp__"))
+      continue;
+    return stem.str();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> readCapturedBindings(llvm::StringRef dumpDir,
+                                                llvm::StringRef kernelName) {
   llvm::SmallString<256> path(dumpDir);
   llvm::sys::path::append(path, tritonBindingsFileName);
   auto buffer = llvm::MemoryBuffer::getFileAsStream(path);
   if (!buffer)
     return std::nullopt;
-  return buffer.get()->getBuffer().trim().str();
+
+  llvm::StringRef contents = buffer.get()->getBuffer();
+  llvm::SmallVector<llvm::StringRef, 8> lines;
+  contents.split(lines, '\n', -1, false);
+  for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+    llvm::StringRef line = it->trim();
+    if (line.empty())
+      continue;
+
+    size_t kernelPos = line.find("\"kernel_name\"");
+    size_t entriesPos = line.find("\"entries\"");
+    if (kernelPos == llvm::StringRef::npos || entriesPos == llvm::StringRef::npos)
+      continue;
+
+    size_t kernelColon = line.find(':', kernelPos);
+    if (kernelColon == llvm::StringRef::npos)
+      continue;
+    size_t kernelValueStart = line.find('"', kernelColon);
+    if (kernelValueStart == llvm::StringRef::npos)
+      continue;
+    ++kernelValueStart;
+    size_t kernelValueEnd = line.find('"', kernelValueStart);
+    if (kernelValueEnd == llvm::StringRef::npos)
+      continue;
+    llvm::StringRef recordedKernel =
+        line.slice(kernelValueStart, kernelValueEnd);
+    if (!kernelName.empty() && recordedKernel != kernelName)
+      continue;
+
+    size_t entriesStart = line.find('[', entriesPos);
+    size_t entriesEnd = line.rfind(']');
+    if (entriesStart == llvm::StringRef::npos || entriesEnd == llvm::StringRef::npos ||
+        entriesEnd < entriesStart)
+      continue;
+    llvm::StringRef entriesText = line.slice(entriesStart + 1, entriesEnd);
+    std::string result;
+    llvm::raw_string_ostream os(result);
+    bool first = true;
+    while (!entriesText.empty()) {
+      entriesText = entriesText.ltrim();
+      size_t quoteStart = entriesText.find('"');
+      if (quoteStart == llvm::StringRef::npos)
+        break;
+      entriesText = entriesText.drop_front(quoteStart + 1);
+      size_t quoteEnd = entriesText.find('"');
+      if (quoteEnd == llvm::StringRef::npos)
+        break;
+      if (!first)
+        os << ",";
+      os << entriesText.slice(0, quoteEnd);
+      first = false;
+      entriesText = entriesText.drop_front(quoteEnd + 1);
+      size_t comma = entriesText.find(',');
+      if (comma == llvm::StringRef::npos)
+        break;
+      entriesText = entriesText.drop_front(comma + 1);
+    }
+    os.flush();
+    if (!result.empty())
+      return result;
+  }
+  return std::nullopt;
 }
 
 std::string mergeBindingStrings(llvm::StringRef autoBindings,
@@ -320,6 +414,14 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   args.push_back(tritonScript);
   args.push_back("--dump-dir");
   args.push_back(tempDir);
+  if (!tritonEntryFunc.empty()) {
+    args.push_back("--entry-func");
+    args.push_back(tritonEntryFunc);
+    for (const std::string &arg : tritonEntryArgs) {
+      args.push_back("--entry-arg");
+      args.push_back(arg);
+    }
+  }
   args.push_back("--");
   for (const std::string &arg : scriptArgs)
     args.push_back(arg);
@@ -400,7 +502,9 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   }
 
   outNpuirPath = *latest;
-  if (std::optional<std::string> bindings = readCapturedBindings(tempDir))
+  std::optional<std::string> capturedKernel = findCapturedKernelName(tempDir);
+  if (std::optional<std::string> bindings =
+          readCapturedBindings(tempDir, capturedKernel.value_or("")))
     capturedBindings = *bindings;
   return true;
 }

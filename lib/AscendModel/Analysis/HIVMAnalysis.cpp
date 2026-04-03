@@ -41,6 +41,7 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <queue>
 #include <sstream>
 #include <tuple>
@@ -59,6 +60,7 @@ struct ParsedOp {
   std::string senderEvent;
   std::string receiverEvent;
   std::string eventId;
+  mlir::Value syncIdValue;
   HIVMPipe senderPipe = HIVMPipe::Unknown;
   HIVMPipe receiverPipe = HIVMPipe::Unknown;
 };
@@ -502,10 +504,27 @@ static std::string renderValueToken(mlir::Value value) {
   return storage;
 }
 
+static std::string renderOpaqueValueToken(mlir::Value value) {
+  if (!value)
+    return "";
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  os << "ssa@" << value.getAsOpaquePointer();
+  os.flush();
+  return storage;
+}
+
+static std::string canonicalizeStaticEventToken(llvm::StringRef token) {
+  if (token.consume_front("EVENT_ID"))
+    return token.str();
+  return token.str();
+}
+
 static std::string stringifyTypedEvent(std::optional<mlir::hivm::EventAttr> eventAttr,
                                        mlir::Value dynamicEvent) {
   if (eventAttr)
-    return mlir::hivm::stringifyEVENT(eventAttr->getEvent()).str();
+    return canonicalizeStaticEventToken(
+        mlir::hivm::stringifyEVENT(eventAttr->getEvent()));
   return renderValueToken(dynamicEvent);
 }
 
@@ -593,6 +612,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     parsed.receiverEvent = stringifyTypedPipe(setFlag.getWaitPipe().getPipe());
     parsed.eventId =
         stringifyTypedEvent(setFlag.getStaticEventId(), setFlag.getDynamicEventId());
+    parsed.syncIdValue = setFlag.getDynamicEventId();
     parsed.senderPipe = disambiguateMTE2Pipe(
         convertTypedPipe(setFlag.getSetPipe().getPipe()),
         convertTypedPipe(setFlag.getWaitPipe().getPipe()), parsed.op.coreType);
@@ -609,6 +629,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     parsed.receiverEvent = stringifyTypedPipe(waitFlag.getWaitPipe().getPipe());
     parsed.eventId = stringifyTypedEvent(waitFlag.getStaticEventId(),
                                          waitFlag.getDynamicEventId());
+    parsed.syncIdValue = waitFlag.getDynamicEventId();
     parsed.senderPipe = disambiguateMTE2Pipe(
         convertTypedPipe(waitFlag.getSetPipe().getPipe()),
         convertTypedPipe(waitFlag.getWaitPipe().getPipe()), parsed.op.coreType);
@@ -634,12 +655,14 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
         parsed.op.coreType);
     parsed.eventId =
         stringifyTypedFlag(syncSet.getStaticFlagId(), syncSet.getDynamicFlagId());
+    parsed.syncIdValue = syncSet.getDynamicFlagId();
     parsed.op.pipe = parsed.senderPipe;
     return true;
   }
   if (auto syncWait = llvm::dyn_cast<mlir::hivm::SyncBlockWaitOp>(op)) {
     parsed.op.opName = "sync_block_wait";
     parsed.op.isSyncOp = true;
+    parsed.op.isBarrier = true;
     parsed.syncCoreType =
         mlir::hivm::stringifyTCoreType(syncWait.getTcoreType().getTcoretype()).str();
     parsed.op.coreType = parsed.syncCoreType;
@@ -653,7 +676,9 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
         parsed.op.coreType);
     parsed.eventId =
         stringifyTypedFlag(syncWait.getStaticFlagId(), syncWait.getDynamicFlagId());
-    parsed.op.pipe = parsed.receiverPipe;
+    parsed.syncIdValue = syncWait.getDynamicFlagId();
+    parsed.op.pipe = HIVMPipe::All;
+    parsed.barrierPipes.push_back(HIVMPipe::All);
     return true;
   }
   if (auto syncBlock = llvm::dyn_cast<mlir::hivm::SyncBlockOp>(op)) {
@@ -670,19 +695,216 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
 }
 #endif
 
-static bool resolveMLIRValue(mlir::Value value, const AnalysisState &state,
-                             int64_t &resolved) {
+static std::optional<int64_t> evaluateAffineExpr(mlir::AffineExpr expr,
+                                                 mlir::AffineMap map,
+                                                 llvm::ArrayRef<int64_t> inputs);
+
+static bool resolveMLIRValueImpl(mlir::Value value, const AnalysisState &state,
+                                 int64_t &resolved,
+                                 llvm::SmallDenseSet<mlir::Value, 8> &visited);
+
+static bool resolveAffineApply(mlir::affine::AffineApplyOp affineApply,
+                               const AnalysisState &state, int64_t &resolved,
+                               llvm::SmallDenseSet<mlir::Value, 8> &visited) {
+  llvm::SmallVector<int64_t, 8> inputs;
+  inputs.reserve(affineApply.getOperands().size());
+  for (mlir::Value operand : affineApply.getOperands()) {
+    int64_t operandValue = 0;
+    if (!resolveMLIRValueImpl(operand, state, operandValue, visited))
+      return false;
+    inputs.push_back(operandValue);
+  }
+  auto result =
+      evaluateAffineExpr(affineApply.getAffineMap().getResult(0),
+                         affineApply.getAffineMap(), inputs);
+  if (!result)
+    return false;
+  resolved = *result;
+  return true;
+}
+
+static bool resolveMLIRValueImpl(mlir::Value value, const AnalysisState &state,
+                                 int64_t &resolved,
+                                 llvm::SmallDenseSet<mlir::Value, 8> &visited) {
+  if (!visited.insert(value).second)
+    return false;
+  auto finish = [&](bool ok) {
+    visited.erase(value);
+    return ok;
+  };
+
   auto cstIt = state.constants.find(value);
   if (cstIt != state.constants.end()) {
     resolved = cstIt->second;
-    return true;
+    return finish(true);
   }
   auto boundIt = state.boundValues.find(value);
   if (boundIt != state.boundValues.end()) {
     resolved = boundIt->second;
-    return true;
+    return finish(true);
   }
-  return false;
+  mlir::Operation *defOp = value.getDefiningOp();
+  if (!defOp || defOp->getNumResults() != 1)
+    return finish(false);
+
+  if (auto constantOp = llvm::dyn_cast<mlir::arith::ConstantOp>(defOp)) {
+    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constantOp.getValue())) {
+      resolved = intAttr.getInt();
+      return finish(true);
+    }
+  }
+  if (auto castOp = llvm::dyn_cast<mlir::arith::IndexCastOp>(defOp))
+    return finish(resolveMLIRValueImpl(castOp.getIn(), state, resolved, visited));
+  if (auto castOp = llvm::dyn_cast<mlir::arith::IndexCastUIOp>(defOp))
+    return finish(resolveMLIRValueImpl(castOp.getIn(), state, resolved, visited));
+  if (auto truncOp = llvm::dyn_cast<mlir::arith::TruncIOp>(defOp))
+    return finish(resolveMLIRValueImpl(truncOp.getIn(), state, resolved, visited));
+  if (auto extOp = llvm::dyn_cast<mlir::arith::ExtSIOp>(defOp))
+    return finish(resolveMLIRValueImpl(extOp.getIn(), state, resolved, visited));
+  if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(defOp)) {
+    int64_t lhs = 0, rhs = 0;
+    if (!resolveMLIRValueImpl(addOp.getLhs(), state, lhs, visited) ||
+        !resolveMLIRValueImpl(addOp.getRhs(), state, rhs, visited))
+      return finish(false);
+    resolved = lhs + rhs;
+    return finish(true);
+  }
+  if (auto subOp = llvm::dyn_cast<mlir::arith::SubIOp>(defOp)) {
+    int64_t lhs = 0, rhs = 0;
+    if (!resolveMLIRValueImpl(subOp.getLhs(), state, lhs, visited) ||
+        !resolveMLIRValueImpl(subOp.getRhs(), state, rhs, visited))
+      return finish(false);
+    resolved = lhs - rhs;
+    return finish(true);
+  }
+  if (auto mulOp = llvm::dyn_cast<mlir::arith::MulIOp>(defOp)) {
+    int64_t lhs = 0, rhs = 0;
+    bool lhsResolved = resolveMLIRValueImpl(mulOp.getLhs(), state, lhs, visited);
+    if (lhsResolved && lhs == 0) {
+      resolved = 0;
+      return finish(true);
+    }
+    bool rhsResolved = resolveMLIRValueImpl(mulOp.getRhs(), state, rhs, visited);
+    if (rhsResolved && rhs == 0) {
+      resolved = 0;
+      return finish(true);
+    }
+    if (!lhsResolved || !rhsResolved)
+      return finish(false);
+    resolved = lhs * rhs;
+    return finish(true);
+  }
+  if (auto divOp = llvm::dyn_cast<mlir::arith::DivSIOp>(defOp)) {
+    int64_t lhs = 0;
+    if (!resolveMLIRValueImpl(divOp.getLhs(), state, lhs, visited))
+      return finish(false);
+    if (lhs == 0) {
+      resolved = 0;
+      return finish(true);
+    }
+    int64_t rhs = 0;
+    if (!resolveMLIRValueImpl(divOp.getRhs(), state, rhs, visited) || rhs == 0)
+      return finish(false);
+    resolved = lhs / rhs;
+    return finish(true);
+  }
+  if (auto remOp = llvm::dyn_cast<mlir::arith::RemSIOp>(defOp)) {
+    int64_t lhs = 0;
+    if (!resolveMLIRValueImpl(remOp.getLhs(), state, lhs, visited))
+      return finish(false);
+    if (lhs == 0) {
+      resolved = 0;
+      return finish(true);
+    }
+    int64_t rhs = 0;
+    if (!resolveMLIRValueImpl(remOp.getRhs(), state, rhs, visited) || rhs == 0)
+      return finish(false);
+    resolved = lhs % rhs;
+    return finish(true);
+  }
+  if (auto minOp = llvm::dyn_cast<mlir::arith::MinSIOp>(defOp)) {
+    int64_t lhs = 0, rhs = 0;
+    if (!resolveMLIRValueImpl(minOp.getLhs(), state, lhs, visited) ||
+        !resolveMLIRValueImpl(minOp.getRhs(), state, rhs, visited))
+      return finish(false);
+    resolved = std::min(lhs, rhs);
+    return finish(true);
+  }
+  if (auto cmpOp = llvm::dyn_cast<mlir::arith::CmpIOp>(defOp)) {
+    int64_t lhs = 0, rhs = 0;
+    if (!resolveMLIRValueImpl(cmpOp.getLhs(), state, lhs, visited) ||
+        !resolveMLIRValueImpl(cmpOp.getRhs(), state, rhs, visited))
+      return finish(false);
+    switch (cmpOp.getPredicate()) {
+    case mlir::arith::CmpIPredicate::eq:
+      resolved = lhs == rhs;
+      return finish(true);
+    case mlir::arith::CmpIPredicate::ne:
+      resolved = lhs != rhs;
+      return finish(true);
+    case mlir::arith::CmpIPredicate::slt:
+      resolved = lhs < rhs;
+      return finish(true);
+    case mlir::arith::CmpIPredicate::sle:
+      resolved = lhs <= rhs;
+      return finish(true);
+    case mlir::arith::CmpIPredicate::sgt:
+      resolved = lhs > rhs;
+      return finish(true);
+    case mlir::arith::CmpIPredicate::sge:
+      resolved = lhs >= rhs;
+      return finish(true);
+    case mlir::arith::CmpIPredicate::ult:
+      resolved = static_cast<uint64_t>(lhs) < static_cast<uint64_t>(rhs);
+      return finish(true);
+    case mlir::arith::CmpIPredicate::ule:
+      resolved = static_cast<uint64_t>(lhs) <= static_cast<uint64_t>(rhs);
+      return finish(true);
+    case mlir::arith::CmpIPredicate::ugt:
+      resolved = static_cast<uint64_t>(lhs) > static_cast<uint64_t>(rhs);
+      return finish(true);
+    case mlir::arith::CmpIPredicate::uge:
+      resolved = static_cast<uint64_t>(lhs) >= static_cast<uint64_t>(rhs);
+      return finish(true);
+    }
+  }
+  if (auto selectOp = llvm::dyn_cast<mlir::arith::SelectOp>(defOp)) {
+    int64_t cond = 0, trueValue = 0, falseValue = 0;
+    if (!resolveMLIRValueImpl(selectOp.getCondition(), state, cond, visited) ||
+        !resolveMLIRValueImpl(selectOp.getTrueValue(), state, trueValue,
+                              visited) ||
+        !resolveMLIRValueImpl(selectOp.getFalseValue(), state, falseValue,
+                              visited))
+      return finish(false);
+    resolved = cond != 0 ? trueValue : falseValue;
+    return finish(true);
+  }
+  if (auto affineApply = llvm::dyn_cast<mlir::affine::AffineApplyOp>(defOp))
+    return finish(resolveAffineApply(affineApply, state, resolved, visited));
+
+  return finish(false);
+}
+
+static bool resolveMLIRValue(mlir::Value value, const AnalysisState &state,
+                             int64_t &resolved) {
+  llvm::SmallDenseSet<mlir::Value, 8> visited;
+  return resolveMLIRValueImpl(value, state, resolved, visited);
+}
+
+static std::string canonicalizeSyncId(mlir::Value value,
+                                      const AnalysisState &state) {
+  if (!value)
+    return "";
+
+  int64_t resolved = 0;
+  if (resolveMLIRValue(value, state, resolved))
+    return std::to_string(resolved);
+
+  auto producerIt = state.valueProducers.find(value);
+  if (producerIt != state.valueProducers.end())
+    return ("ssa_producer_" + std::to_string(producerIt->second));
+
+  return renderOpaqueValueToken(value);
 }
 
 static bool parseForTripCount(mlir::scf::ForOp forOp, const AnalysisState &state,
@@ -710,6 +932,224 @@ static bool captureConstant(mlir::Operation *op, AnalysisState &state) {
     state.constants[op->getResult(0)] = intAttr.getInt();
     return true;
   }
+  return false;
+}
+
+static std::optional<int64_t> evaluateAffineExpr(mlir::AffineExpr expr,
+                                                 mlir::AffineMap map,
+                                                 llvm::ArrayRef<int64_t> inputs);
+
+static bool resolveMLIRValue(mlir::Value value, const AnalysisState &state,
+                             int64_t &resolved);
+
+static std::optional<int64_t> evaluateAffineExpr(mlir::AffineExpr expr,
+                                                 mlir::AffineMap map,
+                                                 llvm::ArrayRef<int64_t> inputs) {
+  if (auto constant = llvm::dyn_cast<mlir::AffineConstantExpr>(expr))
+    return constant.getValue();
+  if (auto dim = llvm::dyn_cast<mlir::AffineDimExpr>(expr)) {
+    unsigned pos = dim.getPosition();
+    if (pos < inputs.size())
+      return inputs[pos];
+    return std::nullopt;
+  }
+  if (auto symbol = llvm::dyn_cast<mlir::AffineSymbolExpr>(expr)) {
+    unsigned pos = map.getNumDims() + symbol.getPosition();
+    if (pos < inputs.size())
+      return inputs[pos];
+    return std::nullopt;
+  }
+  if (auto binary = llvm::dyn_cast<mlir::AffineBinaryOpExpr>(expr)) {
+    auto lhs = evaluateAffineExpr(binary.getLHS(), map, inputs);
+    auto rhs = evaluateAffineExpr(binary.getRHS(), map, inputs);
+    if (!lhs || !rhs)
+      return std::nullopt;
+    switch (binary.getKind()) {
+    case mlir::AffineExprKind::Add:
+      return *lhs + *rhs;
+    case mlir::AffineExprKind::Mul:
+      return *lhs * *rhs;
+    case mlir::AffineExprKind::Mod:
+      if (*rhs == 0)
+        return std::nullopt;
+      return *lhs % *rhs;
+    case mlir::AffineExprKind::FloorDiv:
+      if (*rhs == 0)
+        return std::nullopt;
+      return llvm::divideFloorSigned(*lhs, *rhs);
+    case mlir::AffineExprKind::CeilDiv:
+      if (*rhs == 0)
+        return std::nullopt;
+      return llvm::divideCeilSigned(*lhs, *rhs);
+    default:
+      return std::nullopt;
+    }
+  }
+  return std::nullopt;
+}
+
+static bool captureDerivedScalarValue(mlir::Operation *op, AnalysisState &state) {
+  if (op->getNumResults() != 1)
+    return false;
+
+  auto recordValue = [&](int64_t value) {
+    state.boundValues[op->getResult(0)] = value;
+    return true;
+  };
+
+  if (op->getName().getStringRef() == "hivm.hir.get_block_idx" ||
+      op->getName().getStringRef() == "get_block_idx") {
+    auto it = state.argBindings.find("pid_x");
+    if (it == state.argBindings.end())
+      it = state.argBindings.find("program_id_x");
+    if (it != state.argBindings.end())
+      return recordValue(it->second);
+    return false;
+  }
+
+  if (auto castOp = llvm::dyn_cast<mlir::arith::IndexCastOp>(op)) {
+    int64_t resolved = 0;
+    if (resolveMLIRValue(castOp.getIn(), state, resolved))
+      return recordValue(resolved);
+    return false;
+  }
+
+  if (auto castOp = llvm::dyn_cast<mlir::arith::IndexCastUIOp>(op)) {
+    int64_t resolved = 0;
+    if (resolveMLIRValue(castOp.getIn(), state, resolved))
+      return recordValue(resolved);
+    return false;
+  }
+
+  if (auto truncOp = llvm::dyn_cast<mlir::arith::TruncIOp>(op)) {
+    int64_t resolved = 0;
+    if (resolveMLIRValue(truncOp.getIn(), state, resolved))
+      return recordValue(resolved);
+    return false;
+  }
+
+  if (auto extOp = llvm::dyn_cast<mlir::arith::ExtSIOp>(op)) {
+    int64_t resolved = 0;
+    if (resolveMLIRValue(extOp.getIn(), state, resolved))
+      return recordValue(resolved);
+    return false;
+  }
+
+  if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(addOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(addOp.getRhs(), state, rhs))
+      return recordValue(lhs + rhs);
+    return false;
+  }
+
+  if (auto subOp = llvm::dyn_cast<mlir::arith::SubIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(subOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(subOp.getRhs(), state, rhs))
+      return recordValue(lhs - rhs);
+    return false;
+  }
+
+  if (auto mulOp = llvm::dyn_cast<mlir::arith::MulIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(mulOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(mulOp.getRhs(), state, rhs))
+      return recordValue(lhs * rhs);
+    return false;
+  }
+
+  if (auto divOp = llvm::dyn_cast<mlir::arith::DivSIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(divOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(divOp.getRhs(), state, rhs) && rhs != 0)
+      return recordValue(lhs / rhs);
+    return false;
+  }
+
+  if (auto remOp = llvm::dyn_cast<mlir::arith::RemSIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(remOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(remOp.getRhs(), state, rhs) && rhs != 0)
+      return recordValue(lhs % rhs);
+    return false;
+  }
+
+  if (auto minOp = llvm::dyn_cast<mlir::arith::MinSIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(minOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(minOp.getRhs(), state, rhs))
+      return recordValue(std::min(lhs, rhs));
+    return false;
+  }
+
+  if (auto cmpOp = llvm::dyn_cast<mlir::arith::CmpIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (!resolveMLIRValue(cmpOp.getLhs(), state, lhs) ||
+        !resolveMLIRValue(cmpOp.getRhs(), state, rhs))
+      return false;
+    bool result = false;
+    switch (cmpOp.getPredicate()) {
+    case mlir::arith::CmpIPredicate::eq:
+      result = lhs == rhs;
+      break;
+    case mlir::arith::CmpIPredicate::ne:
+      result = lhs != rhs;
+      break;
+    case mlir::arith::CmpIPredicate::slt:
+      result = lhs < rhs;
+      break;
+    case mlir::arith::CmpIPredicate::sle:
+      result = lhs <= rhs;
+      break;
+    case mlir::arith::CmpIPredicate::sgt:
+      result = lhs > rhs;
+      break;
+    case mlir::arith::CmpIPredicate::sge:
+      result = lhs >= rhs;
+      break;
+    case mlir::arith::CmpIPredicate::ult:
+      result = static_cast<uint64_t>(lhs) < static_cast<uint64_t>(rhs);
+      break;
+    case mlir::arith::CmpIPredicate::ule:
+      result = static_cast<uint64_t>(lhs) <= static_cast<uint64_t>(rhs);
+      break;
+    case mlir::arith::CmpIPredicate::ugt:
+      result = static_cast<uint64_t>(lhs) > static_cast<uint64_t>(rhs);
+      break;
+    case mlir::arith::CmpIPredicate::uge:
+      result = static_cast<uint64_t>(lhs) >= static_cast<uint64_t>(rhs);
+      break;
+    }
+    return recordValue(result ? 1 : 0);
+  }
+
+  if (auto selectOp = llvm::dyn_cast<mlir::arith::SelectOp>(op)) {
+    int64_t cond = 0, trueValue = 0, falseValue = 0;
+    if (resolveMLIRValue(selectOp.getCondition(), state, cond) &&
+        resolveMLIRValue(selectOp.getTrueValue(), state, trueValue) &&
+        resolveMLIRValue(selectOp.getFalseValue(), state, falseValue))
+      return recordValue(cond != 0 ? trueValue : falseValue);
+    return false;
+  }
+
+  if (auto affineApply = llvm::dyn_cast<mlir::affine::AffineApplyOp>(op)) {
+    llvm::SmallVector<int64_t, 8> inputs;
+    inputs.reserve(affineApply.getOperands().size());
+    for (mlir::Value operand : affineApply.getOperands()) {
+      int64_t resolved = 0;
+      if (!resolveMLIRValue(operand, state, resolved))
+        return false;
+      inputs.push_back(resolved);
+    }
+    auto result =
+        evaluateAffineExpr(affineApply.getAffineMap().getResult(0),
+                           affineApply.getAffineMap(), inputs);
+    if (result)
+      return recordValue(*result);
+    return false;
+  }
+
   return false;
 }
 
@@ -1075,11 +1515,42 @@ static void addLatestPipeDependency(HIVMPipe pipe,
     parsed.op.dependsOn.push_back(it->second);
 }
 
+static bool pipeBelongsToCore(HIVMPipe pipe, llvm::StringRef coreType) {
+  bool isCubeCore = coreType == "CUBE" || coreType == "AIC";
+  bool isVectorCore = coreType == "VECTOR" || coreType == "AIV";
+  if (isCubeCore) {
+    return pipe == HIVMPipe::Cube || pipe == HIVMPipe::MTE1 ||
+           pipe == HIVMPipe::CubeMTE2 || pipe == HIVMPipe::FixPipe ||
+           pipe == HIVMPipe::Scalar;
+  }
+  if (isVectorCore) {
+    return pipe == HIVMPipe::Vector || pipe == HIVMPipe::VectorMTE2 ||
+           pipe == HIVMPipe::MTE3 || pipe == HIVMPipe::Scalar;
+  }
+  return false;
+}
+
+static llvm::SmallVector<HIVMPipe, 5> getCoreBarrierPipes(llvm::StringRef coreType) {
+  if (coreType == "CUBE" || coreType == "AIC")
+    return {HIVMPipe::Cube, HIVMPipe::MTE1, HIVMPipe::CubeMTE2,
+            HIVMPipe::FixPipe, HIVMPipe::Scalar};
+  if (coreType == "VECTOR" || coreType == "AIV")
+    return {HIVMPipe::Vector, HIVMPipe::VectorMTE2, HIVMPipe::MTE3,
+            HIVMPipe::Scalar};
+  return {};
+}
+
 static void ingestParsedOp(const ParsedOp &parsed, AnalysisState &state,
                            HIVMAnalysisReport &report, const HardwareConfig &config) {
   ParsedOp mutableParsed = parsed;
+  if (mutableParsed.syncIdValue) {
+    std::string canonicalSyncId =
+        canonicalizeSyncId(mutableParsed.syncIdValue, state);
+    if (!canonicalSyncId.empty())
+      mutableParsed.op.eventId = canonicalSyncId;
+  }
   EventKey opEventKey{mutableParsed.senderPipe, mutableParsed.receiverPipe,
-                      mutableParsed.eventId};
+                      mutableParsed.op.eventId};
 
   // Enforce program order within each pipe: every op depends on the previous
   // op on the same pipe, matching hardware sequential execution semantics.
@@ -1105,8 +1576,13 @@ static void ingestParsedOp(const ParsedOp &parsed, AnalysisState &state,
   if (mutableParsed.op.isBarrier) {
     if (mutableParsed.barrierPipes.empty() ||
         llvm::is_contained(mutableParsed.barrierPipes, HIVMPipe::All)) {
-      for (const auto &entry : state.latestPipeProducer)
+      for (const auto &entry : state.latestPipeProducer) {
+        if (mutableParsed.op.pipe == HIVMPipe::All &&
+            !mutableParsed.op.coreType.empty() &&
+            !pipeBelongsToCore(entry.first, mutableParsed.op.coreType))
+          continue;
         mutableParsed.op.dependsOn.push_back(entry.second);
+      }
     } else {
       for (HIVMPipe pipe : mutableParsed.barrierPipes)
         addLatestPipeDependency(pipe, state.latestPipeProducer, mutableParsed);
@@ -1303,6 +1779,7 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
                                    bool replayIterations) {
   if (captureConstant(op, state))
     return;
+  captureDerivedScalarValue(op, state);
 
   captureBufferMetadata(op, state);
 
@@ -1312,8 +1789,12 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
     // not bleed across functions.  Only preserve arg-bindings.
     AnalysisState funcState;
     funcState.argBindings = state.argBindings;
+    unsigned userArgIndex = 0;
     for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
-      auto bindIt = funcState.argBindings.find("arg" + std::to_string(idx));
+      if (funcOp.getArgAttr(idx, "hacc.arg_type"))
+        continue;
+      auto bindIt =
+          funcState.argBindings.find("arg" + std::to_string(userArgIndex++));
       if (bindIt != funcState.argBindings.end())
         funcState.boundValues[arg] = bindIt->second;
     }
@@ -1325,6 +1806,11 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
   if (auto forOp = llvm::dyn_cast<mlir::scf::ForOp>(op)) {
     int64_t tripCount = 1;
     bool hasConcreteTripCount = parseForTripCount(forOp, state, tripCount);
+    int64_t lowerBound = 0;
+    int64_t step = 1;
+    bool hasConcreteInductionValue =
+        resolveMLIRValue(forOp.getLowerBound(), state, lowerBound) &&
+        resolveMLIRValue(forOp.getStep(), state, step);
     int64_t nestedMultiplier =
         loopMultiplier * std::max<int64_t>(tripCount, 1);
     report.maxLoopMultiplier =
@@ -1333,12 +1819,17 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
     seedLoopCarriedState(forOp, state, loopState);
     if (replayIterations && hasConcreteTripCount && tripCount > 1) {
       for (int64_t iter = 0; iter < tripCount; ++iter) {
+        if (hasConcreteInductionValue)
+          loopState.boundValues[forOp.getInductionVar()] =
+              lowerBound + iter * step;
         analyzeParsedRegion(op->getRegion(0), loopMultiplier, loopState, report,
                             config, replayIterations);
         if (iter + 1 < tripCount)
           advanceLoopCarriedState(forOp, loopState);
       }
     } else {
+      if (hasConcreteInductionValue)
+        loopState.boundValues[forOp.getInductionVar()] = lowerBound;
       int64_t bodyMultiplier =
           (replayIterations && hasConcreteTripCount) ? loopMultiplier
                                                      : nestedMultiplier;
@@ -1527,8 +2018,37 @@ struct BufferRootState {
   std::map<int64_t, size_t> versionToSlot;
 };
 
+static llvm::StringRef getSyncBlockSourceCore(const HIVMOp &op) {
+  bool isCubeCore = op.coreType == "CUBE" || op.coreType == "AIC";
+  if (op.opName == "sync_block_set")
+    return isCubeCore ? "AIC" : "AIV";
+  if (op.opName == "sync_block_wait")
+    return isCubeCore ? "AIV" : "AIC";
+  return "";
+}
+
+static void normalizeSyncBlockGenerations(HIVMAnalysisReport &report) {
+  std::map<std::pair<std::string, std::string>, int64_t> setGeneration;
+  std::map<std::pair<std::string, std::string>, int64_t> waitGeneration;
+  for (HIVMOp &op : report.operations) {
+    if ((op.opName != "sync_block_set" && op.opName != "sync_block_wait") ||
+        op.eventId.empty())
+      continue;
+    llvm::StringRef sourceCore = getSyncBlockSourceCore(op);
+    if (sourceCore.empty())
+      continue;
+    auto key = std::make_pair(op.eventId, sourceCore.str());
+    if (op.opName == "sync_block_set")
+      op.eventGeneration = ++setGeneration[key];
+    else
+      op.eventGeneration = ++waitGeneration[key];
+  }
+}
+
 static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
                                         const HardwareConfig &config) {
+  normalizeSyncBlockGenerations(report);
+
   const size_t numOps = report.operations.size();
   if (numOps == 0) {
     report.weightedCycles = 0;
@@ -1692,8 +2212,15 @@ static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
     if (op.pipe == HIVMPipe::Unknown)
       return start;
     if (op.isBarrier && op.pipe == HIVMPipe::All) {
-      for (const auto &entry : pipeAvailableAt)
-        start = std::max(start, entry.second);
+      if (op.coreType.empty()) {
+        for (const auto &entry : pipeAvailableAt)
+          start = std::max(start, entry.second);
+      } else {
+        for (const auto &entry : pipeAvailableAt) {
+          if (pipeBelongsToCore(entry.first, op.coreType))
+            start = std::max(start, entry.second);
+        }
+      }
       return start;
     }
     return std::max(start, pipeAvailableAt[op.pipe]);
@@ -1740,8 +2267,14 @@ static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
     }
     if (op.pipe != HIVMPipe::Unknown) {
       if (op.isBarrier && op.pipe == HIVMPipe::All) {
-        for (auto &entry : pipeAvailableAt)
-          entry.second = endTime;
+        auto barrierPipes = getCoreBarrierPipes(op.coreType);
+        if (barrierPipes.empty()) {
+          for (auto &entry : pipeAvailableAt)
+            entry.second = endTime;
+        } else {
+          for (HIVMPipe barrierPipe : barrierPipes)
+            pipeAvailableAt[barrierPipe] = endTime;
+        }
       } else {
         pipeAvailableAt[op.pipe] = endTime;
       }
