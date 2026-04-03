@@ -38,14 +38,17 @@ def _append_bindings(dump_dir, kernel_name, entries):
 def _capture_entries_from_params(params, bound_args, grid):
     entries = []
     named_entries = []
-    for index, param in enumerate(params):
+    runtime_index = 0
+    for param in params:
         if getattr(param, "is_constexpr", False):
             continue
         value = bound_args.get(param.name)
+        current_index = runtime_index
+        runtime_index += 1
         if not _is_scalar_value(value):
             continue
         formatted = _format_scalar(value)
-        entries.append(f"arg{index}={formatted}")
+        entries.append(f"arg{current_index}={formatted}")
         named_entries.append(f"{param.name}={formatted}")
 
     if grid is not None:

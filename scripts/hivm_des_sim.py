@@ -15,12 +15,13 @@ Synchronization primitives:
     set_flag[set_pipe, wait_pipe, event_id] on set_pipe signals wait_pipe.
     wait_flag[set_pipe, wait_pipe, event_id] on wait_pipe blocks until
     the matching set_flag completes.
-    Matching key: (sender_pipe, receiver_pipe, event_id), paired sequentially.
+    Matching key: (sender_pipe, receiver_pipe, event_id, event_generation).
 
   Inter-core (sync_block_set / sync_block_wait):
     Synchronizes between AIC and AIV cores through FFTS hardware.
     sync_block_set on one core signals sync_block_wait on the OTHER core.
-    Matching key: flag_id only.  CUBE set -> VECTOR wait, VECTOR set -> CUBE wait.
+    Matching key: (flag_id, source_core, event_generation).
+    CUBE set -> VECTOR wait, VECTOR set -> CUBE wait.
 
   pipe_barrier[pipe]:
     Drains all in-flight instructions on the target pipe. Implicit in FIFO
@@ -44,6 +45,8 @@ from collections import defaultdict
 
 AIC_PIPES = {"PIPE_M", "PIPE_MTE1", "PIPE_MTE2_C", "PIPE_FIX"}
 AIV_PIPES = {"PIPE_V", "PIPE_MTE2_V", "PIPE_MTE3"}
+AIC_ALL_PIPE = "PIPE_ALL_AIC"
+AIV_ALL_PIPE = "PIPE_ALL_AIV"
 # PIPE_S exists on both cores — disambiguated at load time
 # PIPE_ALL / PIPE_UNKNOWN are pseudo-pipes
 
@@ -107,6 +110,12 @@ def disambiguate_pipe(op):
     if pipe == "PIPE_S":
         core = classify_core(op)
         return f"PIPE_S_{core}"
+    if pipe == "PIPE_ALL":
+        core = classify_core(op)
+        if core == "AIC":
+            return AIC_ALL_PIPE
+        if core == "AIV":
+            return AIV_ALL_PIPE
     return pipe
 
 
@@ -114,6 +123,7 @@ def build_pipe_queues(ops):
     """Separate ops into per-pipe FIFO queues, preserving program order.
 
     PIPE_S is split into PIPE_S_AIC and PIPE_S_AIV.
+    PIPE_ALL is split into PIPE_ALL_AIC and PIPE_ALL_AIV.
     PIPE_UNKNOWN ops get their own queue (instant execution).
     """
     pipes = {}
@@ -130,23 +140,28 @@ def build_pipe_queues(ops):
 # ---------------------------------------------------------------------------
 
 def flag_sync_key(op):
-    """Intra-core set_flag/wait_flag matching key (no generation)."""
-    return (op["sender_pipe"], op["receiver_pipe"], op["event_id"])
+    """Intra-core set_flag/wait_flag matching key."""
+    return (
+        op["sender_pipe"],
+        op["receiver_pipe"],
+        op["event_id"],
+        op.get("event_generation", 0),
+    )
 
 
 def block_sync_key(op):
-    """Inter-core sync_block matching key: (flag_id, source_core).
+    """Inter-core sync_block matching key: (flag_id, source_core, generation).
 
     CUBE sync_block_set -> VECTOR sync_block_wait (and vice versa).
     We key by (flag_id, setting_core) so that CUBE sets pair with VECTOR waits.
     """
     core = classify_core(op)
     if op["name"] == "sync_block_set":
-        return (op["event_id"], core)
+        return (op["event_id"], core, op.get("event_generation", 0))
     elif op["name"] == "sync_block_wait":
         # Wait consumes signals from the OTHER core
         other_core = "AIV" if core == "AIC" else "AIC"
-        return (op["event_id"], other_core)
+        return (op["event_id"], other_core, op.get("event_generation", 0))
     return None
 
 
@@ -203,15 +218,11 @@ def simulate(ops, clock_ghz):
               f"({len(unmatched_flag)} flag, {len(unmatched_block)} block)")
 
     # --- Signal state ---
-    # Intra-core: set_flag/wait_flag
-    flag_signal_time = {}       # (flag_key, seq_idx) -> cycle
-    flag_set_counter = defaultdict(int)
-    flag_wait_counter = defaultdict(int)
-
-    # Inter-core: sync_block_set/wait
-    block_signal_time = {}      # (block_key, seq_idx) -> cycle
-    block_set_counter = defaultdict(int)
-    block_wait_counter = defaultdict(int)
+    # set_flag/sync_block_set publish the latest completion cycle for a given
+    # key+generation. Matching waits observe that published signal; they do not
+    # consume it.
+    flag_signal_time = {}       # flag_key -> cycle
+    block_signal_time = {}      # block_key -> cycle
 
     # --- Simulation state ---
     start_cycle = {}
@@ -222,7 +233,7 @@ def simulate(ops, clock_ghz):
         """Return the cycle when all pipes of a core have drained."""
         t = 0
         for p in pipes.values():
-            if p.name == "PIPE_UNKNOWN":
+            if p.name in {"PIPE_UNKNOWN", AIC_ALL_PIPE, AIV_ALL_PIPE}:
                 continue
             if core == "AIC" and (p.name in AIC_PIPES or p.name == "PIPE_S_AIC"):
                 t = max(t, p.drain_at)
@@ -231,6 +242,13 @@ def simulate(ops, clock_ghz):
             elif core == "SHARED":
                 t = max(t, p.drain_at)
         return t
+
+    def core_pipe_names(core):
+        if core == "AIC":
+            return set(AIC_PIPES) | {"PIPE_S_AIC", AIC_ALL_PIPE}
+        if core == "AIV":
+            return set(AIV_PIPES) | {"PIPE_S_AIV", AIV_ALL_PIPE}
+        return set(pipes.keys())
 
     def try_dispatch(pipe):
         """Try to dispatch the head op of this pipe.
@@ -270,6 +288,11 @@ def simulate(ops, clock_ghz):
             earliest = max(earliest, pipe.drain_at)
 
         # --- pipe_barrier drains the target pipe ---
+        elif op["is_barrier"] and op["pipe"] == "PIPE_ALL":
+            core = op["_core"]
+            earliest = max(earliest, core_pipes_drain_at(core))
+
+        # --- pipe_barrier drains the target pipe ---
         elif name == "pipe_barrier" and op["is_barrier"]:
             if op["pipe"] == "PIPE_ALL":
                 # Drain ALL pipes on this core
@@ -284,26 +307,20 @@ def simulate(ops, clock_ghz):
             key = flag_sync_key(op)
             if key in unmatched_flag:
                 pass  # unresolvable — pass through
+            elif key in flag_signal_time:
+                earliest = max(earliest, flag_signal_time[key])
             else:
-                idx = flag_wait_counter[key]
-                signal_key = (key, idx)
-                if signal_key in flag_signal_time:
-                    earliest = max(earliest, flag_signal_time[signal_key])
-                else:
-                    return False  # blocked
+                return False  # blocked
 
         # --- Inter-core sync: sync_block_wait ---
         elif name == "sync_block_wait" and op["event_id"]:
             key = block_sync_key(op)
             if key in unmatched_block:
                 pass
+            elif key in block_signal_time:
+                earliest = max(earliest, block_signal_time[key])
             else:
-                idx = block_wait_counter[key]
-                signal_key = (key, idx)
-                if signal_key in block_signal_time:
-                    earliest = max(earliest, block_signal_time[signal_key])
-                else:
-                    return False
+                return False
 
         # --- Dispatch the op ---
         start = earliest
@@ -322,7 +339,14 @@ def simulate(ops, clock_ghz):
         # For serial pipes (DMA, etc): issue_at = end (can't accept until done)
         pipe.drain_at = max(pipe.drain_at, end)
 
-        if pipe.name == "PIPE_M":
+        if op["is_barrier"] and op["pipe"] == "PIPE_ALL":
+            for other_name in core_pipe_names(op["_core"]):
+                other = pipes.get(other_name)
+                if other is None:
+                    continue
+                other.issue_at = max(other.issue_at, end)
+                other.drain_at = max(other.drain_at, end)
+        elif pipe.name == "PIPE_M":
             # Cube engine is deeply pipelined — can accept new tile every cycle
             pipe.issue_at = start + max(1, dur)
         else:
@@ -334,26 +358,11 @@ def simulate(ops, clock_ghz):
         # --- Signal production ---
         if name == "set_flag" and op["event_id"]:
             key = flag_sync_key(op)
-            idx = flag_set_counter[key]
-            flag_set_counter[key] += 1
-            flag_signal_time[(key, idx)] = end
+            flag_signal_time[key] = end
 
         elif name == "sync_block_set" and op["event_id"]:
             key = block_sync_key(op)
-            idx = block_set_counter[key]
-            block_set_counter[key] += 1
-            block_signal_time[(key, idx)] = end
-
-        # --- Signal consumption ---
-        if name == "wait_flag" and op["event_id"]:
-            key = flag_sync_key(op)
-            if key not in unmatched_flag:
-                flag_wait_counter[key] += 1
-
-        elif name == "sync_block_wait" and op["event_id"]:
-            key = block_sync_key(op)
-            if key not in unmatched_block:
-                block_wait_counter[key] += 1
+            block_signal_time[key] = end
 
         return True
 
@@ -476,13 +485,19 @@ def emit_perfetto(results, clock_ghz, out_path):
         "PIPE_V": 1, "PIPE_MTE2_V": 2, "PIPE_MTE3": 3,
         "PIPE_S_AIV": 4,
     }
-    misc_tids = {"PIPE_ALL": 1, "PIPE_UNKNOWN": 2}
+    misc_tids = {"PIPE_UNKNOWN": 1}
+    aic_misc_tids = {AIC_ALL_PIPE: 6}
+    aiv_misc_tids = {AIV_ALL_PIPE: 5}
 
     def pipe_pid_tid(pipe_name):
         if pipe_name in aic_tids:
             return 1, aic_tids[pipe_name]
         if pipe_name in aiv_tids:
             return 2, aiv_tids[pipe_name]
+        if pipe_name in aic_misc_tids:
+            return 1, aic_misc_tids[pipe_name]
+        if pipe_name in aiv_misc_tids:
+            return 2, aiv_misc_tids[pipe_name]
         return 3, misc_tids.get(pipe_name, 9)
 
     def cycles_to_us(cycles):
@@ -507,6 +522,14 @@ def emit_perfetto(results, clock_ghz, out_path):
                        "name": "thread_name",
                        "args": {"name": pipe_name}})
     for pipe_name, tid in aiv_tids.items():
+        events.append({"ph": "M", "pid": 2, "tid": tid,
+                       "name": "thread_name",
+                       "args": {"name": pipe_name}})
+    for pipe_name, tid in aic_misc_tids.items():
+        events.append({"ph": "M", "pid": 1, "tid": tid,
+                       "name": "thread_name",
+                       "args": {"name": pipe_name}})
+    for pipe_name, tid in aiv_misc_tids.items():
         events.append({"ph": "M", "pid": 2, "tid": tid,
                        "name": "thread_name",
                        "args": {"name": pipe_name}})
@@ -565,19 +588,22 @@ def emit_perfetto(results, clock_ghz, out_path):
         if not r["event_id"]:
             continue
         if r["name"] == "set_flag":
-            key = (r["sender_pipe"], r["receiver_pipe"], r["event_id"])
+            key = (r["sender_pipe"], r["receiver_pipe"], r["event_id"],
+                   r["event_generation"])
             flag_sets[key].append(r)
         elif r["name"] == "wait_flag":
-            key = (r["sender_pipe"], r["receiver_pipe"], r["event_id"])
+            key = (r["sender_pipe"], r["receiver_pipe"], r["event_id"],
+                   r["event_generation"])
             flag_waits[key].append(r)
         elif r["name"] == "sync_block_set":
-            fid = r["event_id"]
+            fid = (r["event_id"], r["core"], r["event_generation"])
             if r["core"] == "AIC":
                 block_sets_aic[fid].append(r)
             else:
                 block_sets_aiv[fid].append(r)
         elif r["name"] == "sync_block_wait":
-            fid = r["event_id"]
+            source_core = "AIV" if r["core"] == "AIC" else "AIC"
+            fid = (r["event_id"], source_core, r["event_generation"])
             if r["core"] == "AIC":
                 block_waits_aic[fid].append(r)
             else:
