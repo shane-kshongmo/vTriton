@@ -94,9 +94,38 @@ dump 流程。该模式依赖可工作的 Python + triton-ascend 环境，以及
   --python /mnt/c/Users/shane/bin/python
 ```
 
-可通过 `--script-arg <arg>` 透传脚本参数；若 HIVM 中存在动态 loop bound，
-工具会优先从 Triton DSL 的 launch 实参自动推导 `argN=...` / `pid_x=...`
-绑定，再与用户显式传入的 `--arg-bindings=...` 合并（显式值覆盖自动值）。
+若脚本本身提供了显式的 Python 入口函数，推荐优先使用新的
+`--triton-entry <func>` / `--entry-arg <expr>` 模式，让工具直接以给定实参
+驱动 Triton DSL，而不是依赖脚本默认的 `__main__` 路径。这样更适合带有复杂
+wrapper / 测试入口的 DSL 文件，也能降低 HIVM 动态绑定与 launcher 实参不一致
+的风险。例如：
+
+```bash
+./bin/tritonsim-hivm \
+  --triton-script /mnt/d/work/temp_code/prefill_a5_cvpipe.py \
+  --triton-entry test_dsa_prefill \
+  --entry-arg 1 \
+  --entry-arg 2048 \
+  --entry-arg 1024 \
+  --entry-arg 16 \
+  --entry-arg 512 \
+  --entry-arg 64 \
+  --entry-arg torch.bfloat16 \
+  --python /mnt/c/Users/shane/bin/python \
+  --scheduler des \
+  --des-graph-file /tmp/prefill_a5_cvpipe_entry_des.json \
+  --keep-dump-dir
+```
+
+`--entry-arg` 按声明顺序传给目标函数。参数默认按 Python 字面量解析；
+若不是字面量，则会在受限上下文中解析，当前支持例如 `torch.bfloat16` 这类
+常见表达式。
+
+也可继续通过 `--script-arg <arg>` 透传脚本命令行参数；未指定 `--triton-entry`
+时，工具仍按原来的方式执行脚本的 `__main__` 路径。若 HIVM 中存在动态 loop
+bound，工具会优先从 Triton DSL launch 实参自动推导
+`argN=...` / 命名参数 / `pid_x=...` 绑定，再与用户显式传入的
+`--arg-bindings=...` 合并（显式值覆盖自动值）。
 若需要时序可视化，
 可追加 `--perfetto-trace-file /path/to/trace.json`，输出可直接导入 Perfetto /
 Chrome trace viewer 的事件文件。
