@@ -1,314 +1,172 @@
-# TritonSim - Ascend NPU Performance Modeling
+# TritonSim
 
-基于 MLIR 的昇腾 NPU 性能建模工具，支持可配置的硬件抽象层。
+基于 MLIR 的 Ascend NPU 性能建模工具。
 
-## 概述
+当前仓库主要覆盖两类输入：
 
-TritonSim 将 Triton IR 转换为硬件感知的 AscendModel IR，并基于目标硬件的配置
-进行精确的性能分析。通过 JSON 配置文件定义硬件参数，可以适配不同的硬件平台。
+- AscendModel MLIR：用于 pass 级性能分析与报告生成
+- HIVM IR：用于调度、同步与 trace 分析
 
-### 核心流程
+如需更详细的构建说明，见 [BUILD.md](BUILD.md)。硬件配置说明见
+[configs/README.md](configs/README.md)。
 
-```
-.ttir 文件           AscendModel IR              性能报告
-(Triton IR)         (硬件感知 IR)               (Roofline 分析)
-    │                    │                          │
-    ▼                    ▼                          ▼
-┌────────────┐     ┌────────────┐             ┌────────────┐
-│ tt.dot     │     │ ascend.    │             │ Pipeline   │
-│ tt.load    │ ──▶ │ matmul     │ ──────────▶ │ Analysis   │
-│ tt.exp     │     │ vector_*   │             │ Roofline   │
-└────────────┘     └────────────┘             └────────────┘
-                         ▲
-                         │
-              ┌──────────────────┐
-              │  Hardware Config │
-              │  (JSON file)     │
-              └──────────────────┘
-```
+## 功能概览
+
+- `tritonsim-opt`：运行 AscendModel 相关 pass pipeline
+- `tritonsim-hivm`：直接分析 `.npuir.mlir`，也可从 Triton DSL 触发 compile-only dump
+- `ascend-tiling-opt`：在构建中存在时提供 tiling 优化入口
+- `configs/*.json`：定义硬件参数，默认使用 `configs/ascend_910b.json`
 
 ## 快速开始
 
-本仓库默认通过子模块提供 `triton-ascend` 源码，路径为 `thirdparty/triton-ascend`
-（当前指向 mocked 仓库 `https://github.com/shane-kshongmo/Trtiton-Ascend`）:
+### 1. 初始化子模块
 
 ```bash
 git submodule update --init --recursive
 ```
 
+### 2. 构建 LLVM/MLIR
+
 ```bash
-# 构建 (详见 BUILD.md)
-mkdir build && cd build
+export LLVM_INSTALL_PREFIX=$HOME/llvm-install
+./scripts/build_llvm.sh
+```
+
+### 3. 构建本项目
+
+```bash
+mkdir -p build && cd build
 cmake -G Ninja .. \
   -DMLIR_DIR=$LLVM_INSTALL_PREFIX/lib/cmake/mlir \
   -DLLVM_DIR=$LLVM_INSTALL_PREFIX/lib/cmake/llvm
 ninja
 ```
 
-### 直接分析 AscendModel dialect (.mlir)
+如果需要禁用 Triton dialect 支持，在 `cmake` 命令后追加
+`-DTRITONSIM_ENABLE_TRITON=OFF`。
+
+## 常用用法
+
+### 分析 AscendModel MLIR
+
+运行完整 pipeline：
 
 ```bash
-# 完整 pipeline (推荐)
-./bin/tritonsim-opt test/ascend_ops.mlir -ascend-perf-model
+./build/bin/tritonsim-opt test/ascend_ops.mlir -ascend-perf-model
+```
 
-# 分步执行各 pass
-./bin/tritonsim-opt test/ascend_ops.mlir \
+分步运行常用 pass：
+
+```bash
+./build/bin/tritonsim-opt test/ascend_ops.mlir \
   -assign-op-ids \
   -estimate-cycles \
   -analyze-pipeline \
   -perf-report
+```
 
-# 使用自定义硬件配置 (选项传入 pipeline)
-./bin/tritonsim-opt test/ascend_ops.mlir \
+指定硬件配置：
+
+```bash
+./build/bin/tritonsim-opt test/ascend_ops.mlir \
   -ascend-perf-model="hardware-config=configs/ascend_910b.json"
 ```
 
-### 直接分析 HIVM IR (.npuir.mlir)
+### 分析 HIVM IR
 
-新增的 `tritonsim-hivm` 工具直接消费 `triton-ascend` 转储出的
-`kernel.npuir.mlir`，基于显式的 `set_flag` / `wait_flag` /
-`pipe_barrier` 和 pipe 资源做调度分析。分析器优先走 MLIR 解析路径，
-若本机存在 `triton-ascend` 已构建出的 BiShengIR HIVM dialect 头文件与静态库，
-会优先按真实 `hivm.hir.*` typed op 解析 `sync_block_*`、DMA、macro op 和
-pipe/core attrs；遇到当前本地仍未注册的 HIVM 语法时才回退到兼容导入器。
+直接分析仓库内示例：
 
 ```bash
-./bin/tritonsim-hivm --npuir-file test/hivm_add_kernel.npuir.mlir
-./bin/tritonsim-hivm --npuir-file test/hivm_mixed_cv_kernel.npuir.mlir
-./bin/tritonsim-hivm \
+./build/bin/tritonsim-hivm --npuir-file test/hivm_add_kernel.npuir.mlir
+./build/bin/tritonsim-hivm --npuir-file test/hivm_mixed_cv_kernel.npuir.mlir
+```
+
+导出 Perfetto trace：
+
+```bash
+./build/bin/tritonsim-hivm \
   --npuir-file test/hivm_add_kernel.npuir.mlir \
-  --perfetto-trace-file /tmp/hivm_add_trace.json
+  --perfetto-trace-file /tmp/hivm_trace.json
 ```
 
-### 从 Triton DSL 生成 HIVM IR 并分析
-
-`tritonsim-hivm` 也可以可选地调用 `triton-ascend` 的 compile-only
-dump 流程。该模式依赖可工作的 Python + triton-ascend 环境，以及本机可用
-的 CANN 工具链。若指定的 `triton-ascend` 源码根目录下存在已构建的 Python
-产物，工具会优先将其加入 `PYTHONPATH`；否则会回退到当前 Python 环境中已安装
-的 `triton-ascend` wheel。也可通过 `--triton-ascend-root` 显式指定源码根目录。
-
-```bash
-./bin/tritonsim-hivm \
-  --triton-script test/triton_smoke.py \
-  --python /mnt/c/Users/shane/bin/python
-```
-
-若脚本本身提供了显式的 Python 入口函数，推荐优先使用新的
-`--triton-entry <func>` / `--entry-arg <expr>` 模式，让工具直接以给定实参
-驱动 Triton DSL，而不是依赖脚本默认的 `__main__` 路径。这样更适合带有复杂
-wrapper / 测试入口的 DSL 文件，也能降低 HIVM 动态绑定与 launcher 实参不一致
-的风险。例如：
-
-```bash
-./bin/tritonsim-hivm \
-  --triton-script /mnt/d/work/temp_code/prefill_a5_cvpipe.py \
-  --triton-entry test_dsa_prefill \
-  --entry-arg 1 \
-  --entry-arg 2048 \
-  --entry-arg 1024 \
-  --entry-arg 16 \
-  --entry-arg 512 \
-  --entry-arg 64 \
-  --entry-arg torch.bfloat16 \
-  --python /mnt/c/Users/shane/bin/python \
-  --scheduler des \
-  --des-graph-file /tmp/prefill_a5_cvpipe_entry_des.json \
-  --keep-dump-dir
-```
-
-`--entry-arg` 按声明顺序传给目标函数。参数默认按 Python 字面量解析；
-若不是字面量，则会在受限上下文中解析，当前支持例如 `torch.bfloat16` 这类
-常见表达式。
-
-也可继续通过 `--script-arg <arg>` 透传脚本命令行参数；未指定 `--triton-entry`
-时，工具仍按原来的方式执行脚本的 `__main__` 路径。若 HIVM 中存在动态 loop
-bound，工具会优先从 Triton DSL launch 实参自动推导
-`argN=...` / 命名参数 / `pid_x=...` 绑定，再与用户显式传入的
-`--arg-bindings=...` 合并（显式值覆盖自动值）。
-若需要时序可视化，
-可追加 `--perfetto-trace-file /path/to/trace.json`，输出可直接导入 Perfetto /
-Chrome trace viewer 的事件文件。
-
-若环境不完整，工具会在真正执行脚本前做 preflight，并明确提示
-`triton` / `torch` / `torch_npu` 依赖缺失，而不是只返回笼统的 Python 失败。
-运行时会自动:
-
-- 为 compile-only 模式注入 `TORCH_DEVICE_BACKEND_AUTOLOAD=0`
-- 设置默认 `TRITON_ASCEND_ARCH=Ascend910_9599`
-- 将 Triton cache 重定向到临时目录，避免污染或依赖用户目录权限
-- 尝试从常见安装路径探测 CANN，并补齐 `ASCEND_HOME_PATH` / `PATH` / `LD_LIBRARY_PATH`
-
-### 以 MLIR Pass 方式分析 HIVM IR
-
-`HIVMAnalysis` 现在也作为 `tritonsim-opt` 的原生 `ModuleOp` pass 提供，可直接对
-已解析的 HIVM IR 运行调度与同步分析，而不是先走文本扫描器。
-当前模型已将 Vector 与 Cube 侧的 `MTE2` 资源拆分为独立资源
-`PIPE_MTE2_V` 与 `PIPE_MTE2_C`，避免把两侧 DMA 错误地建模成同一条共享 pipe。
+也可在 `tritonsim-opt` 中直接对 HIVM IR 跑 pass：
 
 ```bash
 ./build/bin/tritonsim-opt --analyze-hivm test/hivm_mixed_cv_kernel.npuir.mlir
-./build/bin/tritonsim-opt \
-  --analyze-hivm="scheduler=des hardware-config=configs/ascend_910b.json arg-bindings=arg10=128 perfetto-trace-file=/tmp/hivm_trace.json" \
-  /path/to/kernel.npuir.mlir
 ```
 
-若 `.npuir.mlir` 中包含非 MLIR 内容，例如某些编译转储在文件尾部直接拼接了
-LLVM warning 文本，`mlir-opt` 会在 pass 执行前就解析失败。这种情况下需要先清洗
-输入文件，只保留合法 MLIR 模块内容，例如：
+### 从 Triton DSL 触发 HIVM 分析
+
+该模式依赖可用的 Python + `triton-ascend` 环境：
 
 ```bash
-sed '/^warning: /,$d' raw.kernel.npuir.mlir > clean.kernel.npuir.mlir
-./build/bin/tritonsim-opt -allow-unregistered-dialect --analyze-hivm clean.kernel.npuir.mlir
+./build/bin/tritonsim-hivm \
+  --triton-script test/triton_smoke.py \
+  --python python3
 ```
 
-### 分析 Triton IR (.ttir)
-
-**方式 A: 启用 Triton 支持构建 (详见 BUILD.md 方式A)**
-
-`tritonsim-opt` 直接接受 `.ttir` 文件:
+如果脚本提供明确入口，优先使用 `--triton-entry` / `--entry-arg`：
 
 ```bash
-./bin/tritonsim-opt kernel.ttir -ascend-perf-model
+./build/bin/tritonsim-hivm \
+  --triton-script path/to/script.py \
+  --triton-entry main \
+  --entry-arg 1 \
+  --python python3
 ```
 
-**方式 B: 未启用 Triton 支持构建 (两阶段 pipeline)**
+### 分析 Triton IR (`.ttir`)
 
-先用 `triton-opt` 将 `.ttir` 转为通用 MLIR，再传入 `tritonsim-opt`:
+启用 Triton 支持构建时，可直接输入 `.ttir`：
 
 ```bash
-TRITON_OPT=<triton-ascend-build>/bin/triton-opt
+./build/bin/tritonsim-opt test/flash_attention.ttir -ascend-perf-model
+```
 
-$TRITON_OPT kernel.ttir \
-  --allow-unregistered-dialect --mlir-print-op-generic | \
-./bin/tritonsim-opt - \
+如果构建时关闭了 Triton dialect 支持，需要先通过 `triton-opt` 转成 generic MLIR：
+
+```bash
+TRITON_OPT=/path/to/triton-opt
+
+$TRITON_OPT kernel.ttir --allow-unregistered-dialect --mlir-print-op-generic | \
+./build/bin/tritonsim-opt - \
   --allow-unregistered-dialect \
-  -ascend-perf-model="loop-trip-counts=<N>"
+  -ascend-perf-model="loop-trip-counts=1"
 ```
 
-> `loop-trip-counts=N` 指定 Triton kernel 中 scf.for 的迭代次数 (程序启动时的实际值)。
+## 测试与验证
 
-**示例: 分析 Flash Attention 转储**
+常用本地检查：
 
 ```bash
-$TRITON_OPT triton_dumps_fa/<hash>/_attn_fwd.ttir \
-  --allow-unregistered-dialect --mlir-print-op-generic | \
-./bin/tritonsim-opt - \
-  --allow-unregistered-dialect \
-  -ascend-perf-model='loop-trip-counts=1'
+./build/bin/tritonsim-opt test/ascend_ops.mlir -ascend-perf-model
+./build/bin/tritonsim-hivm --npuir-file test/hivm_add_kernel.npuir.mlir
+python3 test/triton_smoke.py
 ```
 
-## 硬件抽象架构
-
-### Ascend 910B 数据流
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                          HBM                                │
-│                      (1.6 TB/s)                             │
-└───────┬─────────────────────────────────────────┬───────────┘
-        │ MTE2 (Cube)                    MTE2 (Vector) │
-        ▼                                              ▼
-┌───────────────┐                            ┌───────────────┐
-│      L1       │                            │      UB       │
-│   (1024KB)    │                            │   (256KB)     │
-└───────┬───────┘                            └───────┬───────┘
-        │ MTE1                                       │
-        ▼                                            ▼
-┌───────┴───────┐                            ┌───────────────┐
-│  L0A  │  L0B  │                            │    Vector     │
-│ (64KB)│(64KB) │                            │  128 × FP16   │
-└───┬───┴───┬───┘                            └───────┬───────┘
-    │       │                                        │
-    └───┬───┘                                        │ MTE3
-        ▼                                            ▼
-┌───────────────┐                            ┌───────────────┐
-│     Cube      │                            │     HBM       │
-│  16×16×16     │                            │               │
-│  320 TFLOPS   │                            │               │
-└───────┬───────┘                            └───────────────┘
-        │
-        ▼
-┌───────────────┐
-│      L0C      │
-│   (256KB)     │
-└───────┬───────┘
-        │ FixPipe
-        ▼
-┌───────────────┐
-│     HBM       │
-└───────────────┘
-```
-
-### 硬件参数 (910B 默认值)
-
-| 组件 | 参数 | 值 |
-|------|------|-----|
-| **时钟** | 频率 | 1.85 GHz |
-| **HBM** | 容量 / 带宽 | 32 GB / 1.6 TB/s |
-| **L1** | 容量 | 1024 KB |
-| **UB** | 容量 | 256 KB |
-| **Cube** | 算力 (FP16) | 320 TFLOPS |
-| **Cube** | Tile 大小 | 16×16×16 |
-| **Vector** | 宽度 | 128 FP16 |
-| **Vector** | 算力 (FP32) | 10 TFLOPS |
-
-## 硬件配置
-
-通过 JSON 文件定义硬件参数，支持:
-
-- **内存空间**: HBM, L2, L1, L0A/B/C, UB
-- **计算单元**: Cube (矩阵引擎), Vector (SIMD)
-- **数据搬运**: MTE1, MTE2, MTE3, FixPipe
-- **流水线**: 数据流路径和并行性
-
-详见 [configs/README.md](configs/README.md)。
-
-## 目录结构
-
-```
-TritonSim/
-├── BUILD.md                    # 构建指南
-├── configs/
-│   ├── ascend_910b.json       # 910B 硬件配置
-│   ├── hardware_schema.json   # JSON Schema
-│   └── README.md              # 配置说明
-├── include/AscendModel/
-│   ├── HardwareConfig.h       # 硬件配置接口
-│   ├── IR/                    # Dialect 定义
-│   ├── Transforms/            # Pass 定义
-│   └── Analysis/              # 分析功能
-├── lib/
-│   ├── HardwareConfig.cpp     # 配置加载实现
-│   ├── IR/                    # Dialect 实现
-│   ├── Transforms/            # Pass 实现
-│   └── Analysis/              # 分析实现
-├── tools/                     # 主工具
-└── test/                      # 测试用例
-```
-
-## Pass Pipeline
-
-| Pass | 功能 |
-|------|------|
-| `-convert-triton-to-ascend` | Triton IR → AscendModel IR |
-| `-insert-data-transfers` | 插入 Cube/Vector 之间的数据搬运 |
-| `-assign-op-ids` | 分配操作 ID |
-| `-estimate-cycles` | 估算执行周期 |
-| `-analyze-pipeline` | 流水线调度分析 |
-| `-perf-report` | 生成性能报告 |
-| `-ascend-perf-model` | 运行完整 pipeline (上述所有 pass) |
-
-## 扩展新硬件
-
-1. 创建新的 JSON 配置文件 (参考 `configs/ascend_910b.json`)
-2. 定义内存层次、计算单元、数据搬运路径
-3. 运行时通过 `--hardware-config` 指定配置文件
+启用测试后可运行：
 
 ```bash
-./bin/tritonsim-opt input.mlir --hardware-config=my_new_hardware.json
+ctest --test-dir build
 ```
 
-## 许可证
+## 仓库结构
+
+```text
+include/AscendModel/   公共头文件
+lib/AscendModel/       分析、IR 与 transforms 实现
+tools/                 命令行工具入口
+configs/               硬件配置与 schema
+test/                  示例输入与 smoke tests
+thirdparty/            外部依赖
+```
+
+## 说明
+
+- 默认硬件配置为 Ascend 910B
+- 与具体本机路径绑定的示例、临时脚本路径和历史实现细节未保留在本 README 中
+- 更深入的构建选项、Triton 集成方式和硬件配置格式请分别查看 [BUILD.md](BUILD.md) 与 [configs/README.md](configs/README.md)
+
+## License
 
 Apache 2.0
