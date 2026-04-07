@@ -1485,19 +1485,14 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
            ceilDiv(elems, config.getVectorWidthElements()) * opCost;
   };
 
-  if (opName == "vadd" || opName == "vmul" || opName == "vsub" ||
-      opName == "vcast")
-    return vectorCycles(1);
-  if (opName == "vexp")
-    return vectorCycles(4);
-  if (opName == "vdiv")
-    return vectorCycles(3);
-  if (opName == "vlog")
-    return vectorCycles(3);
-  if (opName == "vsqrt" || opName == "vrsqrt")
-    return vectorCycles(2);
-  if (opName == "vtanh" || opName == "vsigmoid")
-    return vectorCycles(3);
+  auto isVectorALUOp = [&](llvm::StringRef name) {
+    return name == "vadd" || name == "vmul" || name == "vsub" ||
+           name == "vcast" || name == "vexp" || name == "vdiv" ||
+           name == "vlog" || name == "vsqrt" || name == "vrsqrt" ||
+           name == "vtanh" || name == "vsigmoid" || name == "vreduce";
+  };
+  if (isVectorALUOp(opName))
+    return vectorCycles(config.getVectorOpCyclesPerInstruction(opName));
   if (opName == "vbrc") {
     if (parsed.op.pipe == HIVMPipe::VectorMTE2 ||
         parsed.op.pipe == HIVMPipe::CubeMTE2) {
@@ -1509,9 +1504,6 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
     }
     return vectorCycles(1);
   }
-  if (opName == "vreduce")
-    return vectorCycles(2);
-
   if (opName == "fixpipe") {
     int64_t bytes = std::max<int64_t>(parsed.op.bytes, 1);
     auto spaces = parseLoadStoreSpaces(line);

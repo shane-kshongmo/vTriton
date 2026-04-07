@@ -169,6 +169,7 @@ public:
   int getVectorWidthElements() const;
   int getVectorWidthBytes() const;
   llvm::StringRef getVectorComputeSpace() const;
+  int getVectorOpCyclesPerInstruction(llvm::StringRef opName) const;
 
   // HBM bandwidth (convenience)
   double getHBMBandwidthGBs() const;
@@ -234,6 +235,7 @@ private:
   llvm::StringMap<ComputeUnit> computeUnits;
   llvm::StringMap<DataMover> dataMovers;
   llvm::StringMap<PipelinePath> pipelinePaths;
+  llvm::StringMap<int> vectorOpCyclesPerInstruction;
 
   // Parallelism info
   llvm::StringMap<bool> parallelismFlags;
