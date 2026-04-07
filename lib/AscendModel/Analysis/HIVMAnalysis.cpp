@@ -65,6 +65,12 @@ struct ParsedOp {
   HIVMPipe receiverPipe = HIVMPipe::Unknown;
 };
 
+static int64_t estimateMmadL1MTE1Cycles(const ParsedOp &parsed,
+                                        const HardwareConfig &config);
+
+static int64_t estimateND2NZCycles(const ParsedOp &parsed,
+                                   const HardwareConfig &config);
+
 static std::vector<HIVMOp> expandMacroOp(const ParsedOp &parsed,
                                          const HardwareConfig &config) {
   std::vector<HIVMOp> ops;
@@ -75,7 +81,7 @@ static std::vector<HIVMOp> expandMacroOp(const ParsedOp &parsed,
     HIVMOp mte = parsed.op;
     mte.opName = "mmadL1.mte1";
     mte.pipe = HIVMPipe::MTE1;
-    mte.duration = std::max<int64_t>(1, config.getMTE2StartupLatency() / 2);
+    mte.duration = estimateMmadL1MTE1Cycles(parsed, config);
     mte.isSyncOp = false;
     mte.isBarrier = false;
 
@@ -309,6 +315,39 @@ static int64_t parseMemRefBytes(llvm::StringRef line) {
   }
 
   return count * elemBytes;
+}
+
+static int64_t estimateMmadL1MTE1Cycles(const ParsedOp &parsed,
+                                        const HardwareConfig &config) {
+  int64_t inputBytes = 0;
+  for (const std::string &buffer : parsed.op.readBuffers)
+    inputBytes += parseMemRefBytes(buffer);
+  if (inputBytes <= 0)
+    inputBytes = std::max<int64_t>(parsed.op.bytes, 1);
+
+  double bandwidth = config.getMemoryBandwidthBytesPerCycle("mte1");
+  if (bandwidth <= 0.0)
+    bandwidth = std::max(1.0, config.getMemoryBandwidthBytesPerCycle("l1"));
+  int64_t transferCycles =
+      std::max<int64_t>(1, static_cast<int64_t>(std::ceil(inputBytes / bandwidth)));
+  int64_t startupCycles = std::max<int64_t>(4, config.getMTE2StartupLatency() / 5);
+  return startupCycles + transferCycles;
+}
+
+static int64_t estimateND2NZCycles(const ParsedOp &parsed,
+                                   const HardwareConfig &config) {
+  int64_t bytes = std::max<int64_t>(parsed.op.bytes, 1);
+  // nd2nz is not a plain HBM->L1 DMA. The layout conversion runs on the
+  // cube-side transfer path but sustains lower throughput than a normal
+  // cube_mte2 transport, so keep it on a dedicated calibration path.
+  double baseBandwidth = config.getMemoryBandwidthBytesPerCycle("cube_mte2");
+  if (baseBandwidth <= 0.0)
+    baseBandwidth = std::max(1.0, config.getMemoryBandwidthBytesPerCycle("hbm"));
+  double effectiveBandwidth = std::max(1.0, baseBandwidth * 0.5);
+  int64_t transferCycles = std::max<int64_t>(
+      1, static_cast<int64_t>(std::ceil(bytes / effectiveBandwidth)));
+  int64_t startupCycles = std::max<int64_t>(16, config.getMTE2StartupLatency() / 3);
+  return startupCycles + transferCycles;
 }
 
 static std::string canonicalizeAddressSpace(llvm::StringRef space) {
@@ -1446,8 +1485,19 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
            ceilDiv(elems, config.getVectorWidthElements()) * opCost;
   };
 
-  if (opName == "vadd" || opName == "vmul" || opName == "vcast")
+  if (opName == "vadd" || opName == "vmul" || opName == "vsub" ||
+      opName == "vcast")
     return vectorCycles(1);
+  if (opName == "vexp")
+    return vectorCycles(4);
+  if (opName == "vdiv")
+    return vectorCycles(3);
+  if (opName == "vlog")
+    return vectorCycles(3);
+  if (opName == "vsqrt" || opName == "vrsqrt")
+    return vectorCycles(2);
+  if (opName == "vtanh" || opName == "vsigmoid")
+    return vectorCycles(3);
   if (opName == "vbrc") {
     if (parsed.op.pipe == HIVMPipe::VectorMTE2 ||
         parsed.op.pipe == HIVMPipe::CubeMTE2) {
@@ -1460,7 +1510,7 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
     return vectorCycles(1);
   }
   if (opName == "vreduce")
-    return vectorCycles(4);
+    return vectorCycles(2);
 
   if (opName == "fixpipe") {
     int64_t bytes = std::max<int64_t>(parsed.op.bytes, 1);
@@ -1476,9 +1526,7 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
   }
 
   if (opName == "nd2nz") {
-    int64_t bytes = std::max<int64_t>(parsed.op.bytes, 1);
-    return config.getMTE2StartupLatency() +
-           config.estimateMemoryCycles("cube_mte2", bytes);
+    return estimateND2NZCycles(parsed, config);
   }
 
   if (opName == "nz2nd") {
