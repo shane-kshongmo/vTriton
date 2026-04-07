@@ -668,9 +668,14 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     parsed.op.coreType = parsed.syncCoreType;
     parsed.senderEvent = stringifyTypedPipe(syncWait.getTpipe().getPipe());
     parsed.receiverEvent = stringifyTypedPipe(syncWait.getPipe().getPipe());
+    // The sender pipe lives on the *opposite* core in cross-core sync.
+    llvm::StringRef senderCoreType =
+        (parsed.op.coreType == "CUBE" || parsed.op.coreType == "AIC")
+            ? "VECTOR"
+            : "CUBE";
     parsed.senderPipe = disambiguateMTE2Pipe(
         convertTypedPipe(syncWait.getTpipe().getPipe()),
-        convertTypedPipe(syncWait.getPipe().getPipe()), parsed.op.coreType);
+        convertTypedPipe(syncWait.getPipe().getPipe()), senderCoreType);
     parsed.receiverPipe = disambiguateMTE2Pipe(
         convertTypedPipe(syncWait.getPipe().getPipe()), parsed.senderPipe,
         parsed.op.coreType);
@@ -1638,8 +1643,16 @@ static void ingestParsedOp(const ParsedOp &parsed, AnalysisState &state,
   for (size_t idx = firstExpandedId;
        idx <= previousExpandedId && idx < report.operations.size(); ++idx) {
     HIVMOp &expanded = report.operations[idx];
-    if (expanded.pipe != HIVMPipe::All && expanded.pipe != HIVMPipe::Unknown)
+    if (expanded.pipe == HIVMPipe::All && expanded.isBarrier) {
+      // A PIPE_ALL barrier blocks all pipes on its core.  Register it as the
+      // latest producer for every pipe in that core so subsequent ops on any
+      // of those pipes depend on the barrier completing.
+      for (HIVMPipe p : getCoreBarrierPipes(expanded.coreType))
+        state.latestPipeProducer[p] = expanded.id;
+    } else if (expanded.pipe != HIVMPipe::All &&
+               expanded.pipe != HIVMPipe::Unknown) {
       state.latestPipeProducer[expanded.pipe] = expanded.id;
+    }
   }
 }
 
@@ -2045,9 +2058,42 @@ static void normalizeSyncBlockGenerations(HIVMAnalysisReport &report) {
   }
 }
 
+/// After generation normalization, wire explicit dependency edges from each
+/// sync_block_set to its matching sync_block_wait so the DES respects
+/// cross-core ordering.  Without this, the wait may be scheduled before the
+/// set completes (they live in different func::FuncOps with independent state).
+static void wireCrossCoreSyncDependencies(HIVMAnalysisReport &report) {
+  // Key: (eventId, sourceCore, generation) → set-op id
+  using SyncKey = std::tuple<std::string, std::string, int64_t>;
+  std::map<SyncKey, size_t> setOpById;
+  for (HIVMOp &op : report.operations) {
+    if (op.opName != "sync_block_set" || op.eventId.empty())
+      continue;
+    llvm::StringRef sourceCore = getSyncBlockSourceCore(op);
+    if (sourceCore.empty())
+      continue;
+    SyncKey key{op.eventId, sourceCore.str(), op.eventGeneration};
+    setOpById[key] = op.id;
+  }
+  for (HIVMOp &op : report.operations) {
+    if (op.opName != "sync_block_wait" || op.eventId.empty())
+      continue;
+    llvm::StringRef sourceCore = getSyncBlockSourceCore(op);
+    if (sourceCore.empty())
+      continue;
+    // sync_block_wait's sourceCore returns the core that *set* the flag
+    // (the opposite core), which matches the set-op's sourceCore.
+    SyncKey key{op.eventId, sourceCore.str(), op.eventGeneration};
+    auto it = setOpById.find(key);
+    if (it != setOpById.end())
+      op.dependsOn.push_back(it->second);
+  }
+}
+
 static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
                                         const HardwareConfig &config) {
   normalizeSyncBlockGenerations(report);
+  wireCrossCoreSyncDependencies(report);
 
   const size_t numOps = report.operations.size();
   if (numOps == 0) {
