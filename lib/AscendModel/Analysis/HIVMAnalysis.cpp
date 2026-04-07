@@ -2531,30 +2531,66 @@ void HIVMAnalysisReport::print(llvm::raw_ostream &os,
 
 void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
                                            const HardwareConfig &config) const {
+  // Assign each pipe a unique tid.  Pipes are grouped into AIC (Cube core)
+  // and AIV (Vector core) processes so that Perfetto renders them separately.
+  //   AIC pid=1 : Cube, MTE1, CubeMTE2, FixPipe, Scalar(AIC)
+  //   AIV pid=2 : Vector, VectorMTE2, MTE3, Scalar(AIV)
+  //   Shared pid=3 : All, Unknown  (cross-core barriers / unclassified)
+  constexpr int kPidAIC = 1;
+  constexpr int kPidAIV = 2;
+  constexpr int kPidShared = 3;
+
   auto pipeTid = [](HIVMPipe pipe) -> int {
     switch (pipe) {
+    case HIVMPipe::Cube:
+      return 1;
+    case HIVMPipe::MTE1:
+      return 2;
+    case HIVMPipe::CubeMTE2:
+      return 3;
+    case HIVMPipe::FixPipe:
+      return 4;
+    case HIVMPipe::Scalar:
+      return 5;
     case HIVMPipe::Vector:
       return 1;
     case HIVMPipe::VectorMTE2:
       return 2;
-    case HIVMPipe::CubeMTE2:
-      return 3;
     case HIVMPipe::MTE3:
-      return 4;
-    case HIVMPipe::Scalar:
-      return 5;
-    case HIVMPipe::FixPipe:
-      return 6;
-    case HIVMPipe::Cube:
-      return 7;
-    case HIVMPipe::MTE1:
-      return 8;
+      return 3;
     case HIVMPipe::All:
-      return 9;
+      return 1;
     case HIVMPipe::Unknown:
-      return 10;
+      return 5; // Coalesce with Scalar — metadata/address ops
     }
-    return 10;
+    return 5;
+  };
+
+  auto pipePid = [&](HIVMPipe pipe, llvm::StringRef coreType) -> int {
+    switch (pipe) {
+    case HIVMPipe::Cube:
+    case HIVMPipe::MTE1:
+    case HIVMPipe::CubeMTE2:
+    case HIVMPipe::FixPipe:
+      return kPidAIC;
+    case HIVMPipe::Vector:
+    case HIVMPipe::VectorMTE2:
+    case HIVMPipe::MTE3:
+      return kPidAIV;
+    case HIVMPipe::Scalar:
+      // Scalar exists on both cores; assign by op's core_type.
+      if (coreType == "CUBE" || coreType == "AIC")
+        return kPidAIC;
+      return kPidAIV;
+    case HIVMPipe::All:
+    case HIVMPipe::Unknown:
+      if (coreType == "CUBE" || coreType == "AIC")
+        return kPidAIC;
+      if (coreType == "VECTOR" || coreType == "AIV")
+        return kPidAIV;
+      return kPidShared;
+    }
+    return kPidShared;
   };
 
   auto cyclesToTraceUs = [&](int64_t cycles) -> double {
@@ -2591,22 +2627,59 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
     first = false;
   };
 
+  // Process names for AIC, AIV, and Shared groups.
   emitComma();
-  os << "    {\"ph\":\"M\",\"pid\":1,\"tid\":0,\"name\":\"process_name\",\"args\":{\"name\":\"HIVM Schedule\"}}";
+  os << "    {\"ph\":\"M\",\"pid\":" << kPidAIC
+     << ",\"tid\":0,\"name\":\"process_name\",\"args\":{\"name\":\"AIC (Cube Core)\"}}";
+  emitComma();
+  os << "    {\"ph\":\"M\",\"pid\":" << kPidAIV
+     << ",\"tid\":0,\"name\":\"process_name\",\"args\":{\"name\":\"AIV (Vector Core)\"}}";
+  emitComma();
+  os << "    {\"ph\":\"M\",\"pid\":" << kPidShared
+     << ",\"tid\":0,\"name\":\"process_name\",\"args\":{\"name\":\"Shared\"}}";
 
-  for (HIVMPipe pipe : {HIVMPipe::Vector, HIVMPipe::VectorMTE2,
-                        HIVMPipe::CubeMTE2, HIVMPipe::MTE3,
-                        HIVMPipe::Scalar, HIVMPipe::FixPipe, HIVMPipe::Cube,
-                        HIVMPipe::MTE1, HIVMPipe::All, HIVMPipe::Unknown}) {
+  // AIC pipes: Cube, MTE1, CubeMTE2, FixPipe, Scalar(AIC)
+  for (HIVMPipe pipe :
+       {HIVMPipe::Cube, HIVMPipe::MTE1, HIVMPipe::CubeMTE2,
+        HIVMPipe::FixPipe}) {
     emitComma();
-    os << "    {\"ph\":\"M\",\"pid\":1,\"tid\":" << pipeTid(pipe)
+    os << "    {\"ph\":\"M\",\"pid\":" << kPidAIC
+       << ",\"tid\":" << pipeTid(pipe)
        << ",\"name\":\"thread_name\",\"args\":{\"name\":\""
        << HIVMAnalyzer::stringifyPipe(pipe) << "\"}}";
   }
+  // Scalar thread under AIC
+  emitComma();
+  os << "    {\"ph\":\"M\",\"pid\":" << kPidAIC
+     << ",\"tid\":" << pipeTid(HIVMPipe::Scalar)
+     << ",\"name\":\"thread_name\",\"args\":{\"name\":\"Scalar\"}}";
+
+  // AIV pipes: Vector, VectorMTE2, MTE3, Scalar(AIV)
+  for (HIVMPipe pipe :
+       {HIVMPipe::Vector, HIVMPipe::VectorMTE2, HIVMPipe::MTE3}) {
+    emitComma();
+    os << "    {\"ph\":\"M\",\"pid\":" << kPidAIV
+       << ",\"tid\":" << pipeTid(pipe)
+       << ",\"name\":\"thread_name\",\"args\":{\"name\":\""
+       << HIVMAnalyzer::stringifyPipe(pipe) << "\"}}";
+  }
+  // Scalar thread under AIV
+  emitComma();
+  os << "    {\"ph\":\"M\",\"pid\":" << kPidAIV
+     << ",\"tid\":" << pipeTid(HIVMPipe::Scalar)
+     << ",\"name\":\"thread_name\",\"args\":{\"name\":\"Scalar\"}}";
+
+  // Shared process: cross-core barrier track
+  emitComma();
+  os << "    {\"ph\":\"M\",\"pid\":" << kPidShared
+     << ",\"tid\":" << pipeTid(HIVMPipe::All)
+     << ",\"name\":\"thread_name\",\"args\":{\"name\":\""
+     << HIVMAnalyzer::stringifyPipe(HIVMPipe::All) << "\"}}";
 
   for (const HIVMOp &op : operations) {
     emitComma();
-    os << "    {\"ph\":\"X\",\"pid\":1,\"tid\":" << pipeTid(op.pipe)
+    os << "    {\"ph\":\"X\",\"pid\":" << pipePid(op.pipe, op.coreType)
+       << ",\"tid\":" << pipeTid(op.pipe)
        << ",\"ts\":" << llvm::format("%.3f", cyclesToTraceUs(op.startCycle))
        << ",\"dur\":" << llvm::format("%.3f", cyclesToTraceUs(op.duration))
        << ",\"name\":\"" << op.opName << "\",\"args\":{"
@@ -2629,6 +2702,57 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
        << ",\"sync\":" << (op.isSyncOp ? "true" : "false")
        << ",\"barrier\":" << (op.isBarrier ? "true" : "false")
        << "}}";
+  }
+
+  // Emit flow events linking sync_block_set → sync_block_wait across cores.
+  // Build a map from (eventId, generation) → set-op index, then match waits.
+  {
+    // Key: (eventId, generation, sourceCore)
+    using SyncKey = std::tuple<std::string, int64_t, std::string>;
+    std::map<SyncKey, std::vector<size_t>> setOps;
+    std::map<SyncKey, std::vector<size_t>> waitOps;
+    for (size_t i = 0; i < operations.size(); ++i) {
+      const HIVMOp &op = operations[i];
+      if (op.opName == "sync_block_set" && !op.eventId.empty()) {
+        bool isCube = op.coreType == "CUBE" || op.coreType == "AIC";
+        SyncKey key{op.eventId, op.eventGeneration, isCube ? "AIC" : "AIV"};
+        setOps[key].push_back(i);
+      } else if (op.opName == "sync_block_wait" && !op.eventId.empty()) {
+        // Wait on CUBE core means waiting for AIV→AIC signal.
+        bool isCube = op.coreType == "CUBE" || op.coreType == "AIC";
+        SyncKey key{op.eventId, op.eventGeneration, isCube ? "AIV" : "AIC"};
+        waitOps[key].push_back(i);
+      }
+    }
+    int64_t flowId = 0;
+    for (auto &[key, setIndices] : setOps) {
+      auto it = waitOps.find(key);
+      if (it == waitOps.end())
+        continue;
+      auto &waits = it->second;
+      size_t pairs = std::min(setIndices.size(), waits.size());
+      for (size_t p = 0; p < pairs; ++p) {
+        const HIVMOp &setOp = operations[setIndices[p]];
+        const HIVMOp &waitOp = operations[waits[p]];
+        // Flow start at set-op end time
+        emitComma();
+        os << "    {\"ph\":\"s\",\"id\":" << flowId
+           << ",\"pid\":" << pipePid(setOp.pipe, setOp.coreType)
+           << ",\"tid\":" << pipeTid(setOp.pipe)
+           << ",\"ts\":" << llvm::format("%.3f",
+                  cyclesToTraceUs(setOp.startCycle + setOp.duration))
+           << ",\"name\":\"sync\",\"cat\":\"sync\"}";
+        // Flow finish at wait-op start time
+        emitComma();
+        os << "    {\"ph\":\"f\",\"id\":" << flowId
+           << ",\"pid\":" << pipePid(waitOp.pipe, waitOp.coreType)
+           << ",\"tid\":" << pipeTid(waitOp.pipe)
+           << ",\"ts\":" << llvm::format("%.3f",
+                  cyclesToTraceUs(waitOp.startCycle))
+           << ",\"name\":\"sync\",\"cat\":\"sync\",\"bp\":\"e\"}";
+        ++flowId;
+      }
+    }
   }
 
   os << "\n  ],\n  \"displayTimeUnit\": \"us\"\n}\n";
