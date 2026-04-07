@@ -24,6 +24,9 @@ python3 test/triton_smoke.py
 
 Enable CTest integration only when needed with `-DASCEND_MODEL_ENABLE_TESTS=ON`, then run `ctest --test-dir build`.
 
+## Local Environment
+Prefer the machine-local setup documented in [LOCAL_ENVIRONMENT.md](/mnt/d/work/git/codex/vTriton/LOCAL_ENVIRONMENT.md) before attempting any fresh dependency bootstrap. If that file is missing, first search for an existing venv under `/mnt/c/Users/shane` and a CANN install under `~/Ascend`; only build from scratch and download/install CANN if those local installs are not present.
+
 ## Coding Style & Naming Conventions
 Follow the existing LLVM/MLIR-oriented C++17 style already used in `lib/` and `tools/`: 2-space indentation for wrapped arguments, braces on their own lines for functions, and grouped includes with LLVM/MLIR headers before STL headers. Use `CamelCase` for types and passes, `lowerCamelCase` for functions and locals, and descriptive filenames such as `HIVMAnalysis.cpp` or `PipelineAnalysisPass.cpp`. Keep new MLIR test files descriptive, for example `feature_name_ascend.mlir`.
 
