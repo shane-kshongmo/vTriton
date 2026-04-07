@@ -116,3 +116,7 @@ Add this before the modelling command in the script:
 ```bash
 cd /mnt/d/work/git/vTriton/build && ninja -j$(nproc)
 ```
+
+## Local Environment
+
+Prefer the machine-local setup documented in `LOCAL_ENVIRONMENT.md` before attempting any fresh dependency bootstrap. If that file is missing, first search for an existing venv under `/mnt/c/Users/shane` and a CANN install under `~/Ascend`; only build from scratch and download/install CANN if those local installs are not present.
