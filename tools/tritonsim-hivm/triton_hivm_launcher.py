@@ -35,7 +35,39 @@ def _append_bindings(dump_dir, kernel_name, entries):
         f.write("\n")
 
 
-def _capture_entries_from_params(params, bound_args, grid):
+def _compute_constant_param_nums(params, bound_args, backend):
+    """Determine which params become compile-time constants.
+
+    This emulates the logic in ``jit.py`` (``JITFunction.run``) where
+    ``AttrsDescriptor.get_constants()`` detects params whose runtime value
+    equals 1 (stride specialisation) and marks them as constants.  Those
+    params are baked into the compiled binary and **excluded** from the
+    struct passed to the HIVM kernel at launch time, so our positional
+    ``argN`` indices must skip them too.
+    """
+    try:
+        bound_vals = tuple(bound_args.values())
+        attrs = backend.get_attrs_descriptor(params, bound_vals)
+        constant_params = attrs.get_constants()  # {param_num: value}
+        # Also include params whose value is None (nullptr — treated as
+        # constants in jit.py:616).
+        none_nums = {
+            p.num
+            for p, v in zip(params, bound_vals)
+            if v is None and not getattr(p, "is_constexpr", False)
+        }
+        return set(constant_params.keys()) | none_nums
+    except Exception:
+        # If anything goes wrong (e.g. backend not fully initialised in
+        # compile-only mode), fall back to an empty set so we degrade
+        # gracefully to the old behaviour.
+        return set()
+
+
+def _capture_entries_from_params(params, bound_args, grid,
+                                 constant_param_nums=None):
+    if constant_param_nums is None:
+        constant_param_nums = set()
     entries = []
     named_entries = []
     runtime_index = 0
@@ -43,6 +75,15 @@ def _capture_entries_from_params(params, bound_args, grid):
         if getattr(param, "is_constexpr", False):
             continue
         value = bound_args.get(param.name)
+        # Params that the compiler bakes as constants are excluded from
+        # the HIVM function signature.  Skip them when counting the
+        # positional index so that ``argN`` aligns with the Nth user arg
+        # the HIVM kernel actually receives.
+        if param.num in constant_param_nums:
+            # Still record the named binding for reference.
+            if _is_scalar_value(value):
+                named_entries.append(f"{param.name}={_format_scalar(value)}")
+            continue
         current_index = runtime_index
         runtime_index += 1
         if not _is_scalar_value(value):
@@ -52,8 +93,11 @@ def _capture_entries_from_params(params, bound_args, grid):
         named_entries.append(f"{param.name}={formatted}")
 
     if grid is not None:
-        entries.extend(["pid_x=0", "pid_y=0", "pid_z=0"])
-        named_entries.extend(["pid_x=0", "pid_y=0", "pid_z=0"])
+        # Grid dimensions are appended to the struct after user args and
+        # appear as the last 3 user-visible args in the HIVM function.
+        for i, name in enumerate(("pid_x", "pid_y", "pid_z")):
+            entries.append(f"arg{runtime_index + i}=0")
+            named_entries.append(f"{name}=0")
     return entries, named_entries
 
 
@@ -67,13 +111,16 @@ def _install_capture_hook(dump_dir):
         from triton.runtime.driver import driver
 
         grid = kwargs.get("grid")
+        target = driver.active.get_current_target()
+        backend = make_backend(target)
         if self.binder is None:
-            target = driver.active.get_current_target()
-            backend = make_backend(target)
             self.create_binder(backend)
 
         bound_args, _, _, _, _ = self.binder(*args, **kwargs)
-        entries, named_entries = _capture_entries_from_params(self.params, bound_args, grid)
+        constant_param_nums = _compute_constant_param_nums(
+            self.params, bound_args, backend)
+        entries, named_entries = _capture_entries_from_params(
+            self.params, bound_args, grid, constant_param_nums)
         if entries:
             kernel_name = (
                 getattr(getattr(self, "fn", None), "__name__", None)
