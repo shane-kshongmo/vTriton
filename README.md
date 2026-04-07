@@ -150,6 +150,145 @@ python3 test/triton_smoke.py
 ctest --test-dir build
 ```
 
+## 端到端使用指南：Triton DSL → HIVM 分析
+
+以 DeepSeek-V3 的稀疏注意力 prefill kernel (`prefill_a5_cvpipe.py`) 为例，演示从 Triton DSL 脚本到性能分析的完整流程。
+
+### 示例 kernel 简介
+
+`prefill_a5_cvpipe.py` 实现了面向 Ascend910D (A5) 的稀疏 Flash Attention prefill kernel，主要优化：
+
+- **QK nope/rope 分裂**：将 K workspace 拆为 `K_nope[T1, N2, K, 512]` 和 `K_rope[T1, N2, K, 64]`，QK matmul 拆成两个子矩阵乘，SV matmul 直接复用 K_nope 数据（潜在 L1 命中）
+- **Cube-Vector 混合流水 (cvpipe)**：通过 `enable_mixed_cv=True` 开启 Cube/Vector 双流水
+- **Graph-based sync**：通过 `inject_barrier_all=False` 关闭全局 barrier，使用 GraphSyncSolver 进行最小化同步
+
+kernel 入口函数 `test_dsa_prefill` 接收以下参数：
+
+| 参数 | 含义 | 示例值 |
+|------|------|--------|
+| batch | batch size | 1 |
+| q_seq_len | query 序列长度 | 2048 |
+| k_seq_len | key 序列长度 | 1024 |
+| head_num | 注意力头数 | 16 |
+| kv_lora_rank | KV LoRA 维度 (D_v) | 512 |
+| qk_rope_head_dim | RoPE head 维度 | 64 |
+| dtype | 数据类型 | torch.bfloat16 |
+
+### 步骤 1：准备 kernel 脚本
+
+将 kernel 脚本放置在可访问的路径，例如 `/path/to/prefill_a5_cvpipe.py`。
+
+脚本需要满足以下条件：
+- 使用 `@triton.jit` 装饰 kernel 函数
+- 提供一个 Python 可调用的入口函数（本例为 `test_dsa_prefill`），负责构造输入 tensor 并调用 kernel
+- 入口函数的参数将通过 `--entry-arg` 逐一传入
+
+### 步骤 2：运行 HIVM 分析
+
+使用 `tritonsim-hivm` 的 `--triton-script` 模式，指定入口函数和参数：
+
+```bash
+./build/bin/tritonsim-hivm \
+  --triton-script /path/to/prefill_a5_cvpipe.py \
+  --triton-entry test_dsa_prefill \
+  --entry-arg 1 \
+  --entry-arg 2048 \
+  --entry-arg 1024 \
+  --entry-arg 16 \
+  --entry-arg 512 \
+  --entry-arg 64 \
+  --entry-arg torch.bfloat16 \
+  --python python3 \
+  --scheduler des \
+  --des-graph-file /tmp/prefill_a5_des_graph.json \
+  --perfetto-trace-file /tmp/prefill_a5_trace.json \
+  --keep-dump-dir \
+  2>&1
+```
+
+参数说明：
+
+| 参数 | 说明 |
+|------|------|
+| `--triton-script` | Triton kernel 脚本路径 |
+| `--triton-entry` | 脚本中的入口函数名 |
+| `--entry-arg` | 入口函数的参数，按顺序传入（可多次指定） |
+| `--python` | Python 解释器路径 |
+| `--scheduler des` | 使用 DES (Discrete Event Simulation) 调度器 |
+| `--des-graph-file` | 导出 DES 调度图（JSON 格式） |
+| `--perfetto-trace-file` | 导出 Perfetto trace（可在 [ui.perfetto.dev](https://ui.perfetto.dev) 打开） |
+| `--keep-dump-dir` | 保留中间编译产物目录，便于调试 |
+
+### 步骤 3：查看分析结果
+
+分析完成后会在终端输出性能报告，包括：
+
+- 各 op 的周期数估计
+- Cube/Vector 流水线利用率
+- 内存搬运开销
+
+同时可以：
+
+1. **查看 Perfetto trace**：将 `/tmp/prefill_a5_trace.json` 拖入 [ui.perfetto.dev](https://ui.perfetto.dev)，可视化 Cube/Vector/MTE 各单元的时间线
+2. **查看 DES 调度图**：`/tmp/prefill_a5_des_graph.json` 包含 op 间依赖关系和调度顺序
+
+### 步骤 4（可选）：调整参数重新分析
+
+修改 `--entry-arg` 即可测试不同 shape 配置下的性能，例如：
+
+```bash
+# batch=2, q_seq_len=4096
+./build/bin/tritonsim-hivm \
+  --triton-script /path/to/prefill_a5_cvpipe.py \
+  --triton-entry test_dsa_prefill \
+  --entry-arg 2 \
+  --entry-arg 4096 \
+  --entry-arg 1024 \
+  --entry-arg 16 \
+  --entry-arg 512 \
+  --entry-arg 64 \
+  --entry-arg torch.bfloat16 \
+  --python python3 \
+  --scheduler des \
+  --perfetto-trace-file /tmp/prefill_a5_b2s4096_trace.json
+```
+
+### WSL 环境下的运行方式
+
+如果在 Windows 环境下使用 WSL，需要将命令写入 shell 脚本再执行：
+
+```bash
+# 1. 将脚本写入 WSL 文件系统
+cat > /tmp/run_prefill.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+
+TRITONSIM_HIVM=/mnt/d/work/git/vTriton/build/bin/tritonsim-hivm
+PYTHON=/path/to/python3
+
+# 可选：先重新编译
+cd /mnt/d/work/git/vTriton/build && ninja -j$(nproc) 2>&1 | tail -5
+
+${TRITONSIM_HIVM} \
+  --triton-script /path/to/prefill_a5_cvpipe.py \
+  --triton-entry test_dsa_prefill \
+  --entry-arg 1 \
+  --entry-arg 2048 \
+  --entry-arg 1024 \
+  --entry-arg 16 \
+  --entry-arg 512 \
+  --entry-arg 64 \
+  --entry-arg torch.bfloat16 \
+  --python ${PYTHON} \
+  --scheduler des \
+  --perfetto-trace-file /tmp/prefill_a5_trace.json \
+  2>&1
+SCRIPT
+
+# 2. 执行
+bash /tmp/run_prefill.sh
+```
+
 ## 仓库结构
 
 ```text
