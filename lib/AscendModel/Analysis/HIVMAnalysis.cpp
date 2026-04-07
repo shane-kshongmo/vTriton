@@ -2677,6 +2677,9 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
      << HIVMAnalyzer::stringifyPipe(HIVMPipe::All) << "\"}}";
 
   for (const HIVMOp &op : operations) {
+    // Skip zero-cycle metadata ops that are not real scheduled work.
+    if (op.opName == "pointer_cast" || op.opName == "convert_layout")
+      continue;
     emitComma();
     os << "    {\"ph\":\"X\",\"pid\":" << pipePid(op.pipe, op.coreType)
        << ",\"tid\":" << pipeTid(op.pipe)
