@@ -253,6 +253,19 @@ std::unique_ptr<HardwareConfig> HardwareConfig::createHardcodedDefault910B() {
     config->computeUnits["vector"] = std::move(vector);
   }
 
+  config->vectorOpCyclesPerInstruction["vadd"] = 1;
+  config->vectorOpCyclesPerInstruction["vsub"] = 1;
+  config->vectorOpCyclesPerInstruction["vmul"] = 1;
+  config->vectorOpCyclesPerInstruction["vcast"] = 1;
+  config->vectorOpCyclesPerInstruction["vreduce"] = 2;
+  config->vectorOpCyclesPerInstruction["vexp"] = 4;
+  config->vectorOpCyclesPerInstruction["vdiv"] = 3;
+  config->vectorOpCyclesPerInstruction["vlog"] = 3;
+  config->vectorOpCyclesPerInstruction["vtanh"] = 3;
+  config->vectorOpCyclesPerInstruction["vsigmoid"] = 3;
+  config->vectorOpCyclesPerInstruction["vsqrt"] = 2;
+  config->vectorOpCyclesPerInstruction["vrsqrt"] = 2;
+
   // Data movers
   // MTE2 (Cube): HBM -> L1
   {
@@ -585,6 +598,27 @@ bool HardwareConfig::parseJSON(const llvm::json::Value &json,
     }
   }
 
+  if (const auto *calibration = root->getObject("calibration")) {
+    if (const auto *vecOps =
+            calibration->getObject("vector_op_cycles_per_vec_instruction")) {
+      auto readInt = [&](llvm::StringRef key, llvm::StringRef opName) {
+        if (auto v = vecOps->getInteger(key))
+          vectorOpCyclesPerInstruction[opName] = static_cast<int>(*v);
+      };
+      readInt("simple_ops_add_sub_mul_etc", "vadd");
+      readInt("simple_ops_add_sub_mul_etc", "vsub");
+      readInt("simple_ops_add_sub_mul_etc", "vmul");
+      readInt("simple_ops_add_sub_mul_etc", "vcast");
+      readInt("exp", "vexp");
+      readInt("log", "vlog");
+      readInt("tanh", "vtanh");
+      readInt("sigmoid", "vsigmoid");
+      readInt("sqrt", "vsqrt");
+      readInt("rsqrt", "vrsqrt");
+      readInt("div", "vdiv");
+    }
+  }
+
   return true;
 }
 
@@ -724,6 +758,16 @@ llvm::StringRef HardwareConfig::getVectorComputeSpace() const {
     return vec->computeSpace;
   }
   return "ub";
+}
+
+int HardwareConfig::getVectorOpCyclesPerInstruction(
+    llvm::StringRef opName) const {
+  auto it = vectorOpCyclesPerInstruction.find(opName);
+  if (it != vectorOpCyclesPerInstruction.end())
+    return it->second;
+  if (opName == "vreduce")
+    return 2;
+  return 1;
 }
 
 double HardwareConfig::getHBMBandwidthGBs() const {

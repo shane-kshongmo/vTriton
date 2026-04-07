@@ -195,15 +195,15 @@
     },
 
     "vector_op_cycles_per_vec_instruction": {
-      "exp": 9,
-      "log": 12,
-      "tanh": 18,
-      "sigmoid": 15,
-      "sqrt": 6,
-      "rsqrt": 6,
-      "div": 12,
+      "exp": 4,
+      "log": 3,
+      "tanh": 3,
+      "sigmoid": 3,
+      "sqrt": 2,
+      "rsqrt": 2,
+      "div": 3,
       "simple_ops_add_sub_mul_etc": 1,
-      "notes": "Transcendentals scaled 3x from hardware peak. Observed aiv_vec_time exceeded model by 3.3-5.3x (clean 1-wave cases BM=48/64 give 3.3-4.5x). Factor of 3x applied to cyclesPerVectorOp for exp/log/div while keeping simple ops at 1 to preserve their relative cost ratio."
+      "notes": "Calibrated ordering for vector ALU ops: vadd/vsub/vmul remain the cheapest, vreduce is only slightly heavier, and vexp is typically about 4x the cost of simple arithmetic. Other transcendental and divide-like ops stay between those extremes."
     },
 
     "scalar_overhead": {
