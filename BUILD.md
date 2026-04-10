@@ -86,21 +86,23 @@ triton-ascend 已作为子模块位于 `thirdparty/triton-ascend`。如果未做
 cd thirdparty/triton-ascend
 git submodule update --init --depth 1
 
+cd python
 LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} \
-TRITON_PLUGIN_DIRS=./ascend \
+TRITON_PLUGIN_DIRS=$(pwd)/../ascend \
 TRITON_BUILD_WITH_CCACHE=true \
 TRITON_BUILD_WITH_CLANG_LLD=true \
 TRITON_BUILD_PROTON=OFF \
 TRITON_WHEEL_NAME="triton-ascend" \
-python3 setup.py develop
+MAX_JOBS=$(nproc) \
+python3 setup.py bdist_wheel
 ```
 
 记下构建目录:
 
 ```bash
-export TRITON_BUILD_DIR=$(ls -d $PWD/python/build/cmake.* | head -1)
+export TRITON_BUILD_DIR=$(ls -d $PWD/build/cmake.* | head -1)
 echo "Triton build dir: $TRITON_BUILD_DIR"
-cd ../..
+cd ../../..
 ```
 
 ---

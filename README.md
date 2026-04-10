@@ -12,38 +12,134 @@
 
 ## 功能概览
 
-- `tritonsim-opt`：运行 AscendModel 相关 pass pipeline
-- `tritonsim-hivm`：直接分析 `.npuir.mlir`，也可从 Triton DSL 触发 compile-only dump
-- `ascend-tiling-opt`：在构建中存在时提供 tiling 优化入口
-- `configs/*.json`：定义硬件参数，默认使用 `configs/ascend_910b.json`
+| 工具 | 用途 |
+|------|------|
+| `tritonsim-opt` | 运行 AscendModel 相关 pass pipeline |
+| `tritonsim-hivm` | 直接分析 `.npuir.mlir`，也可从 Triton DSL 触发 compile-only dump |
+| `ascend-tiling-opt` | 在构建中存在时提供 tiling 优化入口 |
+| `configs/*.json` | 定义硬件参数，默认使用 `configs/ascend_910b.json` |
+
+## 前置要求
+
+在开始构建前，请确认以下工具已安装：
+
+| 依赖 | 最低版本 | 检查命令 |
+|------|---------|---------|
+| CMake | 3.20 | `cmake --version` |
+| Ninja | 任意 | `ninja --version` |
+| clang / lld | 15 | `clang --version` |
+| Python | 3.8 | `python3 --version` |
+| git | 任意 | `git --version` |
+
+**磁盘空间**：至少 40 GB（LLVM 构建产物较大）
+
+**内存**：推荐 16 GB（并行构建建议 32 GB）
+
+**WSL 用户（Windows）**：所有二进制均为 Linux ELF 文件，请在 WSL 终端（Ubuntu 24.04）内执行全部命令。
 
 ## 快速开始
 
-### 1. 初始化子模块
+### 步骤 1：初始化子模块
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### 2. 构建 LLVM/MLIR
+这会拉取 `thirdparty/llvm-project`（固定在 commit `b5cc222d`）和 `thirdparty/triton-ascend`。
+
+> 如果拉取超时或失败，可改用浅克隆：
+> ```bash
+> git submodule update --init --depth 1 --recursive
+> ```
+
+---
+
+### 步骤 2：构建 LLVM/MLIR
+
+> **注意：首次构建耗时 30–60 分钟，需占用约 30 GB 磁盘空间，仅需执行一次。**
 
 ```bash
 export LLVM_INSTALL_PREFIX=$HOME/llvm-install
 ./scripts/build_llvm.sh
 ```
 
-### 3. 构建本项目
+脚本会自动完成以下操作：
+1. 使用全部 CPU 核心配置并构建 LLVM（启用 `mlir` 和 `llvm` 项目）
+2. 将头文件和库安装到 `$LLVM_INSTALL_PREFIX`
+
+如果脚本输出 `✅ LLVM/MLIR 已构建`，说明 LLVM 已安装，可直接跳到步骤 3。
+
+**重要：后续步骤依赖 `LLVM_INSTALL_PREFIX` 变量。** 如果打开了新终端，需重新导出：
+
+```bash
+export LLVM_INSTALL_PREFIX=$HOME/llvm-install
+```
+
+> **构建失败？** 若出现内存不足错误，可限制并行度：
+> ```bash
+> cmake --build thirdparty/llvm-project/build --target install -- -j4
+> ```
+
+---
+
+### 步骤 3：构建 triton-ascend
+
+> 如果不需要 Triton DSL / `.ttir` 输入支持，可跳过此步骤，在步骤 4 中改用 `-DTRITONSIM_ENABLE_TRITON=OFF`。
+
+```bash
+cd thirdparty/triton-ascend
+git submodule update --init --depth 1
+
+cd python
+LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} \
+TRITON_PLUGIN_DIRS=$(pwd)/../ascend \
+TRITON_BUILD_WITH_CCACHE=true \
+TRITON_BUILD_WITH_CLANG_LLD=true \
+TRITON_BUILD_PROTON=OFF \
+TRITON_WHEEL_NAME="triton-ascend" \
+MAX_JOBS=$(nproc) \
+python3 setup.py bdist_wheel
+
+# 记录构建目录，供步骤 4 使用
+export TRITON_BUILD_DIR=$(ls -d $PWD/build/cmake.* | head -1)
+echo "Triton build dir: $TRITON_BUILD_DIR"
+
+cd ../../..
+```
+
+---
+
+### 步骤 4：构建 TritonSim
+
+**方式 A：启用 Triton 支持**（需已完成步骤 3）
 
 ```bash
 mkdir -p build && cd build
 cmake -G Ninja .. \
-  -DMLIR_DIR=$LLVM_INSTALL_PREFIX/lib/cmake/mlir \
-  -DLLVM_DIR=$LLVM_INSTALL_PREFIX/lib/cmake/llvm
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMLIR_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/mlir \
+  -DLLVM_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/llvm \
+  -DTRITON_BUILD_DIR=${TRITON_BUILD_DIR}
 ninja
+cd ..
 ```
 
-如果需要禁用 Triton dialect 支持，在 `cmake` 命令后追加
-`-DTRITONSIM_ENABLE_TRITON=OFF`。
+**方式 B：不启用 Triton 支持**（构建更快，无法处理 `.ttir` 输入）
+
+```bash
+mkdir -p build && cd build
+cmake -G Ninja .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMLIR_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/mlir \
+  -DLLVM_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/llvm \
+  -DTRITONSIM_ENABLE_TRITON=OFF
+ninja
+cd ..
+```
+
+构建成功后，二进制文件位于 `build/bin/`。
+
+---
 
 ## 常用用法
 
@@ -117,13 +213,13 @@ ninja
 
 ### 分析 Triton IR (`.ttir`)
 
-启用 Triton 支持构建时，可直接输入 `.ttir`：
+**方式 A（启用 Triton 支持）**：可直接输入 `.ttir`：
 
 ```bash
 ./build/bin/tritonsim-opt test/flash_attention.ttir -ascend-perf-model
 ```
 
-如果构建时关闭了 Triton dialect 支持，需要先通过 `triton-opt` 转成 generic MLIR：
+**方式 B（未启用 Triton 支持）**：需先通过 `triton-opt` 转成 generic MLIR：
 
 ```bash
 TRITON_OPT=/path/to/triton-opt
@@ -133,6 +229,8 @@ $TRITON_OPT kernel.ttir --allow-unregistered-dialect --mlir-print-op-generic | \
   --allow-unregistered-dialect \
   -ascend-perf-model="loop-trip-counts=1"
 ```
+
+---
 
 ## 测试与验证
 
@@ -149,6 +247,8 @@ python3 test/triton_smoke.py
 ```bash
 ctest --test-dir build
 ```
+
+---
 
 ## 端到端使用指南：Triton DSL → HIVM 分析
 
@@ -288,6 +388,8 @@ SCRIPT
 # 2. 执行
 bash /tmp/run_prefill.sh
 ```
+
+---
 
 ## 仓库结构
 
