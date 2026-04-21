@@ -467,22 +467,68 @@ static std::string renderOperation(mlir::Operation *op) {
 }
 
 static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
-  llvm::SmallVector<llvm::StringRef, 0> lines;
-  buffer.split(lines, '\n');
-  std::string cleaned;
-  llvm::raw_string_ostream os(cleaned);
-  for (llvm::StringRef line : lines) {
-    llvm::StringRef trimmed = line.trim();
-    if (trimmed.starts_with("warning: ") || trimmed.ends_with("warning generated."))
-      break;
-    // Skip non-MLIR noise: linker warnings, error messages, etc.
-    if (trimmed.starts_with("ld.lld:") || trimmed.starts_with("[ERROR]") ||
-        trimmed.starts_with("[WARNING]") || trimmed.starts_with("[INFO]"))
-      continue;
-    os << line << "\n";
+  // Pre-process to remove custom dialect attributes/types that require
+  // registered dialects.  When built without BiShengIR, the parser cannot
+  // handle #hivm.address_space<...>, #hacc.arg_type<...>, etc.
+  std::string preprocessed;
+  {
+    llvm::SmallVector<llvm::StringRef, 0> lines;
+    buffer.split(lines, '\n');
+    llvm::raw_string_ostream os(preprocessed);
+    for (llvm::StringRef line : lines) {
+      llvm::StringRef trimmed = line.trim();
+      if (trimmed.starts_with("warning: ") || trimmed.ends_with("warning generated."))
+        break;
+      if (trimmed.starts_with("ld.lld:") || trimmed.starts_with("[ERROR]") ||
+          trimmed.starts_with("[WARNING]") || trimmed.starts_with("[INFO]"))
+        continue;
+      std::string l = line.str();
+      // Replace #hivm.address_space<xxx> with integer memory space
+      while (auto pos = l.find("#hivm.address_space<")) {
+        auto end = l.find('>', pos);
+        if (end == std::string::npos) break;
+        auto space = llvm::StringRef(l).slice(pos + 20, end);
+        int num = 0;
+        if (space == "gm") num = 0;
+        else if (space == "ub") num = 1;
+        else if (space == "l1") num = 2;
+        else if (space == "l0a") num = 3;
+        else if (space == "l0b") num = 4;
+        else if (space == "l0c") num = 5;
+        else if (space == "cbuf") num = 6;
+        l.replace(pos, end - pos + 1, std::to_string(num));
+      }
+      // Strip other custom dialect attributes that block parsing
+      // #hacc.arg_type<xxx> -> remove entirely
+      for (;;) {
+        auto p = l.find("#hacc.arg_type<");
+        if (p == std::string::npos) break;
+        auto e = l.find('>', p);
+        if (e == std::string::npos) break;
+        l.erase(p, e - p + 1);
+      }
+      // #hivm.func_core_type<xxx> -> remove
+      for (;;) {
+        auto p = l.find("#hivm.func_core_type<");
+        if (p == std::string::npos) break;
+        auto e = l.find('>', p);
+        if (e == std::string::npos) break;
+        l.erase(p, e - p + 1);
+      }
+      // #hacc.function_kind<xxx> -> remove
+      for (;;) {
+        auto p = l.find("#hacc.function_kind<");
+        if (p == std::string::npos) break;
+        auto e = l.find('>', p);
+        if (e == std::string::npos) break;
+        l.erase(p, e - p + 1);
+      }
+      os << l << "\n";
+    }
+    os.flush();
   }
-  os.flush();
-  return cleaned;
+
+  return preprocessed;
 }
 
 static bool startsWithHivmOp(mlir::Operation *op) {
@@ -533,45 +579,10 @@ static std::string stringifyTypedCore(std::optional<mlir::hivm::TCoreType> core)
   return mlir::hivm::stringifyTCoreType(*core).str();
 }
 
-static std::string renderValueToken(mlir::Value value) {
-  if (!value)
-    return "";
-  std::string storage;
-  llvm::raw_string_ostream os(storage);
-  os << value;
-  os.flush();
-  return storage;
-}
-
-static std::string renderOpaqueValueToken(mlir::Value value) {
-  if (!value)
-    return "";
-  std::string storage;
-  llvm::raw_string_ostream os(storage);
-  os << "ssa@" << value.getAsOpaquePointer();
-  os.flush();
-  return storage;
-}
-
 static std::string canonicalizeStaticEventToken(llvm::StringRef token) {
   if (token.consume_front("EVENT_ID"))
     return token.str();
   return token.str();
-}
-
-static std::string stringifyTypedEvent(std::optional<mlir::hivm::EventAttr> eventAttr,
-                                       mlir::Value dynamicEvent) {
-  if (eventAttr)
-    return canonicalizeStaticEventToken(
-        mlir::hivm::stringifyEVENT(eventAttr->getEvent()));
-  return renderValueToken(dynamicEvent);
-}
-
-static std::string stringifyTypedFlag(std::optional<mlir::IntegerAttr> flagAttr,
-                                      mlir::Value dynamicFlag) {
-  if (flagAttr)
-    return std::to_string(flagAttr->getInt());
-  return renderValueToken(dynamicFlag);
 }
 
 static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
@@ -738,6 +749,26 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
   return startsWithHivmOp(op);
 }
 #endif
+
+static std::string renderValueToken(mlir::Value value) {
+  if (!value)
+    return "";
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  os << value;
+  os.flush();
+  return storage;
+}
+
+static std::string renderOpaqueValueToken(mlir::Value value) {
+  if (!value)
+    return "";
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  os << "ssa@" << value.getAsOpaquePointer();
+  os.flush();
+  return storage;
+}
 
 static std::optional<int64_t> evaluateAffineExpr(mlir::AffineExpr expr,
                                                  mlir::AffineMap map,

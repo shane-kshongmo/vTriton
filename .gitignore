@@ -29,8 +29,6 @@ compile_commands.json
 
 # Binaries
 bin/
-tritonsim-opt
-ascend-tiling-opt
 
 # OS
 .DS_Store
