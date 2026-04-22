@@ -59,21 +59,14 @@ git submodule update --init --recursive
 > **注意：首次构建耗时 30–60 分钟，需占用约 30 GB 磁盘空间，仅需执行一次。**
 
 ```bash
-export LLVM_INSTALL_PREFIX=$HOME/llvm-install
 ./scripts/build_llvm.sh
 ```
 
 脚本会自动完成以下操作：
 1. 使用全部 CPU 核心配置并构建 LLVM（启用 `mlir` 和 `llvm` 项目）
-2. 将头文件和库安装到 `$LLVM_INSTALL_PREFIX`
+2. 将头文件和库安装到 `thirdparty/llvm-project/build/install`
 
 如果脚本输出 `✅ LLVM/MLIR 已构建`，说明 LLVM 已安装，可直接跳到步骤 3。
-
-**重要：后续步骤依赖 `LLVM_INSTALL_PREFIX` 变量。** 如果打开了新终端，需重新导出：
-
-```bash
-export LLVM_INSTALL_PREFIX=$HOME/llvm-install
-```
 
 > **构建失败？** 若出现内存不足错误，可限制并行度：
 > ```bash
@@ -82,9 +75,10 @@ export LLVM_INSTALL_PREFIX=$HOME/llvm-install
 
 ---
 
-### 步骤 3：构建 triton-ascend
+### 步骤 3：构建 triton-ascend（可选）
 
 > 如果不需要 Triton DSL / `.ttir` 输入支持，可跳过此步骤，在步骤 4 中改用 `-DTRITONSIM_ENABLE_TRITON=OFF`。
+> 注意：Triton DSL 模式依赖完整的 triton-ascend Python 构建，需要 CANN 环境。
 
 ```bash
 cd thirdparty/triton-ascend
@@ -111,15 +105,16 @@ cd ../../..
 
 ### 步骤 4：构建 TritonSim
 
-**方式 A：启用 Triton 支持**（需已完成步骤 3）
+**方式 A：启用 Triton 支持**（推荐，支持 TTIR 建模）
+
+Triton 支持从 `thirdparty/triton-ascend` 的头文件自动启用，无需构建 triton-ascend wheel。
 
 ```bash
 mkdir -p build && cd build
 cmake -G Ninja .. \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMLIR_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/mlir \
-  -DLLVM_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/llvm \
-  -DTRITON_BUILD_DIR=${TRITON_BUILD_DIR}
+  -DMLIR_DIR=../thirdparty/llvm-project/build/install/lib/cmake/mlir \
+  -DLLVM_DIR=../thirdparty/llvm-project/build/install/lib/cmake/llvm
 ninja
 cd ..
 ```
@@ -130,8 +125,8 @@ cd ..
 mkdir -p build && cd build
 cmake -G Ninja .. \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMLIR_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/mlir \
-  -DLLVM_DIR=${LLVM_INSTALL_PREFIX}/lib/cmake/llvm \
+  -DMLIR_DIR=../thirdparty/llvm-project/build/install/lib/cmake/mlir \
+  -DLLVM_DIR=../thirdparty/llvm-project/build/install/lib/cmake/llvm \
   -DTRITONSIM_ENABLE_TRITON=OFF
 ninja
 cd ..
@@ -213,22 +208,19 @@ cd ..
 
 ### 分析 Triton IR (`.ttir`)
 
-**方式 A（启用 Triton 支持）**：可直接输入 `.ttir`：
-
-```bash
-./build/bin/tritonsim-opt test/flash_attention.ttir -ascend-perf-model
-```
-
-**方式 B（未启用 Triton 支持）**：需先通过 `triton-opt` 转成 generic MLIR：
+需要 `triton-opt`（来自 triton-ascend 构建）将 TTIR 转为 generic MLIR，再由 `tritonsim-opt` 运行建模 pipeline：
 
 ```bash
 TRITON_OPT=/path/to/triton-opt
+HW_CONFIG=configs/ascend_910b.json
 
 $TRITON_OPT kernel.ttir --allow-unregistered-dialect --mlir-print-op-generic | \
 ./build/bin/tritonsim-opt - \
   --allow-unregistered-dialect \
-  -ascend-perf-model="loop-trip-counts=1"
+  -ascend-perf-model="hardware-config=${HW_CONFIG} arg-bindings=arg7=4096"
 ```
+
+`arg-bindings` 用于绑定函数参数（如 `scf.for` 的动态上界），根据 `.mlir` 文件内容确定绑定值。
 
 ---
 
