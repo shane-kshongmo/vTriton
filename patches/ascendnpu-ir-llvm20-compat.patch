@@ -1,0 +1,53 @@
+diff --git a/bishengir/lib/Dialect/HACC/Utils/Utils.cpp b/bishengir/lib/Dialect/HACC/Utils/Utils.cpp
+index 8c451e4..13d9e52 100644
+--- a/bishengir/lib/Dialect/HACC/Utils/Utils.cpp
++++ b/bishengir/lib/Dialect/HACC/Utils/Utils.cpp
+@@ -281,7 +281,7 @@ resetDeclFuncLoc(LLVM::LLVMFuncOp /* don't need reference */ llvmFunc) {
+         llvmFunc->getContext(), DistinctAttr(), LLVM::DICompileUnitAttr(),
+         originalAttr.getScope(), originalAttr.getName(),
+         originalAttr.getLinkageName(), originalAttr.getFile(), unsigned(),
+-        unsigned(), LLVM::DISubprogramFlags::Optimized, originalAttr.getType(), {}, {});
++        unsigned(), LLVM::DISubprogramFlags::Optimized, originalAttr.getType());
+ #else
+     auto newAttr = LLVM::DISubprogramAttr::get(
+         llvmFunc->getContext(), DistinctAttr(), LLVM::DICompileUnitAttr(),
+diff --git a/bishengir/tools/bishengir-target-spec-tblgen/TargetSpecGen.cpp b/bishengir/tools/bishengir-target-spec-tblgen/TargetSpecGen.cpp
+index 1ada2d1..f36b44f 100644
+--- a/bishengir/tools/bishengir-target-spec-tblgen/TargetSpecGen.cpp
++++ b/bishengir/tools/bishengir-target-spec-tblgen/TargetSpecGen.cpp
+@@ -107,10 +107,10 @@ getSpecSuperClassEntries(const Record *derivedClassRecord) {
+   auto superClasses = derivedClassRecord->getDirectSuperClasses();
+   const Record *superClass = superClasses.front().first;
+ #elif defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__) || defined(__LLVM_MAJOR_VERSION_20_COMPATIBLE__)
+-  // LLVM 20/21: input SmallVector<const Record *>
+-  SmallVector<const Record *> superClasses;
++  // LLVM 20/21: input SmallVector<Record *>
++  SmallVector<Record *> superClasses;
+   derivedClassRecord->getDirectSuperClasses(superClasses);
+-  const Record *superClass = superClasses.front();
++  Record *superClass = superClasses.front();
+ #else
+   // LLVM 19: input SmallVector<Record *>
+   SmallVector<Record *> superClasses;
+@@ -241,8 +241,8 @@ Attribute TargetSpec::getSpecEntry(DeviceSpec specEntry, OpBuilder& builder) con
+ 
+ /// Emit a function to map string to \c DeviceTarget enum.
+ 
+-#if defined(__LLVM_MAJOR_VERSION_20_COMPATIBLE__) || defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__) 
+-static void emitStrToSymFnForDeviceTarget(const std::vector<const Record *> &records,
++#if defined(__LLVM_MAJOR_VERSION_20_COMPATIBLE__) || defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__)
++static void emitStrToSymFnForDeviceTarget(const std::vector<Record *> &records,
+                                           raw_ostream &OS) {
+ #else
+ static void emitStrToSymFnForDeviceTarget(const std::vector<Record *> &records,
+@@ -261,8 +261,8 @@ static void emitStrToSymFnForDeviceTarget(const std::vector<Record *> &records,
+ }
+ 
+ /// Emit a function to map \c DeviceTarget enum to string.
+-#if defined(__LLVM_MAJOR_VERSION_20_COMPATIBLE__) || defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__) 
+-static void emitSymToStrFnForDeviceTarget(const std::vector<const Record *> &records,
++#if defined(__LLVM_MAJOR_VERSION_20_COMPATIBLE__) || defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__)
++static void emitSymToStrFnForDeviceTarget(const std::vector<Record *> &records,
+                                           raw_ostream &OS) {
+ #else
+ static void emitSymToStrFnForDeviceTarget(const std::vector<Record *> &records,

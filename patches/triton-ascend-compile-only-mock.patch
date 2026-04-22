@@ -1,0 +1,503 @@
+diff --git a/third_party/ascend/backend/compile_only_mock.py b/third_party/ascend/backend/compile_only_mock.py
+new file mode 100644
+index 00000000..90959c57
+--- /dev/null
++++ b/third_party/ascend/backend/compile_only_mock.py
+@@ -0,0 +1,238 @@
++"""Compile-only mock layer for Triton-Ascend.
++
++When TRITON_COMPILE_ONLY=1 is set, this module patches torch and torch_npu so
++that Triton kernel scripts can run unmodified without NPU hardware.  Device
++operations (tensor allocation on 'npu', stream queries, etc.) are transparently
++redirected to CPU, while the Triton MLIR compilation pipeline runs normally and
++dumps IR artifacts.
++
++Activation
++----------
++This module is auto-imported by the Ascend backend driver when
++``TRITON_COMPILE_ONLY`` is set.  No user code changes are required.
++"""
++
++import functools
++import importlib
++import os
++import sys
++
++_installed = False
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++def _is_compile_only():
++    return os.environ.get("TRITON_COMPILE_ONLY", "").lower() in ("1", "true")
++
++
++def _npu_to_cpu(device):
++    """Convert an 'npu'-flavoured device spec to 'cpu'."""
++    if device is None:
++        return device
++    s = str(device)
++    if "npu" in s:
++        return "cpu"
++    return device
++
++
++# ---------------------------------------------------------------------------
++# Layer 1 — Torch factory-function patching
++# ---------------------------------------------------------------------------
++
++_FACTORY_NAMES = [
++    "randn", "rand", "empty", "zeros", "ones", "full",
++    "arange", "linspace", "logspace", "tensor", "as_tensor",
++]
++
++_LIKE_FACTORY_NAMES = [
++    "empty_like", "zeros_like", "ones_like",
++    "rand_like", "randn_like", "full_like",
++]
++
++_orig_factories = {}
++_orig_like_factories = {}
++_orig_tensor_to = None
++_orig_tensor_npu = None
++
++
++def _make_factory_wrapper(orig):
++    @functools.wraps(orig)
++    def wrapper(*args, **kwargs):
++        if "device" in kwargs:
++            kwargs["device"] = _npu_to_cpu(kwargs["device"])
++        return orig(*args, **kwargs)
++    return wrapper
++
++
++def _make_like_factory_wrapper(orig):
++    @functools.wraps(orig)
++    def wrapper(*args, **kwargs):
++        if "device" in kwargs:
++            kwargs["device"] = _npu_to_cpu(kwargs["device"])
++        return orig(*args, **kwargs)
++    return wrapper
++
++
++def _patch_torch_factories():
++    import torch
++
++    for name in _FACTORY_NAMES:
++        orig = getattr(torch, name, None)
++        if orig is not None and name not in _orig_factories:
++            _orig_factories[name] = orig
++            setattr(torch, name, _make_factory_wrapper(orig))
++
++    for name in _LIKE_FACTORY_NAMES:
++        orig = getattr(torch, name, None)
++        if orig is not None and name not in _orig_like_factories:
++            _orig_like_factories[name] = orig
++            setattr(torch, name, _make_like_factory_wrapper(orig))
++
++
++# ---------------------------------------------------------------------------
++# Layer 1 — Tensor.to() / Tensor.npu() patching
++# ---------------------------------------------------------------------------
++
++def _patched_tensor_to(self, *args, **kwargs):
++    # Positional: .to(device), .to(dtype), .to(device, dtype), .to(tensor)
++    args = list(args)
++    for i, a in enumerate(args):
++        if isinstance(a, str) and "npu" in a:
++            args[i] = "cpu"
++        elif hasattr(a, "type") and "npu" in str(a):
++            # torch.device object
++            import torch
++            args[i] = torch.device("cpu")
++    if "device" in kwargs:
++        kwargs["device"] = _npu_to_cpu(kwargs["device"])
++    return _orig_tensor_to(self, *args, **kwargs)
++
++
++def _patched_tensor_npu(self, *args, **kwargs):
++    # .npu() should be a no-op in compile-only mode (tensor stays on CPU)
++    return self
++
++
++def _patch_tensor_methods():
++    import torch
++    global _orig_tensor_to, _orig_tensor_npu
++
++    if _orig_tensor_to is None:
++        _orig_tensor_to = torch.Tensor.to
++        torch.Tensor.to = _patched_tensor_to
++
++    if _orig_tensor_npu is None and hasattr(torch.Tensor, "npu"):
++        _orig_tensor_npu = torch.Tensor.npu
++        torch.Tensor.npu = _patched_tensor_npu
++
++
++# ---------------------------------------------------------------------------
++# Layer 1 — torch.npu namespace patching
++# ---------------------------------------------------------------------------
++
++def _patch_torch_npu_namespace():
++    """Patch ``torch.npu.*`` methods that query hardware."""
++    import torch
++
++    if not hasattr(torch, "npu"):
++        return
++
++    npu = torch.npu
++
++    # Only patch if not already patched
++    if getattr(npu, "_compile_only_patched", False):
++        return
++    npu._compile_only_patched = True
++
++    _orig_current_device = getattr(npu, "current_device", None)
++    _orig_device_count = getattr(npu, "device_count", None)
++
++    if _orig_current_device is not None:
++        npu.current_device = lambda: 0
++    if _orig_device_count is not None:
++        npu.device_count = lambda: 1
++
++    if hasattr(npu, "set_device"):
++        npu.set_device = lambda *a, **kw: None
++    if hasattr(npu, "synchronize"):
++        npu.synchronize = lambda *a, **kw: None
++    if hasattr(npu, "is_available"):
++        npu.is_available = lambda: True
++    if hasattr(npu, "mem_get_info"):
++        # Return 8GB free / 16GB total as dummy
++        npu.mem_get_info = lambda *a, **kw: (8 * 1024**3, 16 * 1024**3)
++    if hasattr(npu, "empty_cache"):
++        npu.empty_cache = lambda: None
++
++
++# ---------------------------------------------------------------------------
++# Import hook — patch torch.npu after torch_npu is loaded
++# ---------------------------------------------------------------------------
++
++class _TorchNpuPostImportHook:
++    """``sys.meta_path`` finder that patches ``torch.npu`` after ``torch_npu``
++    is fully imported."""
++
++    _active = True
++
++    def find_module(self, fullname, path=None):
++        if fullname == "torch_npu" and self._active:
++            return self
++        return None
++
++    def load_module(self, fullname):
++        # Let the real importer handle torch_npu
++        self._active = False  # prevent recursion
++        try:
++            if fullname in sys.modules:
++                mod = sys.modules[fullname]
++            else:
++                mod = importlib.import_module(fullname)
++        finally:
++            self._active = True
++
++        # Now torch.npu should exist — patch it
++        _patch_torch_npu_namespace()
++        _patch_tensor_methods()  # Tensor.npu() may be added by torch_npu
++        return mod
++
++
++def _install_torch_npu_import_hook():
++    """Register the post-import hook for torch_npu."""
++    # If torch_npu is already imported, patch immediately
++    if "torch_npu" in sys.modules:
++        _patch_torch_npu_namespace()
++        return
++
++    # Otherwise, install the hook
++    for hook in sys.meta_path:
++        if isinstance(hook, _TorchNpuPostImportHook):
++            return  # already installed
++    sys.meta_path.insert(0, _TorchNpuPostImportHook())
++
++
++# ---------------------------------------------------------------------------
++# Public API
++# ---------------------------------------------------------------------------
++
++def install():
++    """Apply all compile-only patches.  Idempotent."""
++    global _installed
++    if _installed:
++        return
++    if not _is_compile_only():
++        return
++    _installed = True
++
++    _patch_torch_factories()
++    _patch_tensor_methods()
++    _install_torch_npu_import_hook()
++
++    # If torch_npu already loaded, patch namespace now
++    if "torch_npu" in sys.modules:
++        _patch_torch_npu_namespace()
++
++    print("[compile-only] NPU device mocking activated — tensors redirected to CPU")
+diff --git a/third_party/ascend/backend/compiler.py b/third_party/ascend/backend/compiler.py
+index cc0842c8..dea701c6 100644
+--- a/third_party/ascend/backend/compiler.py
++++ b/third_party/ascend/backend/compiler.py
+@@ -24,6 +24,7 @@ import hashlib
+ import glob
+ import os
+ import re
++import shutil
+ import subprocess
+ import tempfile
+ from dataclasses import dataclass
+@@ -47,6 +48,7 @@ from triton.backends.ascend.utils import (
+     _is_ascend_sanitizer_enabled,
+     _is_debug_line_info_disabled,
+     _is_auto_map_parallel_blocks_enabled,
++    get_ascend_arch_from_env,
+     downgrade_llir,
+     force_disable_ffts,
+ )
+@@ -400,6 +402,36 @@ def _save_npuir_debug_output(stdout_bytes: bytes, stderr_bytes: bytes, tmpdir: s
+     )
+ 
+ 
++def _copy_npuir_pass_tree(tree_dir: str, metadata_hash: str):
++    src_root = Path(tree_dir)
++    if not src_root.exists():
++        return
++
++    dump_manager = get_dump_manager(metadata_hash)
++    dst_root = Path(dump_manager.cache_dir) / "npuir_passes"
++    for src in src_root.rglob("*"):
++        if not src.is_file():
++            continue
++        dst = dst_root / src.relative_to(src_root)
++        dst.parent.mkdir(parents=True, exist_ok=True)
++        shutil.copyfile(src, dst)
++
++
++def _configure_npuir_debug_dump(tmpdir: str, compile_option_list: list[str], opt) -> str:
++    tree_dir = os.path.join(tmpdir, "npuir_passes")
++    if not opt.debug:
++        return tree_dir
++
++    os.makedirs(tree_dir, exist_ok=True)
++    compile_option_list += [
++        "--mlir-disable-threading",
++        "--mlir-print-ir-after-all",
++        f"--mlir-print-ir-tree-dir={tree_dir}",
++        "--bishengir-print-ir-after=hivm-inject-sync",
++    ]
++    return tree_dir
++
++
+ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
+     linalg, metadata = _parse_linalg_metadata(linalg, metadata)
+     with tempfile.TemporaryDirectory() as tmpdir:
+@@ -547,8 +579,7 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
+         if mix_mode in ["aic"]:
+             _compile_option_list += ["--disable-hfusion-vectorize=true"]
+ 
+-        if opt.debug:
+-            _compile_option_list += ["--bishengir-print-ir-after=hivm-inject-sync"]
++        npuir_tree_dir = _configure_npuir_debug_dump(tmpdir, _compile_option_list, opt)
+ 
+         cmd_list = (
+             [npu_compiler_path, ttadapter_path]
+@@ -577,10 +608,12 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
+         except subprocess.CalledProcessError as e:
+             if opt.debug:
+                 _save_npuir_debug_output(e.stdout, e.stderr, tmpdir, metadata["hash"])
++                _copy_npuir_pass_tree(npuir_tree_dir, metadata["hash"])
+             raise
+ 
+         if opt.debug:
+             _save_npuir_debug_output(ret.stdout, ret.stderr, tmpdir, metadata["hash"])
++            _copy_npuir_pass_tree(npuir_tree_dir, metadata["hash"])
+ 
+         stdout_str = ret.stdout.decode('utf-8') if ret.stdout else ''
+         match = re.search(r'UB\s+size\s*=\s*(\d+)\s*bits', stdout_str)
+@@ -620,8 +653,9 @@ def linalg_to_bin_enable_npu_compile_A2_A3(linalg: str, metadata, opt):
+             bishengir_hivm_opt = "--enable-hivm-compile=true"
+         bin_path = os.path.join(tmpdir, bin_file_with_ext)
+         callback_path = os.path.join(tmpdir, "libkernel.so")
++        _arch = get_ascend_arch_from_env() or NPUUtils().get_arch()
+         _compile_option_list = [
+-            f"--target={NPUUtils().get_arch()}",
++            f"--target={_arch}",
+         ]
+ 
+         multibuffer = metadata["multibuffer"]
+@@ -750,8 +784,7 @@ def linalg_to_bin_enable_npu_compile_A2_A3(linalg: str, metadata, opt):
+                 "--enable-triton-kernel-compile=true",
+             ]
+ 
+-        if opt.debug:
+-            _compile_option_list += ["--bishengir-print-ir-after=hivm-inject-sync"]
++        npuir_tree_dir = _configure_npuir_debug_dump(tmpdir, _compile_option_list, opt)
+         cmd_list = (
+             [npu_compiler_path, ttadapter_path]
+             + _compile_option_list
+@@ -771,10 +804,12 @@ def linalg_to_bin_enable_npu_compile_A2_A3(linalg: str, metadata, opt):
+         except subprocess.CalledProcessError as e:
+             if opt.debug:
+                 _save_npuir_debug_output(e.stdout, e.stderr, tmpdir, metadata["hash"])
++                _copy_npuir_pass_tree(npuir_tree_dir, metadata["hash"])
+             raise
+ 
+         if opt.debug:
+             _save_npuir_debug_output(ret.stdout, ret.stderr, tmpdir, metadata["hash"])
++            _copy_npuir_pass_tree(npuir_tree_dir, metadata["hash"])
+ 
+         stdout_str = ret.stdout.decode('utf-8') if ret.stdout else ''
+         match = re.search(r'UB\s+size\s*=\s*(\d+)\s*bits', stdout_str)
+@@ -975,12 +1010,22 @@ def ttir_to_npubin(mod, metadata, opt):
+                 _compile_option_list += [f"--disable-fma"]
+ 
+         npu_compiler_path, env = _get_npucompiler_path()
++        npuir_tree_dir = _configure_npuir_debug_dump(tmpdir, _compile_option_list, opt)
+         cmd_list = (
+             [npu_compiler_path, src_path]
+             + _compile_option_list
+             + ["-o", bin_file]
+         )
+-        ret = subprocess.run(cmd_list, env = env, capture_output = True, check = True)
++        try:
++            ret = subprocess.run(cmd_list, env=env, capture_output=True, check=True)
++        except subprocess.CalledProcessError as e:
++            if opt.debug:
++                _save_npuir_debug_output(e.stdout, e.stderr, tmpdir, metadata["hash"])
++                _copy_npuir_pass_tree(npuir_tree_dir, metadata["hash"])
++            raise
++        if opt.debug:
++            _save_npuir_debug_output(ret.stdout, ret.stderr, tmpdir, metadata["hash"])
++            _copy_npuir_pass_tree(npuir_tree_dir, metadata["hash"])
+         if not Path(bin_path).exists():
+             error_msg = ret.stderr.decode('utf-8')
+             print(f"[DEBUG] {bin_path} is not found")
+diff --git a/third_party/ascend/backend/driver.py b/third_party/ascend/backend/driver.py
+index cc8e65f5..06abe29b 100644
+--- a/third_party/ascend/backend/driver.py
++++ b/third_party/ascend/backend/driver.py
+@@ -44,6 +44,17 @@ from triton.backends.ascend.utils import (
+     get_backend_func
+ )
+ 
++def _is_compile_only():
++    return os.getenv("TRITON_COMPILE_ONLY", "").lower() in ("1", "true")
++
++
++# Auto-activate compile-only mocking when env var is set.
++# This patches torch factory functions before user code creates NPU tensors.
++if _is_compile_only():
++    from triton.backends.ascend.compile_only_mock import install as _install_compile_only_mock
++    _install_compile_only_mock()
++
++
+ class NPUUtils(object):
+     def __new__(cls):
+         if not hasattr(cls, 'instance'):
+@@ -51,6 +62,9 @@ class NPUUtils(object):
+         return cls.instance
+ 
+     def __init__(self):
++        if _is_compile_only():
++            self.npu_utils_mod = None
++            return
+         dirname = os.path.dirname(os.path.realpath(__file__))
+         src_path = os.path.join(dirname, "npu_utils.cpp")
+         src = Path(src_path).read_text()
+@@ -75,11 +89,15 @@ class NPUUtils(object):
+         env_arch = get_ascend_arch_from_env()
+ 
+     def load_binary(self, name, kernel, shared, device):
++        if self.npu_utils_mod is None:
++            return (None, None, 0, 0)
+         fnname, mix_mode = name.rsplit("_", 1)
+         return self.npu_utils_mod.load_kernel_binary(fnname, kernel, shared, device, mix_mode)
+ 
+     @functools.lru_cache()
+     def get_device_properties(self, device):
++        if self.npu_utils_mod is None:
++            return {"max_shared_mem": 1, "num_aicore": 20, "num_vectorcore": 40}
+         # temperoarily added "max_shared_mem" properties to avoid triton-compiler complain
+         # fetch available memory at runtime
+         num_aic = self.get_aicore_num()
+@@ -88,11 +106,16 @@ class NPUUtils(object):
+ 
+     @functools.lru_cache()
+     def get_arch(self):
++        if self.npu_utils_mod is None:
++            env_arch = get_ascend_arch_from_env()
++            return env_arch if env_arch else "Ascend910_9599"
+         # temporarily return empty arch descriptor
+         return self.npu_utils_mod.get_arch()
+ 
+     @functools.lru_cache()
+     def get_aicore_num(self):
++        if self.npu_utils_mod is None:
++            return 20
+         # temporarily return empty arch descriptor
+         return self.npu_utils_mod.get_aicore_num()
+ 
+@@ -103,8 +126,13 @@ class NPUUtils(object):
+ 
+ class NPULauncher(object):
+     def __init__(self, src, metadata):
+-        self.compile_only = os.getenv("TRITON_COMPILE_ONLY", 'false').lower() in ('true', '1')
++        self.compile_only = _is_compile_only()
+         self.enable_msprof_register_tensor = os.getenv("TRITON_REGISTER_TENSOR_MSPROF", 'false').lower() in ('true', '1')
++        if self.compile_only:
++            self.launch = None
++            self.mix_mode = getattr(metadata, 'mix_mode', None)
++            self.shared = getattr(metadata, 'shared', 0)
++            return
+         debug_mode = metadata.debug
+         header_src = generate_npu_header_src()
+         constants = src.constants if hasattr(src, "constants") else dict()
+@@ -177,18 +205,24 @@ class NPUDriver(DriverBase):
+         """
+         Get current device
+         """
++        if _is_compile_only():
++            return 0
+         return get_backend_func("get_current_device")
+ 
+     def set_current_device(self, device):
+         """
+         Set current device as the given device
+         """
++        if _is_compile_only():
++            return
+         return get_backend_func("set_current_device", device)
+ 
+     def get_current_stream(self, device: Optional[int] = None) -> int:
+         """
+         Get stream for current device
+         """
++        if _is_compile_only():
++            return 0
+         # According to torch_npu, the content of a torch.npu.Stream is essentilly an rtStream_t
+         # TODO: use CANN API instead of torchnpu
+         return get_backend_func("get_current_stream", device)
+@@ -198,9 +232,15 @@ class NPUDriver(DriverBase):
+         return do_bench
+ 
+     def get_device_interface(self):
++        if _is_compile_only():
++            import torch
++            return torch
+         return get_backend_func("get_device_interface")
+ 
+     def get_empty_cache_for_benchmark(self):
++        if _is_compile_only():
++            import torch
++            return torch.empty(192 * 1024 * 1024 // 4, dtype=torch.int32)
+         cache_size = 192 * 1024 * 1024
+         return get_backend_func("get_empty_tensor", cache_size // 4)
+ 

@@ -39,17 +39,19 @@
 
 ## 快速开始
 
-### 步骤 1：初始化子模块
+### 步骤 1：初始化子模块并应用补丁
 
 ```bash
 git submodule update --init --recursive
+./scripts/apply_patches.sh
 ```
 
-这会拉取 `thirdparty/llvm-project`（固定在 commit `b5cc222d`）和 `thirdparty/triton-ascend`。
+`thirdparty/triton-ascend` 指向官方 upstream（gitcode.com/Ascend/triton-ascend），本地补丁（`patches/`）在 submodule checkout 后自动应用，提供 compile-only mock 等功能。
 
 > 如果拉取超时或失败，可改用浅克隆：
 > ```bash
 > git submodule update --init --depth 1 --recursive
+> ./scripts/apply_patches.sh
 > ```
 
 ---
@@ -390,6 +392,8 @@ include/AscendModel/   公共头文件
 lib/AscendModel/       分析、IR 与 transforms 实现
 tools/                 命令行工具入口
 configs/               硬件配置与 schema
+patches/               应用到 thirdparty 子模块的本地补丁
+scripts/               构建、补丁应用等辅助脚本
 test/                  示例输入与 smoke tests
 thirdparty/            外部依赖
 ```
