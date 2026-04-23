@@ -466,6 +466,41 @@ static std::string renderOperation(mlir::Operation *op) {
   return storage;
 }
 
+static void eraseAttributeAssignment(std::string &line, llvm::StringRef name) {
+  std::string needle = name.str();
+  for (;;) {
+    size_t pos = line.find(needle);
+    if (pos == std::string::npos)
+      return;
+
+    size_t valueStart = line.find('#', pos + needle.size());
+    if (valueStart == std::string::npos)
+      return;
+    size_t valueEnd = line.find('>', valueStart);
+    if (valueEnd == std::string::npos)
+      return;
+    ++valueEnd;
+
+    size_t eraseStart = pos;
+    while (eraseStart > 0 && line[eraseStart - 1] == ' ')
+      --eraseStart;
+    if (eraseStart > 0 && line[eraseStart - 1] == ',') {
+      --eraseStart;
+      while (eraseStart > 0 && line[eraseStart - 1] == ' ')
+        --eraseStart;
+    } else {
+      while (valueEnd < line.size() && line[valueEnd] == ' ')
+        ++valueEnd;
+      if (valueEnd < line.size() && line[valueEnd] == ',')
+        ++valueEnd;
+      while (valueEnd < line.size() && line[valueEnd] == ' ')
+        ++valueEnd;
+    }
+
+    line.erase(eraseStart, valueEnd - eraseStart);
+  }
+}
+
 static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
   // Pre-process to remove custom dialect attributes/types that require
   // registered dialects.  When built without BiShengIR, the parser cannot
@@ -498,31 +533,11 @@ static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
         else if (space == "cbuf") num = 6;
         l.replace(pos, end - pos + 1, std::to_string(num));
       }
-      // Strip other custom dialect attributes that block parsing
-      // #hacc.arg_type<xxx> -> remove entirely
-      for (;;) {
-        auto p = l.find("#hacc.arg_type<");
-        if (p == std::string::npos) break;
-        auto e = l.find('>', p);
-        if (e == std::string::npos) break;
-        l.erase(p, e - p + 1);
-      }
-      // #hivm.func_core_type<xxx> -> remove
-      for (;;) {
-        auto p = l.find("#hivm.func_core_type<");
-        if (p == std::string::npos) break;
-        auto e = l.find('>', p);
-        if (e == std::string::npos) break;
-        l.erase(p, e - p + 1);
-      }
-      // #hacc.function_kind<xxx> -> remove
-      for (;;) {
-        auto p = l.find("#hacc.function_kind<");
-        if (p == std::string::npos) break;
-        auto e = l.find('>', p);
-        if (e == std::string::npos) break;
-        l.erase(p, e - p + 1);
-      }
+      // Strip whole custom attribute assignments whose values require
+      // external dialect parsers.
+      eraseAttributeAssignment(l, "hacc.arg_type");
+      eraseAttributeAssignment(l, "hivm.func_core_type");
+      eraseAttributeAssignment(l, "hacc.function_kind");
       os << l << "\n";
     }
     os.flush();
@@ -747,6 +762,129 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
   }
 
   return startsWithHivmOp(op);
+}
+#endif
+
+static std::string stringifyAttribute(mlir::Attribute attr) {
+  if (!attr)
+    return "";
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  attr.print(os);
+  os.flush();
+  return storage;
+}
+
+static std::pair<std::string, std::string> parseLoadStoreSpaces(llvm::StringRef line);
+
+static HIVMPipe parsePipeToken(llvm::StringRef text) {
+  if (text.contains("PIPE_ALL"))
+    return HIVMPipe::All;
+  if (text.contains("PIPE_MTE3"))
+    return HIVMPipe::MTE3;
+  if (text.contains("PIPE_MTE2"))
+    return HIVMPipe::VectorMTE2;
+  if (text.contains("PIPE_MTE1"))
+    return HIVMPipe::MTE1;
+  if (text.contains("PIPE_FIX"))
+    return HIVMPipe::FixPipe;
+  if (text.contains("PIPE_M"))
+    return HIVMPipe::Cube;
+  if (text.contains("PIPE_V"))
+    return HIVMPipe::Vector;
+  if (text.contains("PIPE_S"))
+    return HIVMPipe::Scalar;
+  return HIVMPipe::Unknown;
+}
+
+static std::string parseEventToken(llvm::StringRef text) {
+  size_t pos = text.find("EVENT_ID");
+  if (pos == llvm::StringRef::npos)
+    return "";
+  size_t end = pos;
+  while (end < text.size() &&
+         (std::isalnum(static_cast<unsigned char>(text[end])) ||
+          text[end] == '_'))
+    ++end;
+  return text.slice(pos, end).str();
+}
+
+#ifndef TRITONSIM_HAS_BISHENGIR_HIVM
+static std::string inferGenericCoreType(mlir::Operation *op) {
+  if (auto parentFunc = op->getParentOfType<mlir::func::FuncOp>()) {
+    std::string attr = stringifyAttribute(parentFunc->getAttr("hivm.func_core_type"));
+    if (llvm::StringRef(attr).contains("AIC") ||
+        llvm::StringRef(attr).contains("CUBE"))
+      return "CUBE";
+    if (llvm::StringRef(attr).contains("AIV") ||
+        llvm::StringRef(attr).contains("VECTOR"))
+      return "VECTOR";
+  }
+  return resolveCoreTypeFromFunc(op, "").str();
+}
+
+static bool populateGenericHivmOp(mlir::Operation *op, ParsedOp &parsed) {
+  parsed.op.opName = getLeafOpName(op).str();
+  parsed.op.coreType = inferGenericCoreType(op);
+  std::string opText = renderOperation(op);
+  auto spaces = parseLoadStoreSpaces(opText);
+
+  if (parsed.op.opName == "load") {
+    parsed.op.pipe =
+        selectMTE2PipeForSpaces(spaces.first, spaces.second, parsed.op.coreType);
+  } else if (parsed.op.opName == "store") {
+    parsed.op.pipe = HIVMPipe::MTE3;
+  } else if (parsed.op.opName == "fixpipe") {
+    parsed.op.pipe = HIVMPipe::FixPipe;
+  } else if (parsed.op.opName == "nd2nz") {
+    parsed.op.pipe = HIVMPipe::CubeMTE2;
+  } else if (parsed.op.opName == "nz2nd") {
+    parsed.op.pipe = HIVMPipe::MTE3;
+  } else if (parsed.op.opName == "copy") {
+    if (spaces.second == "gm")
+      parsed.op.pipe = HIVMPipe::MTE3;
+    else if (spaces.second == "l1")
+      parsed.op.pipe = HIVMPipe::CubeMTE2;
+    else
+      parsed.op.pipe = HIVMPipe::Vector;
+  } else if (parsed.op.opName == "pointer_cast" ||
+             parsed.op.opName == "convert_layout") {
+    parsed.op.pipe = HIVMPipe::Unknown;
+  } else if (parsed.op.opName == "matmul" ||
+             parsed.op.opName == "mix_matmul" ||
+             parsed.op.opName == "mix_group_matmul" ||
+             parsed.op.opName == "mmadL1") {
+    parsed.op.pipe = HIVMPipe::Cube;
+  } else {
+    parsed.op.pipe = HIVMPipe::Vector;
+  }
+
+  if (parsed.op.opName == "pipe_barrier") {
+    parsed.op.isSyncOp = true;
+    parsed.op.isBarrier = true;
+    parsed.op.pipe =
+        disambiguateMTE2Pipe(parsePipeToken(stringifyAttribute(op->getAttr("pipe"))),
+                             HIVMPipe::Unknown, parsed.op.coreType);
+    parsed.barrierPipes.push_back(parsed.op.pipe);
+    return true;
+  }
+  if (parsed.op.opName == "set_flag" || parsed.op.opName == "wait_flag") {
+    parsed.op.isSyncOp = true;
+    HIVMPipe setPipe = parsePipeToken(stringifyAttribute(op->getAttr("set_pipe")));
+    HIVMPipe waitPipe = parsePipeToken(stringifyAttribute(op->getAttr("wait_pipe")));
+    parsed.senderPipe =
+        disambiguateMTE2Pipe(setPipe, waitPipe, parsed.op.coreType);
+    parsed.receiverPipe =
+        disambiguateMTE2Pipe(waitPipe, parsed.senderPipe, parsed.op.coreType);
+    parsed.eventId = parseEventToken(
+        stringifyAttribute(op->getAttr("static_event_id")));
+    parsed.op.pipe = parsed.op.opName == "set_flag" ? parsed.senderPipe
+                                                     : parsed.receiverPipe;
+    attachSyncMetadata(parsed);
+    return true;
+  }
+
+  return true;
 }
 #endif
 
@@ -1932,7 +2070,9 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
       return;
     parsed.op.lineNumber = getLineNumberFromLocation(op->getLoc());
 #else
-    return;
+    if (!populateGenericHivmOp(op, parsed))
+      return;
+    parsed.op.lineNumber = getLineNumberFromLocation(op->getLoc());
 #endif
     parsed.op.loopMultiplier = loopMultiplier;
     parsed.op.text = opText;
@@ -2515,8 +2655,8 @@ bool HIVMAnalyzer::analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
     return false;
   }
 
-  std::string sanitized = sanitizeMlirBuffer(fileOrErr.get()->getBuffer());
-  llvm::StringRef buffer = sanitized;
+  llvm::StringRef rawBuffer = fileOrErr.get()->getBuffer();
+  std::string sanitized = sanitizeMlirBuffer(rawBuffer);
   report = HIVMAnalysisReport();
   report.sourcePath = path.str();
   report.sourceMode = "direct-hivm";
@@ -2543,12 +2683,18 @@ bool HIVMAnalyzer::analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
           return mlir::success();
         });
 
-    if (auto module = mlir::parseSourceString<mlir::ModuleOp>(buffer, &context)) {
-      if (!analyzeModule(*module, report, error))
-        return false;
-      report.sourcePath = path.str();
-      report.sourceMode = "direct-hivm";
-      return true;
+    llvm::SmallVector<llvm::StringRef, 2> parseCandidates;
+    parseCandidates.push_back(rawBuffer);
+    if (sanitized != rawBuffer)
+      parseCandidates.push_back(sanitized);
+    for (llvm::StringRef buffer : parseCandidates) {
+      if (auto module = mlir::parseSourceString<mlir::ModuleOp>(buffer, &context)) {
+        if (!analyzeModule(*module, report, error))
+          return false;
+        report.sourcePath = path.str();
+        report.sourceMode = "direct-hivm";
+        return true;
+      }
     }
     error = "failed to parse HIVM MLIR module";
     if (!parseDiagnostics.empty())

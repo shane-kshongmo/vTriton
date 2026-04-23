@@ -6,6 +6,7 @@ import json
 import numbers
 import os
 import runpy
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -136,6 +137,18 @@ def _install_compile_command_capture(dump_dir):
 
         if start_idx is not None:
             module_lines = lines[start_idx:end_idx]
+            if end_idx is None:
+                balanced = []
+                depth = 0
+                saw_body = False
+                for line in module_lines:
+                    balanced.append(line)
+                    depth += line.count("{")
+                    depth -= line.count("}")
+                    saw_body = saw_body or "{" in line
+                    if saw_body and depth <= 0:
+                        break
+                module_lines = balanced
             # Strip leading/trailing blank lines.
             while module_lines and not module_lines[0].strip():
                 module_lines.pop(0)
@@ -143,6 +156,57 @@ def _install_compile_command_capture(dump_dir):
                 module_lines.pop()
             return "\n".join(module_lines)
         return None
+
+    def _find_bishengir_opt():
+        found = shutil.which("bishengir-opt")
+        if found:
+            return found
+        roots = [
+            os.environ.get("ASCEND_HOME_PATH"),
+            os.environ.get("ASCEND_TOOLKIT_HOME"),
+            "/home/shane/Ascend/ascend-toolkit/latest",
+            "/home/shane/Ascend/cann-8.5.0",
+        ]
+        for root in roots:
+            if not root:
+                continue
+            candidate = Path(root) / "tools" / "bishengir" / "bin" / "bishengir-opt"
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+    def _normalize_npuir(module_text):
+        """Print through bishengir-opt so vTriton can parse generic MLIR."""
+        import tempfile
+
+        opt = _find_bishengir_opt()
+        if not opt:
+            return module_text
+        with tempfile.NamedTemporaryFile("w", suffix=".npuir.mlir", delete=False) as src:
+            src.write(module_text)
+            src_path = src.name
+        out_path = src_path + ".generic"
+        try:
+            ret = original_run(
+                [
+                    opt,
+                    "--allow-unregistered-dialect",
+                    "--mlir-print-op-generic",
+                    src_path,
+                    "-o",
+                    out_path,
+                ],
+                capture_output=True,
+                timeout=30,
+            )
+            if ret.returncode == 0 and Path(out_path).exists():
+                return Path(out_path).read_text(encoding="utf-8")
+        except Exception:
+            pass
+        finally:
+            Path(src_path).unlink(missing_ok=True)
+            Path(out_path).unlink(missing_ok=True)
+        return module_text
 
     def _dump_npuir_secondary(cmd):
         """Run bishengir-compile a second time with NPUIR dump flag only."""
@@ -174,10 +238,13 @@ def _install_compile_command_capture(dump_dir):
             if module_text and "func.func" in module_text:
                 _npuir_index[0] += 1
                 fname = f"kernel_{_npuir_index[0]:03d}.npuir.mlir"
+                module_text = _normalize_npuir(module_text)
                 (Path(dump_dir) / fname).write_text(module_text, encoding="utf-8")
+                return True
         except Exception:
             # Dump failed; primary compilation already succeeded, so ignore.
             pass
+        return False
 
     def record(cmd):
         if not isinstance(cmd, (list, tuple)) or not cmd:
@@ -206,7 +273,8 @@ def _install_compile_command_capture(dump_dir):
 
         # If successful, run a secondary dump-only invocation.
         if ret.returncode == 0:
-            _dump_npuir_secondary(cmd)
+            if _dump_npuir_secondary(cmd):
+                _exit_success()
 
         return ret
 
@@ -484,7 +552,7 @@ def _install_header_compat():
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Launch a Triton DSL script and capture inferred HIVM bindings."
+        description="Launch a Triton DSL script in compile-only dump mode."
     )
     parser.add_argument("--script", required=True, help="Path to the Triton Python script")
     parser.add_argument("--dump-dir", required=True, help="Directory where Triton dumps IR")
@@ -523,6 +591,12 @@ def _resolve_entry_arg(expr):
     return eval(expr, {"__builtins__": {}}, allowed_globals)
 
 
+def _exit_success():
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 def main():
     args = _parse_args()
     script_path = Path(args.script).resolve()
@@ -546,7 +620,7 @@ def main():
     sys.argv = [str(script_path), *forwarded_args]
     if not args.entry_func:
         runpy.run_path(str(script_path), run_name="__main__")
-        return
+        _exit_success()
 
     module_globals = runpy.run_path(str(script_path), run_name="__tritonsim__")
     target = module_globals.get(args.entry_func)
@@ -561,6 +635,7 @@ def main():
 
     resolved_args = [_resolve_entry_arg(expr) for expr in args.entry_arg]
     target(*resolved_args)
+    _exit_success()
 
 
 if __name__ == "__main__":

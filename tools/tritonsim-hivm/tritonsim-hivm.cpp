@@ -342,9 +342,19 @@ collectTritonPythonPathEntries(llvm::StringRef tritonRoot) {
 std::optional<std::string> locateLauncherScript() {
   llvm::SmallString<256> launcher(__FILE__);
   llvm::sys::path::remove_filename(launcher);
+  llvm::sys::path::append(launcher, "..", "common",
+                          "triton_dsl_dump_launcher.py");
+  if (llvm::sys::fs::exists(launcher))
+    return launcher.str().str();
+
+  // Compatibility with older source trees that kept the shared DSL launcher
+  // next to tritonsim-hivm.
+  launcher = __FILE__;
+  llvm::sys::path::remove_filename(launcher);
   llvm::sys::path::append(launcher, "triton_hivm_launcher.py");
   if (llvm::sys::fs::exists(launcher))
     return launcher.str().str();
+
   return std::nullopt;
 }
 
@@ -395,7 +405,7 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   llvm::StringRef resolvedPython = *resolvedProgram;
   auto launcherScript = locateLauncherScript();
   if (!launcherScript) {
-    error = "failed to locate Triton HIVM launcher script";
+    error = "failed to locate shared Triton DSL dump launcher script";
     return false;
   }
 
