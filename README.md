@@ -42,7 +42,8 @@
 ### 步骤 1：初始化子模块并应用补丁
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init thirdparty/triton-ascend
+git -C thirdparty/triton-ascend submodule update --init --depth 1 third_party/ascend/AscendNPU-IR
 ./scripts/apply_patches.sh
 ```
 
@@ -50,7 +51,8 @@ git submodule update --init --recursive
 
 > 如果拉取超时或失败，可改用浅克隆：
 > ```bash
-> git submodule update --init --depth 1 --recursive
+> git submodule update --init --depth 1 thirdparty/triton-ascend
+> git -C thirdparty/triton-ascend submodule update --init --depth 1 third_party/ascend/AscendNPU-IR
 > ./scripts/apply_patches.sh
 > ```
 
