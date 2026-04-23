@@ -342,9 +342,19 @@ collectTritonPythonPathEntries(llvm::StringRef tritonRoot) {
 std::optional<std::string> locateLauncherScript() {
   llvm::SmallString<256> launcher(__FILE__);
   llvm::sys::path::remove_filename(launcher);
+  llvm::sys::path::append(launcher, "..", "common",
+                          "triton_dsl_dump_launcher.py");
+  if (llvm::sys::fs::exists(launcher))
+    return launcher.str().str();
+
+  // Compatibility with older source trees that kept the shared DSL launcher
+  // next to tritonsim-hivm.
+  launcher = __FILE__;
+  llvm::sys::path::remove_filename(launcher);
   llvm::sys::path::append(launcher, "triton_hivm_launcher.py");
   if (llvm::sys::fs::exists(launcher))
     return launcher.str().str();
+
   return std::nullopt;
 }
 
@@ -395,7 +405,7 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   llvm::StringRef resolvedPython = *resolvedProgram;
   auto launcherScript = locateLauncherScript();
   if (!launcherScript) {
-    error = "failed to locate Triton HIVM launcher script";
+    error = "failed to locate shared Triton DSL dump launcher script";
     return false;
   }
 
@@ -438,6 +448,7 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   pushEnv("TRITON_DUMP_DIR", tempDir);
   pushEnv("TRITON_CACHE_DIR", tempDir + "/cache");
   pushEnv("TRITON_ASCEND_ARCH", tritonAscendArch);
+  pushEnv("TRITON_ENABLE_TASKQUEUE", "0");
   pushEnv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0");
 
   if (llvm::sys::fs::create_directories(tempDir + "/cache")) {
@@ -449,7 +460,14 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
     pushEnv("ASCEND_HOME_PATH", *ascendHome);
     pushEnv("ASCEND_TOOLKIT_HOME", *ascendHome);
     pushEnv("ASCEND_AICPU_PATH", *ascendHome);
-    pushEnv("ASCEND_OPP_PATH", *ascendHome + "/opp");
+    if (const char *oppPath = std::getenv("ASCEND_OPP_PATH")) {
+      if (*oppPath)
+        pushEnv("ASCEND_OPP_PATH", oppPath);
+      else
+        pushEnv("ASCEND_OPP_PATH", *ascendHome + "/opp");
+    } else {
+      pushEnv("ASCEND_OPP_PATH", *ascendHome + "/opp");
+    }
     pushEnv("TOOLCHAIN_HOME", *ascendHome + "/toolkit");
     pushEnv("PATH",
             prependEnvValue(*ascendHome + "/bin", std::getenv("PATH")));
@@ -489,6 +507,19 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   std::string errMsg;
   int rc = llvm::sys::ExecuteAndWait(resolvedPython, args, envRefs, {}, 0, 0, &errMsg);
   if (rc != 0) {
+    // Best-effort recovery: NPUIR may have been written before the failure
+    // (e.g., bishengir-compile succeeded but the subsequent kernel launch
+    // attempt failed because there is no real NPU device).
+    if (auto partial = findLatestNpuirUnder(tempDir)) {
+      llvm::errs() << "Warning: triton script exited " << rc
+                   << " but .npuir.mlir was found — proceeding with partial dump.\n";
+      outNpuirPath = *partial;
+      std::optional<std::string> capturedKernel = findCapturedKernelName(tempDir);
+      if (std::optional<std::string> bindings =
+              readCapturedBindings(tempDir, capturedKernel.value_or("")))
+        capturedBindings = *bindings;
+      return true;
+    }
     error = "triton script execution failed with exit code " + std::to_string(rc);
     if (!errMsg.empty())
       error += ": " + errMsg;

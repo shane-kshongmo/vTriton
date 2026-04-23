@@ -9,8 +9,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # MLIR/LLVM Configuration
 #===----------------------------------------------------------------------===//
 
-find_package(MLIR REQUIRED CONFIG)
-find_package(LLVM REQUIRED CONFIG)
+if(NOT DEFINED MLIR_DIR AND DEFINED ENV{LLVM_SYSPATH})
+  set(MLIR_DIR "$ENV{LLVM_SYSPATH}/lib/cmake/mlir" CACHE PATH
+      "Path to MLIRConfig.cmake (derived from LLVM_SYSPATH)" FORCE)
+endif()
+
+if(NOT DEFINED LLVM_DIR AND DEFINED ENV{LLVM_SYSPATH})
+  set(LLVM_DIR "$ENV{LLVM_SYSPATH}/lib/cmake/llvm" CACHE PATH
+      "Path to LLVMConfig.cmake (derived from LLVM_SYSPATH)" FORCE)
+endif()
+
+find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})
+find_package(LLVM REQUIRED CONFIG PATHS ${LLVM_DIR})
 
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")

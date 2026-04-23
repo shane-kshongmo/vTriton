@@ -42,7 +42,8 @@
 ### 步骤 1：初始化子模块并应用补丁
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init thirdparty/triton-ascend
+git -C thirdparty/triton-ascend submodule update --init --depth 1 third_party/ascend/AscendNPU-IR
 ./scripts/apply_patches.sh
 ```
 
@@ -50,7 +51,8 @@ git submodule update --init --recursive
 
 > 如果拉取超时或失败，可改用浅克隆：
 > ```bash
-> git submodule update --init --depth 1 --recursive
+> git submodule update --init --depth 1 thirdparty/triton-ascend
+> git -C thirdparty/triton-ascend submodule update --init --depth 1 third_party/ascend/AscendNPU-IR
 > ./scripts/apply_patches.sh
 > ```
 
@@ -208,6 +210,15 @@ cd ..
   --python python3
 ```
 
+`--triton-script` 会调用公共 launcher
+`tools/common/triton_dsl_dump_launcher.py`，以 compile-only 模式执行 Triton
+DSL。该 launcher 同时产出 TTIR 与 HIVM/NPUIR dump：
+
+- TTIR dump 可由 `tritonsim-opt` 继续建模
+- `.npuir.mlir` dump 可由 `tritonsim-hivm` 继续建模
+
+因此 TTIR 与 HIVM 的 DSL 入口共享同一个 dump launcher，只是在 dump 之后进入不同的建模工具。
+
 ### 分析 Triton IR (`.ttir`)
 
 需要 `triton-opt`（来自 triton-ascend 构建）将 TTIR 转为 generic MLIR，再由 `tritonsim-opt` 运行建模 pipeline：
@@ -312,6 +323,15 @@ kernel 入口函数 `test_dsa_prefill` 接收以下参数：
 | `--des-graph-file` | 导出 DES 调度图（JSON 格式） |
 | `--perfetto-trace-file` | 导出 Perfetto trace（可在 [ui.perfetto.dev](https://ui.perfetto.dev) 打开） |
 | `--keep-dump-dir` | 保留中间编译产物目录，便于调试 |
+
+保留的 dump 目录中通常包含：
+
+| 产物 | 用途 |
+|------|------|
+| `*/add_kernel.ttir` | Triton TTIR，可用 `tritonsim-opt` 做 TTIR 建模 |
+| `kernel_*.npuir.mlir` | HIVM/NPUIR，可用 `tritonsim-hivm --npuir-file` 做 HIVM 建模 |
+| `tritonsim_hivm_bindings.jsonl` | launcher 捕获的动态参数绑定 |
+| `tritonsim_hivm_compile_commands.jsonl` | launcher 捕获的 `bishengir-compile` 命令 |
 
 ### 步骤 3：查看分析结果
 

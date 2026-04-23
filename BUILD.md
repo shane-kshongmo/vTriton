@@ -38,13 +38,12 @@
 所有外部依赖通过 git submodules 管理:
  
 ```bash
-git submodule update --init --recursive
+git submodule update --init thirdparty/triton-ascend
+git -C thirdparty/triton-ascend submodule update --init --depth 1 third_party/ascend/AscendNPU-IR
 ```
  
-这会拉取 `thirdparty/llvm-project` (pinned at commit `b5cc222d`) 和 `thirdparty/triton-ascend`。
-
-当前 `thirdparty/triton-ascend` 绑定到 mocked 仓库
-`https://github.com/shane-kshongmo/Trtiton-Ascend`，也是 CMake 默认自动发现的 Triton 源码路径。
+这会拉取 `thirdparty/triton-ascend` 及其必要子模块。默认流程不需要递归初始化
+`AscendNPU-IR/third-party/llvm-project`。
  
 ---
  
