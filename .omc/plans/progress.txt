@@ -78,7 +78,7 @@
 - `tests/perfbound/fixtures/vector_add_2x_op_summary_910b3.csv` — NEW: 32M profile
 
 ### Test baseline
-- 354 passed, 3 skipped, 2 xfailed (up from 332 + 22 new tests)
+- 366 passed, 3 skipped, 2 xfailed (up from 354 + 12 new tests for US-SB-005)
 - Zero regressions
 
 ### US-SB-008 HIVM Optimization Feasibility Analysis (2026-06-11)
@@ -112,10 +112,16 @@ Instead use the model's gap analysis to guide kernel-level changes, then let the
 standard bishengir pipeline compile them. The 55.8% headroom is at the kernel
 author's feet.
 
-### Remaining open stories
-- US-SB-005 (Task 2): Multi-kernel validation set n≥5 — need ≥2 more kernels (softmax, layernorm)
+### US-SB-005 (Task 2 — Multi-kernel Validation): ✅ COMPLETE
+- Profiled softmax (8192×2048 fp32) and layernorm (8192×2048 fp32) on 910B3 via msprof
+- Both kernels produce mathematically valid output (softmax: row sums=1.0; layernorm: finite, non-trivial)
+- Softmax: T_bound=88.01 µs ≤ T_measured=305.07 µs (3.47×, PASS)
+- Layernorm: T_bound=88.01 µs ≤ T_measured=608.39 µs (6.91×, PASS)
+- Validation set now has 5 kernels: chunk_kda, vector_add_16m, vector_add_32m, softmax_8kx2k, layernorm_8kx2k
+- soundness_rate = 1.0 (no BOUND_VIOLATION)
+- 10 new CI tests in TestMultiKernelValidation, TestSoftmaxKernelSoundness, TestLayernormKernelSoundness
 
-### Stage-B Summary (7/8 stories complete)
+### Stage-B Summary (8/8 stories complete — ALL DONE)
 
 | Story | Title | Status |
 |-------|-------|--------|
@@ -123,7 +129,7 @@ author's feet.
 | US-SB-002 | Surface DES maxIterations flag | ✅ |
 | US-SB-003 | Real des.json for chunk_kda (THE GATE) | ✅ (caveat: FLOP reconciliation) |
 | US-SB-004 | Source repeat/mask from correct IR stage | ✅ (analytical derivation) |
-| US-SB-005 | Multi-kernel validation set n≥5 | ❌ (3/5 kernels, need softmax+layernorm) |
+| US-SB-005 | Multi-kernel validation set n≥5 | ✅ (5 kernels, soundness_rate=1.0) |
 | US-SB-006 | Live counterfactual validation | ✅ (quant_error=3.0%) |
 | US-SB-007 | Scalar throughput calibration | ✅ (P_scalar=0.118 GFLOPS) |
 | US-SB-008 | Two-limit compiler-headroom | ✅ (compiler=0.04%, author=55.8%) |

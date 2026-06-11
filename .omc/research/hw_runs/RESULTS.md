@@ -148,6 +148,43 @@ access pattern. `ascend-tiling-opt` is the tool to search this space using the
 white-box model. Direct HIVM IR editing provides marginal improvement (~0.04%)
 and lacks a back-compilation path to hardware.
 
+## 7. Multi-kernel validation set — US-SB-005 complete (2026-06-11)
+
+Added two vector kernels (softmax, layernorm) to reach the n≥5 target. Both
+profiled on 910B3 via `msprof` + `kernel_launcher.py`, correctness verified
+via mathematical invariants.
+
+### Validation set summary (5/5 kernels)
+
+| Kernel | Bound kind | T_bound (µs) | T_measured (µs) | Tightness | Status |
+|--------|-----------|-------------|-----------------|-----------|--------|
+| chunk_kda | tier2_des | 46,109.91 | 104,326.00 | 2.26× | PASS |
+| vector_add_16m | analytic_hbm_floor | 125.83 | 307.03 | 2.44× | PASS |
+| vector_add_32m | analytic_hbm_floor | 251.66 | 605.25 | 2.41× | PASS |
+| softmax_8kx2k | analytic_hbm_floor | 88.01 | 305.07 | 3.47× | PASS |
+| layernorm_8kx2k | analytic_hbm_floor | 88.01 | 608.39 | 6.91× | PASS |
+
+**soundness_rate = 1.0** (no BOUND_VIOLATION across all 5 kernels).
+
+### Kernel details
+
+**softmax_8kx2k**: Row-wise softmax (8192×2048, fp32). Pure AI_VECTOR_CORE
+kernel: `aiv_scalar_ratio=0.45`, `aiv_vec_ratio=0.25`, `aiv_mte2_ratio=0.24`.
+11 msprof invocations captured; T_measured = median(10 post-warmup) = 305.07 µs.
+Correctness: all row sums = 1.0, all values positive and finite.
+
+**layernorm_8kx2k**: LayerNorm forward (8192×2048, fp32). Pure AI_VECTOR_CORE
+kernel: `aiv_scalar_ratio=0.52`, `aiv_vec_ratio=0.18`, `aiv_mte2_ratio=0.29`.
+11 invocations; T_measured = 608.39 µs. Correctness: output finite, non-trivial
+per-row variance (1.74–2.21).
+
+### Kernel diversity
+
+The set spans both compute-bound (chunk_kda, Tier-2 DES) and memory-bound
+(analytic HBM floor) kernels, with tightness ranging from 2.26× to 6.91×.
+All soundness checks pass — the model never predicts a bound above the
+measured wall-clock time.
+
 ## Reproduce
 
 ```bash

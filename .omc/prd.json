@@ -73,8 +73,8 @@
         "CI test loading the fixtures passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": "Depends on US-SB-003. Requires remote 910B3 for each kernel."
+      "passes": true,
+      "notes": "CLOSED 2026-06-11. 5 kernels profiled on 910B3: chunk_kda (tier2_des), vector_add_16m, vector_add_32m, softmax_8kx2k, layernorm_8kx2k (all analytic_hbm_floor). soundness_rate=1.0. Softmax (305.07µs, 3.47× tightness) and layernorm (608.39µs, 6.91× tightness) added in this closure. 10 CI tests in test_stage_b_stories.py."
     },
     {
       "id": "US-SB-006",

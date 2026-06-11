@@ -338,3 +338,165 @@ class TestLiveCounterfactual:
         data = self._load_results()
         assert data.get("baseline_sound") is True, "baseline must be sound"
         assert data.get("scaled_sound") is True, "scaled kernel must be sound"
+
+
+# ===========================================================================
+# US-SB-005: Multi-kernel validation set (n >= 5)
+# ===========================================================================
+
+MULTI_KERNEL_RESULTS = (
+    PROJECT_ROOT / ".omc" / "research" / "hw_runs" / "multi_kernel_results.json"
+)
+
+requires_multi_kernel = pytest.mark.skipif(
+    not MULTI_KERNEL_RESULTS.exists(),
+    reason="multi_kernel_results.json fixture not present",
+)
+
+SOFTMAX_CSV = PROJECT_ROOT / "tests" / "perfbound" / "fixtures" / "softmax_op_summary_910b3.csv"
+LAYERNORM_CSV = PROJECT_ROOT / "tests" / "perfbound" / "fixtures" / "layernorm_op_summary_910b3.csv"
+
+requires_softmax_csv = pytest.mark.skipif(
+    not SOFTMAX_CSV.exists(), reason="softmax op_summary fixture not present"
+)
+requires_layernorm_csv = pytest.mark.skipif(
+    not LAYERNORM_CSV.exists(), reason="layernorm op_summary fixture not present"
+)
+
+
+@requires_multi_kernel
+class TestMultiKernelValidation:
+    """US-SB-005: Multi-kernel soundness validation set (n >= 5).
+
+    Validates that the model produces sound bounds (T_bound <= T_measured)
+    across at least 5 distinct kernels profiled on the real 910B3.
+
+    Acceptance (US-SB-005):
+    - >= 5 kernels with committed T_bound, T_measured, status, tightness
+    - soundness_rate == 1.0 (no BOUND_VIOLATION)
+    - CI test loading the fixtures passes
+    """
+
+    @staticmethod
+    def _load_results():
+        with open(MULTI_KERNEL_RESULTS) as f:
+            return json.load(f)
+
+    def test_at_least_five_kernels(self):
+        """The validation set has >= 5 kernels."""
+        data = self._load_results()
+        assert data["n_kernels"] >= 5, (
+            f"Need >= 5 kernels, got {data['n_kernels']}"
+        )
+
+    def test_soundness_rate_is_one(self):
+        """soundness_rate == 1.0 (no BOUND_VIOLATION)."""
+        data = self._load_results()
+        assert data["soundness_rate"] == 1.0, (
+            f"soundness_rate must be 1.0, got {data['soundness_rate']}"
+        )
+
+    def test_all_kernels_pass(self):
+        """Every kernel in the set has status PASS."""
+        data = self._load_results()
+        for k in data["kernels"]:
+            assert k["status"] == "PASS", (
+                f"Kernel {k['kernel']} has status {k['status']}, expected PASS"
+            )
+
+    def test_all_kernels_sound(self):
+        """T_bound <= T_measured for every kernel (bound soundness)."""
+        data = self._load_results()
+        for k in data["kernels"]:
+            assert k["t_bound_us"] <= k["t_measured_us"], (
+                f"Kernel {k['kernel']}: T_bound ({k['t_bound_us']:.2f}) "
+                f"> T_measured ({k['t_measured_us']:.2f}) — BOUND VIOLATION"
+            )
+
+    def test_all_kernels_have_fixture_csvs(self):
+        """Every kernel's fixture CSV file exists on disk."""
+        data = self._load_results()
+        for k in data["kernels"]:
+            csv_path = PROJECT_ROOT / k["fixture"]
+            assert csv_path.exists(), (
+                f"Kernel {k['kernel']} fixture CSV not found: {csv_path}"
+            )
+
+    def test_no_remaining_kernels(self):
+        """All target kernels have been profiled (remaining == [])."""
+        data = self._load_results()
+        assert data.get("remaining", []) == [], (
+            f"Still missing kernels: {data.get('remaining')}"
+        )
+
+    def test_tightness_reasonable(self):
+        """All kernels have tightness between 1x and 100x."""
+        data = self._load_results()
+        for k in data["kernels"]:
+            t = k["tightness"]
+            assert 1.0 <= t <= 100.0, (
+                f"Kernel {k['kernel']}: tightness {t:.2f}x outside [1, 100]"
+            )
+
+    def test_kernel_diversity(self):
+        """The set contains both memory-bound and compute-bound kernels."""
+        data = self._load_results()
+        bound_kinds = {k["bound_kind"] for k in data["kernels"]}
+        assert len(bound_kinds) >= 2, (
+            f"Expected >= 2 bound kinds, got {bound_kinds}"
+        )
+        assert "analytic_hbm_floor" in bound_kinds, "Missing memory-bound kernel"
+        assert "tier2_des" in bound_kinds, "Missing tier2/compute-bound kernel"
+
+
+@requires_softmax_csv
+class TestSoftmaxKernelSoundness:
+    """Softmax-specific soundness: T_measured parsed from CSV >= HBM floor."""
+
+    ROWS = 8192
+    N_COLS = 2048
+    ELEMENT_SIZE = 4  # fp32
+    # HBM BW derived from vector_add calibration: 1.525 TB/s
+    HBM_BW_BYTES_PER_US = 1.525e6
+
+    def test_softmax_csv_has_kernel_rows(self):
+        """The fixture CSV contains softmax_kernel rows."""
+        from perfbound.validate.msprof_parser import parse_kernel_time_us
+        result = parse_kernel_time_us(str(SOFTMAX_CSV), op_name_filter="softmax_kernel")
+        assert result.t_us > 0, "softmax kernel time must be > 0"
+
+    def test_softmax_hbm_floor_soundness(self):
+        """T_bound (HBM floor) <= T_measured for softmax."""
+        from perfbound.validate.msprof_parser import parse_kernel_time_us
+        result = parse_kernel_time_us(str(SOFTMAX_CSV), op_name_filter="softmax_kernel")
+        hbm_bytes = 2 * self.ROWS * self.N_COLS * self.ELEMENT_SIZE
+        t_bound = hbm_bytes / self.HBM_BW_BYTES_PER_US
+        assert t_bound <= result.t_us, (
+            f"softmax HBM floor ({t_bound:.2f} us) > T_measured ({result.t_us:.3f} us)"
+        )
+
+
+@requires_layernorm_csv
+class TestLayernormKernelSoundness:
+    """Layernorm-specific soundness: T_measured parsed from CSV >= HBM floor."""
+
+    ROWS = 8192
+    N_COLS = 2048
+    ELEMENT_SIZE = 4  # fp32
+    HBM_BW_BYTES_PER_US = 1.525e6
+
+    def test_layernorm_csv_has_kernel_rows(self):
+        """The fixture CSV contains layernorm_kernel rows."""
+        from perfbound.validate.msprof_parser import parse_kernel_time_us
+        result = parse_kernel_time_us(str(LAYERNORM_CSV), op_name_filter="layernorm_kernel")
+        assert result.t_us > 0, "layernorm kernel time must be > 0"
+
+    def test_layernorm_hbm_floor_soundness(self):
+        """T_bound (HBM floor) <= T_measured for layernorm."""
+        from perfbound.validate.msprof_parser import parse_kernel_time_us
+        result = parse_kernel_time_us(str(LAYERNORM_CSV), op_name_filter="layernorm_kernel")
+        hbm_bytes = 2 * self.ROWS * self.N_COLS * self.ELEMENT_SIZE
+        t_bound = hbm_bytes / self.HBM_BW_BYTES_PER_US
+        assert t_bound <= result.t_us, (
+            f"layernorm HBM floor ({t_bound:.2f} us) > T_measured ({result.t_us:.3f} us)"
+        )

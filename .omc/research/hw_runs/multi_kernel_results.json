@@ -33,12 +33,36 @@
       "component_match": false,
       "fixture": "tests/perfbound/fixtures/vector_add_2x_op_summary_910b3.csv",
       "harness": "test/vector_add_2x_bench.py"
+    },
+    {
+      "kernel": "softmax_8kx2k",
+      "bound_kind": "analytic_hbm_floor",
+      "t_bound_us": 88.01,
+      "t_measured_us": 305.07,
+      "status": "PASS",
+      "tightness": 3.47,
+      "component_match": false,
+      "fixture": "tests/perfbound/fixtures/softmax_op_summary_910b3.csv",
+      "harness": "test/softmax_bench.py",
+      "notes": "Row-wise softmax (8192x2048 fp32). Vector-bound: aiv_scalar_ratio=0.45, aiv_mte2_ratio=0.24. HBM floor = 2*ROWS*COLS*4 / 1.525 TB/s. Correctness verified: row sums = 1.0, all values positive and finite."
+    },
+    {
+      "kernel": "layernorm_8kx2k",
+      "bound_kind": "analytic_hbm_floor",
+      "t_bound_us": 88.01,
+      "t_measured_us": 608.39,
+      "status": "PASS",
+      "tightness": 6.91,
+      "component_match": false,
+      "fixture": "tests/perfbound/fixtures/layernorm_op_summary_910b3.csv",
+      "harness": "test/layernorm_bench.py",
+      "notes": "LayerNorm fwd (8192x2048 fp32). Vector-scalar bound: aiv_scalar_ratio=0.52, aiv_vec_ratio=0.18. HBM floor = 2*ROWS*COLS*4 / 1.525 TB/s. Correctness verified: output finite, non-trivial variance per row."
     }
   ],
   "soundness_rate": 1.0,
-  "n_kernels": 3,
+  "n_kernels": 5,
   "target_n": 5,
-  "remaining": ["softmax", "layernorm"],
+  "remaining": [],
   "counterfactual": {
     "description": "US-SB-006: work-scaling counterfactual (vector_add N=16M vs N=32M)",
     "scaling_ratio": 1.9713,
