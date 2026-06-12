@@ -43,6 +43,7 @@ PIPE_TO_COMPONENT = {
     "MTE3": Component.MTE_UB,
     "Scalar": Component.SCALAR,
     # HIVMAnalysis.cpp internal pipe names (PIPE_* enum)
+    "PIPE_CUBE": Component.CUBE,
     "PIPE_M": Component.CUBE,         # Matrix (Cube)
     "PIPE_V": Component.VECTOR,
     "PIPE_S": Component.SCALAR,
