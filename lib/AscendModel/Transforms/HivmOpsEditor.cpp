@@ -989,11 +989,135 @@ MatmulOp HivmOpsEditor::addMatmulBefore(Operation *target, Value a, Value b,
 }
 
 MatmulOp HivmOpsEditor::addMatmulAfter(Operation *target, Value a, Value b,
-                                        Value c) {
+                                         Value c) {
   OpBuilder builder(target->getContext());
   builder.setInsertionPointAfter(target);
   return builder.create<MatmulOp>(target->getLoc(), TypeRange{}, a, b, c,
                                   UnitAttr(), UnitAttr());
+}
+
+MixMatmulOp HivmOpsEditor::addMixMatmulBefore(Operation *target, Value a,
+                                               Value b, Value c) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<MixMatmulOp>(target->getLoc(), TypeRange{}, a, b, c,
+                                     UnitAttr(), UnitAttr());
+}
+
+MixMatmulOp HivmOpsEditor::addMixMatmulAfter(Operation *target, Value a,
+                                              Value b, Value c) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<MixMatmulOp>(target->getLoc(), TypeRange{}, a, b, c,
+                                     UnitAttr(), UnitAttr());
+}
+
+MixGroupMatmulOp HivmOpsEditor::addMixGroupMatmulBefore(Operation *target,
+                                                         Value a, Value b,
+                                                         Value tokensPerExpert,
+                                                         Value c) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<MixGroupMatmulOp>(target->getLoc(), TypeRange{}, a, b,
+                                          tokensPerExpert, c, UnitAttr(),
+                                          UnitAttr());
+}
+
+MixGroupMatmulOp HivmOpsEditor::addMixGroupMatmulAfter(Operation *target,
+                                                        Value a, Value b,
+                                                        Value tokensPerExpert,
+                                                        Value c) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<MixGroupMatmulOp>(target->getLoc(), TypeRange{}, a, b,
+                                          tokensPerExpert, c, UnitAttr(),
+                                          UnitAttr());
+}
+
+Conv1DL1Op HivmOpsEditor::addConv1DL1Before(Operation *target, Value input,
+                                             Value weight, Value init,
+                                             Value initCondition,
+                                             int32_t padding,
+                                             int32_t groups) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  auto *ctx = target->getContext();
+  auto paddingAttr = builder.getI32IntegerAttr(padding);
+  auto groupsAttr = builder.getI32IntegerAttr(groups);
+  return builder.create<Conv1DL1Op>(target->getLoc(), TypeRange{}, input,
+                                    weight, Value(), init, initCondition,
+                                    ValueRange{}, paddingAttr, groupsAttr);
+}
+
+Conv1DL1Op HivmOpsEditor::addConv1DL1After(Operation *target, Value input,
+                                            Value weight, Value init,
+                                            Value initCondition,
+                                            int32_t padding,
+                                            int32_t groups) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  auto *ctx = target->getContext();
+  auto paddingAttr = builder.getI32IntegerAttr(padding);
+  auto groupsAttr = builder.getI32IntegerAttr(groups);
+  return builder.create<Conv1DL1Op>(target->getLoc(), TypeRange{}, input,
+                                    weight, Value(), init, initCondition,
+                                    ValueRange{}, paddingAttr, groupsAttr);
+}
+
+Conv2DL1Op HivmOpsEditor::addConv2DL1Before(Operation *target, Value input,
+                                             Value weight, Value init,
+                                             Value initCondition,
+                                             int32_t padding,
+                                             int32_t groups) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  auto paddingAttr = builder.getI32IntegerAttr(padding);
+  auto groupsAttr = builder.getI32IntegerAttr(groups);
+  return builder.create<Conv2DL1Op>(target->getLoc(), TypeRange{}, input,
+                                    weight, Value(), init, initCondition,
+                                    ValueRange{}, paddingAttr, groupsAttr);
+}
+
+Conv2DL1Op HivmOpsEditor::addConv2DL1After(Operation *target, Value input,
+                                            Value weight, Value init,
+                                            Value initCondition,
+                                            int32_t padding,
+                                            int32_t groups) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  auto paddingAttr = builder.getI32IntegerAttr(padding);
+  auto groupsAttr = builder.getI32IntegerAttr(groups);
+  return builder.create<Conv2DL1Op>(target->getLoc(), TypeRange{}, input,
+                                    weight, Value(), init, initCondition,
+                                    ValueRange{}, paddingAttr, groupsAttr);
+}
+
+Conv3DL1Op HivmOpsEditor::addConv3DL1Before(Operation *target, Value input,
+                                             Value weight, Value init,
+                                             Value initCondition,
+                                             int32_t padding,
+                                             int32_t groups) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  auto paddingAttr = builder.getI32IntegerAttr(padding);
+  auto groupsAttr = builder.getI32IntegerAttr(groups);
+  return builder.create<Conv3DL1Op>(target->getLoc(), TypeRange{}, input,
+                                    weight, Value(), init, initCondition,
+                                    ValueRange{}, paddingAttr, groupsAttr);
+}
+
+Conv3DL1Op HivmOpsEditor::addConv3DL1After(Operation *target, Value input,
+                                            Value weight, Value init,
+                                            Value initCondition,
+                                            int32_t padding,
+                                            int32_t groups) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  auto paddingAttr = builder.getI32IntegerAttr(padding);
+  auto groupsAttr = builder.getI32IntegerAttr(groups);
+  return builder.create<Conv3DL1Op>(target->getLoc(), TypeRange{}, input,
+                                    weight, Value(), init, initCondition,
+                                    ValueRange{}, paddingAttr, groupsAttr);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1159,7 +1283,67 @@ SyncBlockWaitOp HivmOpsEditor::addSyncBlockWaitAfter(Operation *target,
   auto flagAttr = builder.getI64IntegerAttr(flagId);
   return builder.create<SyncBlockWaitOp>(target->getLoc(), coreAttr,
                                          tpipeAttr, pipeAttr, flagAttr,
-                                         Value());
+                                          Value());
+}
+
+CreateSyncBlockLockOp
+HivmOpsEditor::addCreateSyncBlockLockBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  auto memrefType = MemRefType::get({1}, builder.getI64Type());
+  return builder.create<CreateSyncBlockLockOp>(target->getLoc(), memrefType,
+                                               Value());
+}
+
+CreateSyncBlockLockOp
+HivmOpsEditor::addCreateSyncBlockLockAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  auto memrefType = MemRefType::get({1}, builder.getI64Type());
+  return builder.create<CreateSyncBlockLockOp>(target->getLoc(), memrefType,
+                                               Value());
+}
+
+SyncBlockLockOp
+HivmOpsEditor::addSyncBlockLockBefore(Operation *target, Value lockVar) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<SyncBlockLockOp>(target->getLoc(), lockVar);
+}
+
+SyncBlockLockOp
+HivmOpsEditor::addSyncBlockLockAfter(Operation *target, Value lockVar) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<SyncBlockLockOp>(target->getLoc(), lockVar);
+}
+
+SyncBlockUnlockOp
+HivmOpsEditor::addSyncBlockUnlockBefore(Operation *target, Value lockVar) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<SyncBlockUnlockOp>(target->getLoc(), lockVar);
+}
+
+SyncBlockUnlockOp
+HivmOpsEditor::addSyncBlockUnlockAfter(Operation *target, Value lockVar) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<SyncBlockUnlockOp>(target->getLoc(), lockVar);
+}
+
+FreeLockVarOp
+HivmOpsEditor::addFreeLockVarBefore(Operation *target, Value lockVar) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<FreeLockVarOp>(target->getLoc(), lockVar);
+}
+
+FreeLockVarOp
+HivmOpsEditor::addFreeLockVarAfter(Operation *target, Value lockVar) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<FreeLockVarOp>(target->getLoc(), lockVar);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1248,6 +1432,280 @@ SetCtrlOp HivmOpsEditor::addSetCtrlAfter(Operation *target, bool enable,
   auto enableAttr = builder.getBoolAttr(enable);
   auto idxAttr = builder.getI64IntegerAttr(idx);
   return builder.create<SetCtrlOp>(target->getLoc(), enableAttr, idxAttr);
+}
+
+GetBlockIdxOp
+HivmOpsEditor::addGetBlockIdxBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<GetBlockIdxOp>(target->getLoc(),
+                                       builder.getI64Type());
+}
+
+GetBlockIdxOp
+HivmOpsEditor::addGetBlockIdxAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<GetBlockIdxOp>(target->getLoc(),
+                                       builder.getI64Type());
+}
+
+GetBlockNumOp
+HivmOpsEditor::addGetBlockNumBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<GetBlockNumOp>(target->getLoc(),
+                                       builder.getI64Type());
+}
+
+GetBlockNumOp
+HivmOpsEditor::addGetBlockNumAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<GetBlockNumOp>(target->getLoc(),
+                                       builder.getI64Type());
+}
+
+GetSubBlockIdxOp
+HivmOpsEditor::addGetSubBlockIdxBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<GetSubBlockIdxOp>(target->getLoc(),
+                                          builder.getI64Type());
+}
+
+GetSubBlockIdxOp
+HivmOpsEditor::addGetSubBlockIdxAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<GetSubBlockIdxOp>(target->getLoc(),
+                                          builder.getI64Type());
+}
+
+GetSubBlockNumOp
+HivmOpsEditor::addGetSubBlockNumBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<GetSubBlockNumOp>(target->getLoc(),
+                                          builder.getI64Type());
+}
+
+GetSubBlockNumOp
+HivmOpsEditor::addGetSubBlockNumAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<GetSubBlockNumOp>(target->getLoc(),
+                                          builder.getI64Type());
+}
+
+GetSysCntOp
+HivmOpsEditor::addGetSysCntBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<GetSysCntOp>(target->getLoc(),
+                                     builder.getI64Type());
+}
+
+GetSysCntOp
+HivmOpsEditor::addGetSysCntAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<GetSysCntOp>(target->getLoc(),
+                                     builder.getI64Type());
+}
+
+SetMaskNormOp
+HivmOpsEditor::addSetMaskNormBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<SetMaskNormOp>(target->getLoc());
+}
+
+SetMaskNormOp
+HivmOpsEditor::addSetMaskNormAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<SetMaskNormOp>(target->getLoc());
+}
+
+LoadScalarOp
+HivmOpsEditor::addLoadScalarBefore(Operation *target, Value addr,
+                                    Type resultType) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<LoadScalarOp>(target->getLoc(), resultType, addr);
+}
+
+LoadScalarOp
+HivmOpsEditor::addLoadScalarAfter(Operation *target, Value addr,
+                                   Type resultType) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<LoadScalarOp>(target->getLoc(), resultType, addr);
+}
+
+DCCIOp HivmOpsEditor::addDCCIBefore(Operation *target, DCCIMode mode,
+                                     DataCacheKind dataCacheKind) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  auto *ctx = target->getContext();
+  auto modeAttr = DCCIModeAttr::get(ctx, mode);
+  auto cacheKindAttr = DataCacheKindAttr::get(ctx, dataCacheKind);
+  return builder.create<DCCIOp>(target->getLoc(), modeAttr, cacheKindAttr,
+                                Value());
+}
+
+DCCIOp HivmOpsEditor::addDCCIAfter(Operation *target, DCCIMode mode,
+                                    DataCacheKind dataCacheKind) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  auto *ctx = target->getContext();
+  auto modeAttr = DCCIModeAttr::get(ctx, mode);
+  auto cacheKindAttr = DataCacheKindAttr::get(ctx, dataCacheKind);
+  return builder.create<DCCIOp>(target->getLoc(), modeAttr, cacheKindAttr,
+                                Value());
+}
+
+SetFFTSBaseAddrOp
+HivmOpsEditor::addSetFFTSBaseAddrBefore(Operation *target,
+                                         Value fftsBaseAddr) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<SetFFTSBaseAddrOp>(target->getLoc(), fftsBaseAddr);
+}
+
+SetFFTSBaseAddrOp
+HivmOpsEditor::addSetFFTSBaseAddrAfter(Operation *target,
+                                        Value fftsBaseAddr) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<SetFFTSBaseAddrOp>(target->getLoc(), fftsBaseAddr);
+}
+
+GatherLoadOp
+HivmOpsEditor::addGatherLoadBefore(Operation *target, Value base,
+                                    Value indices, Value burstLen,
+                                    Value dst) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<GatherLoadOp>(target->getLoc(), TypeRange{}, base,
+                                      indices, burstLen, Value(), Value(),
+                                      dst, Attribute(), Attribute(),
+                                      Attribute());
+}
+
+GatherLoadOp
+HivmOpsEditor::addGatherLoadAfter(Operation *target, Value base,
+                                   Value indices, Value burstLen,
+                                   Value dst) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<GatherLoadOp>(target->getLoc(), TypeRange{}, base,
+                                      indices, burstLen, Value(), Value(),
+                                      dst, Attribute(), Attribute(),
+                                      Attribute());
+}
+
+ScatterStoreOp
+HivmOpsEditor::addScatterStoreBefore(Operation *target, Value indices,
+                                      Value data, Value burstLen,
+                                      Value base) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<ScatterStoreOp>(target->getLoc(), TypeRange{},
+                                        indices, data, burstLen, Value(),
+                                        base, Attribute(), Attribute());
+}
+
+ScatterStoreOp
+HivmOpsEditor::addScatterStoreAfter(Operation *target, Value indices,
+                                     Value data, Value burstLen,
+                                     Value base) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<ScatterStoreOp>(target->getLoc(), TypeRange{},
+                                        indices, data, burstLen, Value(),
+                                        base, Attribute(), Attribute());
+}
+
+CustomOp HivmOpsEditor::addCustomBefore(Operation *target,
+                                         StringRef name, ValueRange inputs,
+                                         ValueRange outputs) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<CustomOp>(target->getLoc(), name, TypeRange{}, inputs,
+                                  outputs);
+}
+
+CustomOp HivmOpsEditor::addCustomAfter(Operation *target,
+                                        StringRef name, ValueRange inputs,
+                                        ValueRange outputs) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<CustomOp>(target->getLoc(), name, TypeRange{}, inputs,
+                                  outputs);
+}
+
+DebugOp HivmOpsEditor::addDebugBefore(Operation *target,
+                                       StringRef debugType,
+                                       StringRef prefix, bool hex,
+                                       Value arg) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<DebugOp>(target->getLoc(), debugType, prefix, hex,
+                                 arg);
+}
+
+DebugOp HivmOpsEditor::addDebugAfter(Operation *target,
+                                      StringRef debugType,
+                                      StringRef prefix, bool hex,
+                                      Value arg) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<DebugOp>(target->getLoc(), debugType, prefix, hex,
+                                 arg);
+}
+
+InitDebugOp HivmOpsEditor::addInitDebugBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<InitDebugOp>(target->getLoc());
+}
+
+InitDebugOp HivmOpsEditor::addInitDebugAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<InitDebugOp>(target->getLoc());
+}
+
+FinishDebugOp HivmOpsEditor::addFinishDebugBefore(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<FinishDebugOp>(target->getLoc());
+}
+
+FinishDebugOp HivmOpsEditor::addFinishDebugAfter(Operation *target) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<FinishDebugOp>(target->getLoc());
+}
+
+IndirectStoreOp
+HivmOpsEditor::addIndirectStoreBefore(Operation *target, Value dst,
+                                       Value offsets, Value src) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPoint(target);
+  return builder.create<IndirectStoreOp>(target->getLoc(), dst, offsets, src,
+                                         Value());
+}
+
+IndirectStoreOp
+HivmOpsEditor::addIndirectStoreAfter(Operation *target, Value dst,
+                                      Value offsets, Value src) {
+  OpBuilder builder(target->getContext());
+  builder.setInsertionPointAfter(target);
+  return builder.create<IndirectStoreOp>(target->getLoc(), dst, offsets, src,
+                                         Value());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1590,6 +2048,84 @@ void HivmOpsEditor::setMatmulTranspose(MatmulOp matmulOp, bool aTrans,
     matmulOp->setAttr("bTranspose", UnitAttr::get(ctx));
   else
     matmulOp->removeAttr("bTranspose");
+}
+
+void HivmOpsEditor::setCopyPadMode(CopyOp copyOp, PadMode mode) {
+  auto *ctx = copyOp->getContext();
+  auto modeAttr = PadModeAttr::get(ctx, mode);
+  copyOp->setAttr("pad_mode", modeAttr);
+}
+
+void HivmOpsEditor::setFixpipeDMAMode(FixpipeOp fixpipeOp,
+                                       FixpipeDMAMode mode) {
+  auto *ctx = fixpipeOp->getContext();
+  auto modeAttr = FixpipeDMAModeAttr::get(ctx, mode);
+  fixpipeOp->setAttr("dma_mode", modeAttr);
+}
+
+void HivmOpsEditor::setND2NZDstContinuous(ND2NZOp nd2nzOp,
+                                           bool continuous) {
+  auto *ctx = nd2nzOp->getContext();
+  if (continuous)
+    nd2nzOp->setAttr("dst_continuous", UnitAttr::get(ctx));
+  else
+    nd2nzOp->removeAttr("dst_continuous");
+}
+
+void HivmOpsEditor::setLoadInitOutBuffer(LoadOp loadOp, bool init) {
+  auto *ctx = loadOp->getContext();
+  loadOp->setAttr("init_out_buffer", BoolAttr::get(ctx, init));
+}
+
+void HivmOpsEditor::setVTransposePermutation(VTransposeOp transposeOp,
+                                              ArrayRef<int64_t> permutation) {
+  auto *ctx = transposeOp->getContext();
+  transposeOp->setAttr("permutation",
+                       DenseI64ArrayAttr::get(ctx, permutation));
+}
+
+void HivmOpsEditor::setVShRRound(VShROp vshrOp, bool round) {
+  auto *ctx = vshrOp->getContext();
+  vshrOp->setAttr("round", BoolAttr::get(ctx, round));
+}
+
+void HivmOpsEditor::setVSortDescending(VSortOp vsortOp, bool descending) {
+  auto *ctx = vsortOp->getContext();
+  vsortOp->setAttr("descending", BoolAttr::get(ctx, descending));
+}
+
+void HivmOpsEditor::setVInterleaveChannelNum(VInterleaveOp interleaveOp,
+                                              int64_t channelNum) {
+  auto *ctx = interleaveOp->getContext();
+  interleaveOp->setAttr("interleave_channel_nums",
+                        IntegerAttr::get(IntegerType::get(ctx, 64),
+                                         channelNum));
+}
+
+void HivmOpsEditor::setVDeinterleaveChannelNum(
+    VDeinterleaveOp deinterleaveOp, int64_t channelNum) {
+  auto *ctx = deinterleaveOp->getContext();
+  deinterleaveOp->setAttr("channel_num",
+                          IntegerAttr::get(IntegerType::get(ctx, 64),
+                                           channelNum));
+}
+
+void HivmOpsEditor::setAtomicRMWKind(AtomicRMWOp atomicRmwOp,
+                                      AtomicKind kind) {
+  auto *ctx = atomicRmwOp->getContext();
+  auto kindAttr = AtomicKindAttr::get(ctx, kind);
+  atomicRmwOp->setAttr("atomic_kind", kindAttr);
+}
+
+void HivmOpsEditor::setDCCIMode(DCCIOp dcciOp, DCCIMode mode) {
+  auto *ctx = dcciOp->getContext();
+  auto modeAttr = DCCIModeAttr::get(ctx, mode);
+  dcciOp->setAttr("mode", modeAttr);
+}
+
+void HivmOpsEditor::setCustomOpName(CustomOp customOp, StringRef name) {
+  auto *ctx = customOp->getContext();
+  customOp->setAttr("name", StringAttr::get(ctx, name));
 }
 
 //===----------------------------------------------------------------------===//

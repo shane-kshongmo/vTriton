@@ -370,21 +370,21 @@ public:
                                      Value initCondition,
                                      int32_t padding, int32_t groups);
   hivm::Conv2DL1Op addConv2DL1Before(Operation *target, Value input,
-                                      Value weight, Value init,
-                                      Value initCondition,
-                                      int32_t groups);
+                                       Value weight, Value init,
+                                       Value initCondition,
+                                       int32_t padding, int32_t groups);
   hivm::Conv2DL1Op addConv2DL1After(Operation *target, Value input,
-                                     Value weight, Value init,
-                                     Value initCondition,
-                                     int32_t groups);
-  hivm::Conv3DL1Op addConv3DL1Before(Operation *target, Value input,
                                       Value weight, Value init,
                                       Value initCondition,
-                                      int32_t groups);
+                                      int32_t padding, int32_t groups);
+  hivm::Conv3DL1Op addConv3DL1Before(Operation *target, Value input,
+                                       Value weight, Value init,
+                                       Value initCondition,
+                                       int32_t padding, int32_t groups);
   hivm::Conv3DL1Op addConv3DL1After(Operation *target, Value input,
-                                     Value weight, Value init,
-                                     Value initCondition,
-                                     int32_t groups);
+                                      Value weight, Value init,
+                                      Value initCondition,
+                                      int32_t padding, int32_t groups);
 
   //===--------------------------------------------------------------------===//
   // CREATE - Synchronization Ops
@@ -479,8 +479,10 @@ public:
   hivm::GetSysCntOp addGetSysCntAfter(Operation *target);
   hivm::SetMaskNormOp addSetMaskNormBefore(Operation *target);
   hivm::SetMaskNormOp addSetMaskNormAfter(Operation *target);
-  hivm::LoadScalarOp addLoadScalarBefore(Operation *target, Value addr);
-  hivm::LoadScalarOp addLoadScalarAfter(Operation *target, Value addr);
+  hivm::LoadScalarOp addLoadScalarBefore(Operation *target, Value addr,
+                                          Type resultType);
+  hivm::LoadScalarOp addLoadScalarAfter(Operation *target, Value addr,
+                                         Type resultType);
   hivm::DCCIOp addDCCIBefore(Operation *target, hivm::DCCIMode mode,
                              hivm::DataCacheKind dataCacheKind);
   hivm::DCCIOp addDCCIAfter(Operation *target, hivm::DCCIMode mode,
