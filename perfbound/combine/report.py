@@ -55,6 +55,15 @@ class KernelReport:
     n_invocations: Optional[int] = None
     component_match: Optional[bool] = None
 
+    # Profile diagnosis (from profile_utilization)
+    profile_diagnosis: Optional[str] = None
+    profile_dominant_component: Optional[str] = None
+    exposed_control_frac_measured: Optional[float] = None
+    exposed_control_frac_model: Optional[float] = None
+    exposed_control_deficit_pts: Optional[float] = None
+    exposed_control_deficit_us: Optional[float] = None
+    n_sync_ops: Optional[int] = None
+
     # Attribution (five-way, fractions of T_bound)
     attribution: dict[str, float] = field(default_factory=dict)
 
@@ -75,6 +84,15 @@ class KernelReport:
             "compiler_headroom_us": self.compiler_headroom_us,
             "author_headroom_us": self.author_headroom_us,
             "attribution": self.attribution,
+            "profile": {
+                "diagnosis": self.profile_diagnosis,
+                "dominant_component": self.profile_dominant_component,
+                "exposed_control_frac_measured": self.exposed_control_frac_measured,
+                "exposed_control_frac_model": self.exposed_control_frac_model,
+                "exposed_control_deficit_pts": self.exposed_control_deficit_pts,
+                "exposed_control_deficit_us": self.exposed_control_deficit_us,
+                "n_sync_ops": self.n_sync_ops,
+            } if self.profile_diagnosis is not None else None,
             "recommended_action": self.recommended_action,
         }
         # A.6.1 reachability block
@@ -172,6 +190,27 @@ class KernelReport:
             meas_line += "not yet measured"
             lines.append(meas_line)
 
+        if self.profile_diagnosis:
+            lines.append(f"")
+            lines.append(f"Profile Diagnosis:")
+            lines.append(f"  diagnosis:          {self.profile_diagnosis}")
+            if self.profile_dominant_component:
+                lines.append(f"  dominant_component: {self.profile_dominant_component}")
+            if self.exposed_control_frac_measured is not None:
+                lines.append(
+                    f"  scalar_frac_meas:   {self.exposed_control_frac_measured:.1%}"
+                )
+            if self.exposed_control_deficit_pts is not None:
+                lines.append(
+                    f"  control_deficit:    +{self.exposed_control_deficit_pts * 100:.1f} pts"
+                )
+            if self.exposed_control_deficit_us is not None:
+                lines.append(
+                    f"  deficit_us:         ~{self.exposed_control_deficit_us:.0f} us"
+                )
+            if self.n_sync_ops is not None:
+                lines.append(f"  n_sync_ops:         {self.n_sync_ops}")
+
         lines.append(f"")
         lines.append(f"Recommended action: {self.recommended_action}")
 
@@ -249,3 +288,53 @@ class KernelReport:
         # Recompute author headroom
         if self.t_bound_dsl_us is not None:
             self.author_headroom_us = t_measured_us - self.t_bound_dsl_us
+
+    def merge_profile(self, profile_report) -> None:
+        """Merge OperatorBottleneckReport; overrides recommended_action when author headroom dominates."""
+        from ..extract.op_classifier import Component
+
+        self.profile_diagnosis = profile_report.diagnosis
+        self.profile_dominant_component = (
+            profile_report.dominant_component.value
+            if profile_report.dominant_component else None
+        )
+        self.exposed_control_frac_measured = profile_report.exposed_control_frac_measured
+        self.exposed_control_frac_model = profile_report.exposed_control_frac_model
+        self.exposed_control_deficit_pts = profile_report.exposed_control_deficit_pts
+        self.exposed_control_deficit_us = profile_report.exposed_control_deficit_us
+        self.n_sync_ops = profile_report.n_sync_ops
+
+        # Only override when author headroom is the dominant gap (>15% of T_measured).
+        # Below the threshold the model's five-gap attribution is still the better signal.
+        if not (
+            self.author_headroom_us is not None
+            and self.t_measured_us is not None
+            and self.t_measured_us > 0
+            and self.author_headroom_us / self.t_measured_us > 0.15
+        ):
+            return
+
+        diag = profile_report.diagnosis
+        comp = profile_report.dominant_component
+
+        if diag == "Insufficient Parallelism" and comp == Component.SCALAR:
+            n_sync = profile_report.n_sync_ops or 0
+            pts = profile_report.exposed_control_deficit_pts
+            pts_str = f", +{pts * 100:.0f} pts exposed" if pts is not None else ""
+            self.recommended_action = (
+                f"Reduce sync barriers ({n_sync} ops{pts_str}) — "
+                f"coalesce or remove PIPE_S/pipe_barrier sequences"
+            )
+        elif diag == "Insufficient Parallelism":
+            self.recommended_action = (
+                "Increase parallelism — all hardware units underutilized"
+            )
+        elif diag in ("Compute Bound", "MTE Bound"):
+            comp_str = comp.value if comp else "unknown"
+            self.recommended_action = (
+                f"Kernel is {diag} on {comp_str} — "
+                f"increase arithmetic intensity or reduce transfers"
+            )
+        elif diag in ("Inefficient Compute", "Inefficient MTE"):
+            comp_str = comp.value if comp else "unknown"
+            self.recommended_action = f"{diag} on {comp_str} — reduce per-element overhead"
