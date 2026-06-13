@@ -79,6 +79,28 @@ endif()
 mlir_check_all_link_libraries(tritonsim-hivm)
 
 #===----------------------------------------------------------------------===//
+# hivm-crud - HIVM CRUD Tool (Create/Read/Update/Delete HIVM ops via C++ API)
+#===----------------------------------------------------------------------===//
+
+if(TRITONSIM_HAS_BISHENGIR_HIVM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/hivm-crud/hivm-crud.cpp")
+  add_llvm_executable(hivm-crud
+    hivm-crud/hivm-crud.cpp
+  )
+
+  target_link_libraries(hivm-crud
+    PRIVATE
+    AscendModelTransforms
+    MLIRIR
+    MLIRParser
+    MLIRSupport
+    LLVMSupport
+  )
+
+  mlir_check_all_link_libraries(hivm-crud)
+  list(APPEND _installed_tools hivm-crud)
+endif()
+
+#===----------------------------------------------------------------------===//
 # ascend-tiling-opt - Tiling Optimization Tool
 #===----------------------------------------------------------------------===//
 
