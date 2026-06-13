@@ -540,3 +540,51 @@ def test_warning_when_u_or_e_is_unphysical():
 
     assert any("U > 1.05" in item for item in report.warnings)
     assert any("E > 1.05" in item for item in report.warnings)
+
+
+# ── Real-kernel coverage: chunk_kda end-to-end through run_from_files ──────────
+#
+# Synthetic tests above never exercise run_from_files on a real msprof export.
+# These pin the post-merge fixes:
+#   - exposed control/sync (high-R Scalar with zero arithmetic work) is routed to
+#     the paper's "Insufficient Parallelism" verdict AND localized to scalar
+#     (the paper's taxonomy would mis-route it to "Inefficient Component");
+#   - the default kernel_name=None path tolerates 'N/A' cells (no crash);
+#   - multi-shard kernels reduce to the longest-duration (critical) row.
+
+import pytest
+
+from perfbound.analyze.profile_utilization import run_from_files
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_CHUNK_KDA_CSV = _FIXTURES / "chunk_kda_op_summary_910b3.csv"
+_KDA_DES = Path(__file__).parents[2] / ".omc" / "research" / "hw_runs" / "kda_des.json"
+
+
+@pytest.mark.skipif(not _KDA_DES.exists(), reason="real kda_des.json not present")
+def test_chunk_kda_exposed_control_is_insufficient_parallelism():
+    """Real chunk_kda: exposed scalar control/sync → Insufficient Parallelism @ scalar."""
+    report = run_from_files(
+        _CHUNK_KDA_CSV, _KDA_DES, None,
+        kernel_name="chunk_kda_bwd_kernel_wy_dqkg_fused_opt_v2",
+    )
+    # Paper-faithful verdict, now localized to the exposed control engine.
+    assert report.diagnosis == "Insufficient Parallelism"
+    assert report.dominant_component == Component.SCALAR
+    # Scalar monopolizes the timeline (R≈0.92) but carries zero arithmetic work.
+    scalar = report.component_results["scalar"]
+    assert scalar.r_residency > 0.8
+    assert scalar.work_done == 0.0
+    # The exposed-control rationale is surfaced (not a generic parallelism note).
+    assert any("exposed control/sync" in w for w in report.warnings)
+    # Multi-shard reduction picks the longest-duration row (~104,326 µs), not the
+    # first shard (~104,316 µs).
+    assert report.elapsed_time_us > 104_320.0
+
+
+@pytest.mark.skipif(not _KDA_DES.exists(), reason="real kda_des.json not present")
+def test_chunk_kda_default_kernel_name_does_not_crash_on_na_cells():
+    """kernel_name=None must tolerate 'N/A' summary cells (regression for the crash)."""
+    report = run_from_files(_CHUNK_KDA_CSV, _KDA_DES, None, kernel_name=None)
+    assert report.diagnosis == "Insufficient Parallelism"
+    assert report.dominant_component == Component.SCALAR

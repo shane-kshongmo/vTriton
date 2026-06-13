@@ -285,21 +285,53 @@ def analyze_operator_bottleneck(
             warnings=warnings,
         )
 
-    if all(result.r_residency < r_threshold for result in valid):
+    # —— 对论文的补充：暴露的控制/同步开销 ——
+    # 论文的欠利用分类只有两类，且用 (∀R<threshold) 判定 Insufficient
+    # Parallelism。但这无法处理"某个高驻留 component 其实是暴露的控制/同步"的
+    # 情形：在 Ascend 上 Scalar 还负责向其他单元派发指令并插入 pipe_barrier，
+    # 这类 op 几乎没有算术/传输 work，却可能独占时间线。由于 work_done<=0，它
+    # 会被 valid 过滤排除，于是论文会把算子误判为 Inefficient Component（让你去
+    # 优化 scalar 的算术效率，方向错误）。我们补充：高驻留(R>=threshold)但无
+    # 算术/传输 work 的 component 视为暴露的控制/同步，归因为 Insufficient
+    # Parallelism（控制路径没能和计算重叠 = 并行不足），并把它标为主导 locus。
+    exposed_control = sorted(
+        (
+            result
+            for result in utilization.component_results.values()
+            if result.r_residency >= r_threshold and result.work_done <= 0
+        ),
+        key=lambda item: item.r_residency,
+        reverse=True,
+    )
+    top_valid_residency = max(
+        (result.r_residency for result in valid), default=0.0
+    )
+    valid_high_r = [result for result in valid if result.r_residency >= r_threshold]
+
+    if not valid_high_r or (
+        exposed_control and exposed_control[0].r_residency >= top_valid_residency
+    ):
+        locus = exposed_control[0] if exposed_control else None
+        ip_warnings = list(warnings)
+        if locus is not None:
+            ip_warnings.append(
+                f"{locus.component.value}: 高驻留 R={locus.r_residency:.2f} 但无算术/传输 "
+                "work，判定为暴露的控制/同步开销（exposed control/sync），归因为并行不足"
+            )
         return OperatorBottleneckReport(
             kernel_name=profile.kernel_name,
             elapsed_time_us=profile.elapsed_time_us,
             diagnosis="Insufficient Parallelism",
             bound_kind=None,
-            dominant_component=None,
-            dominant_item=None,
-            dominant_share=0.0,
+            dominant_component=locus.component if locus else None,
+            dominant_item=locus.dominant_item if locus else None,
+            dominant_share=locus.dominant_share if locus else 0.0,
             component_results=utilization.component_results,
-            warnings=warnings,
+            warnings=ip_warnings,
         )
 
     # 高 R 但低 E 的 component 是 Inefficient Component 的主要嫌疑。
-    high_r = [result for result in valid if result.r_residency >= r_threshold]
+    high_r = valid_high_r
     candidates = high_r if high_r else valid
     dominant = max(
         candidates,
@@ -513,18 +545,40 @@ def report_to_dict(report: OperatorBottleneckReport) -> dict:
     }
 
 
+def _row_duration_us(row: dict[str, str]) -> float:
+    return _float_cell(
+        row,
+        "Task Duration(us)",
+        "duration(us)",
+        "Duration(us)",
+        "duration_us",
+    )
+
+
 def _read_op_summary_row(path: str | Path, kernel_name: str | None) -> dict[str, str]:
+    """选取要分析的 op_summary 行。
+
+    一个 grid kernel 在 msprof 里会有多条 shard 行（每个 AI core 一条），它们
+    在不同 core 上**并发**执行。因此墙钟时间应取最长的那条（关键 core），而不是
+    第一条或求和——求和会把并发时间错误地累加。``_float_cell`` 已容忍 'N/A'，
+    所以汇总/表头行的时长会变成 0，不会被误选。
+    """
     with open(path) as f:
         reader = csv.DictReader(line for line in f if not line.strip().startswith("#"))
         rows = list(reader)
     if not rows:
         raise ValueError(f"op_summary 中没有可读取的行: {path}")
     if kernel_name is None:
-        return rows[0]
-    for row in rows:
-        if _cell(row, "Op Name", "op_name", "Name") == kernel_name:
-            return row
-    raise ValueError(f"op_summary 中找不到 kernel: {kernel_name}")
+        candidates = rows
+    else:
+        candidates = [
+            row
+            for row in rows
+            if _cell(row, "Op Name", "op_name", "Name") == kernel_name
+        ]
+        if not candidates:
+            raise ValueError(f"op_summary 中找不到 kernel: {kernel_name}")
+    return max(candidates, key=_row_duration_us)
 
 
 def _cell(row: dict[str, str], *names: str) -> str:
@@ -542,7 +596,12 @@ def _float_cell(row: dict[str, str], *names: str) -> float:
     try:
         return float(value)
     except ValueError:
-        return float(value.split()[0])
+        # 容忍 'N/A'、空白以及带单位后缀的单元格（例如 '12.3 us'）。
+        # msprof 的汇总/表头行常含 'N/A'，按缺失(0.0)处理而不是抛异常。
+        try:
+            return float(value.split()[0])
+        except (ValueError, IndexError):
+            return 0.0
 
 
 def _peak_rate_for_label(
