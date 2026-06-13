@@ -29,7 +29,7 @@ from ..extract.dsl_extractor import GridInfo
 from ..calibration.calib_loader import load_default_calib_db
 from ..calibration.constants import CalibrationDB
 from ..model.bounds import compute_bounds
-from .bound_combiner import combine, BoundResult, attribute_by_component, _schedule_overlap
+from .bound_combiner import combine, BoundResult
 from .report import KernelReport
 from .two_limit import compute_two_limit, TwoLimitResult
 
@@ -116,21 +116,6 @@ def report_from_desgraph(
     )
 
     report = KernelReport.from_bound(result, two_limit=two_limit)
-
-    # A.8 author-headroom component attribution (structural + overlap view;
-    # the measured view is added later by the CSV bridge when an msprof CSV is
-    # supplied).  Pass timing anchors so Gap-OVL µs can be computed once the
-    # measured scalar fraction is known.
-    binding = result.binding_component.value if result.binding_component else None
-    _t_bound_dsl = result.t_bound_us
-    _t_measured = t_measured_us
-    report.component_attribution = attribute_by_component(
-        extract, binding_component=binding,
-        t_bound_dsl_us=_t_bound_dsl, t_measured_us=_t_measured,
-    ).to_dict()
-    # Stash the extract reference so the CSV bridge can finalize Gap-OVL
-    # once measured scalar is known (without re-running the overlap walk).
-    report._extract_for_gap_ovl = extract  # type: ignore[attr-defined]
 
     return report
 
@@ -341,75 +326,6 @@ def _merge_validation_from_csv(
         # EXECUTION_ERROR: still set t_measured_us=None to signal failure
         import sys
         print(f"Warning: validation failed ({vr.notes})", file=sys.stderr)
-
-    # A.8: enrich the component attribution with the measured per-engine split
-    # (independent of timing validation status — the ratios always come from
-    # the same CSV row).
-    _merge_engine_attribution(report, csv_path, profiler_op_name)
-
-
-def _merge_engine_attribution(
-    report: KernelReport,
-    csv_path: str | Path,
-    profiler_op_name: str,
-) -> None:
-    """Add the msprof measured per-engine split into report.component_attribution.
-
-    The structural view is already attached by report_from_desgraph; this adds
-    the measured view, confirms mis-binding when the dominant measured engine
-    differs from the bound's binding component, and finalizes Gap-OVL metrics
-    now that measured scalar fraction is known.  No-op when the CSV row lacks
-    per-engine ratios (populated=False).
-    """
-    from ..validate.msprof_parser import parse_engine_attribution
-
-    ea = parse_engine_attribution(csv_path, profiler_op_name)
-    if ea is None or not ea.populated:
-        return
-
-    ca = report.component_attribution or {}
-    ca["measured_engine_us"] = dict(ea.engine_us)
-    ca["measured_scalar_frac"] = ea.scalar_frac
-    ca["measured_aiv_scalar_frac"] = ea.aiv_scalar_frac
-    ca["dominant_measured_engine"] = ea.dominant_engine
-
-    binding = ca.get("binding_component")
-    dom = ea.dominant_engine.split(" ")[0].lower()
-    if binding and dom and dom != binding.lower():
-        ca["mis_binding"] = True
-
-    # Finalize Gap-OVL: now that measured_scalar_frac is known, recompute
-    # gap_ovl_pts and gap_ovl_us (structural overlap walk was already done).
-    model_exposed = ca.get("model_exposed_control_frac")
-    if model_exposed is not None:
-        # Same-core scalar share (scalar(AIV)/aiv_time) vs the model's
-        # critical-path exposed-control fraction — matched denominators.
-        ca["gap_ovl_pts"] = ea.aiv_scalar_frac - model_exposed
-        # µs estimate, capped at author headroom
-        t_bound_dsl = report.t_bound_dsl_us
-        t_measured = ea.t_measured_us or report.t_measured_us
-        if t_bound_dsl is not None and t_measured is not None:
-            author_headroom_us = t_measured - t_bound_dsl
-            raw = max(0.0, ca["gap_ovl_pts"]) * t_measured
-            ca["gap_ovl_us"] = min(raw, author_headroom_us) if author_headroom_us > 0 else None
-
-    # Rebuild the note with full Gap-OVL info now that measured is available.
-    # Re-run attribute_by_component if extract is stashed.
-    extract = getattr(report, "_extract_for_gap_ovl", None)
-    if extract is not None:
-        full_ca = attribute_by_component(
-            extract,
-            binding_component=binding,
-            measured=ea,
-            t_bound_dsl_us=report.t_bound_dsl_us,
-            t_measured_us=ea.t_measured_us or report.t_measured_us,
-        )
-        ca["note"] = full_ca.note
-        ca["gap_ovl_pts"] = full_ca.gap_ovl_pts
-        ca["gap_ovl_us"] = full_ca.gap_ovl_us
-        ca["mis_binding"] = full_ca.mis_binding
-
-    report.component_attribution = ca
 
 
 if __name__ == "__main__":

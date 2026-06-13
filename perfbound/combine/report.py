@@ -58,10 +58,6 @@ class KernelReport:
     # Attribution (five-way, fractions of T_bound)
     attribution: dict[str, float] = field(default_factory=dict)
 
-    # Author-headroom component attribution (A.8) — diagnostic, from
-    # bound_combiner.attribute_by_component().to_dict().  None until wired.
-    component_attribution: Optional[dict] = None
-
     # Recommendation
     recommended_action: str = "unknown"
 
@@ -79,7 +75,6 @@ class KernelReport:
             "compiler_headroom_us": self.compiler_headroom_us,
             "author_headroom_us": self.author_headroom_us,
             "attribution": self.attribution,
-            "component_attribution": self.component_attribution,
             "recommended_action": self.recommended_action,
         }
         # A.6.1 reachability block
@@ -179,50 +174,6 @@ class KernelReport:
 
         lines.append(f"")
         lines.append(f"Recommended action: {self.recommended_action}")
-
-        ca = self.component_attribution
-        if ca:
-            lines.append("")
-            lines.append("Author-Headroom Component Attribution (A.8 — diagnostic):")
-            struct = ca.get("structural_pipe_frac") or {}
-            for pipe, fr in sorted(struct.items(), key=lambda x: -x[1])[:5]:
-                if fr > 0:
-                    lines.append(f"  structural {pipe:14s} {fr * 100:5.1f}% of HIVM busy")
-            meas = ca.get("measured_engine_us")
-            if meas:
-                top = sorted(meas.items(), key=lambda x: -x[1])[:5]
-                for eng, us in top:
-                    lines.append(f"  measured   {eng:16s} {us:10.0f} us")
-                sf = ca.get("measured_scalar_frac")
-                if sf is not None:
-                    lines.append(f"  measured scalar share: {sf * 100:.1f}% of T_measured")
-            # Gap-OVL overlap line — same-core fractions (model critical-path
-            # exposed-control vs measured scalar share of AIV core time).
-            model_exp = ca.get("model_exposed_control_frac")
-            meas_sf = ca.get("measured_aiv_scalar_frac") or ca.get("measured_scalar_frac")
-            gap_pts = ca.get("gap_ovl_pts")
-            gap_us = ca.get("gap_ovl_us")
-            n_sync = ca.get("n_sync_ops")
-            ctrl_busy = ca.get("control_busy_frac")
-            if model_exp is not None and meas_sf is not None:
-                ovl_line = (
-                    f"  overlap: model exposes {model_exp * 100:.1f}% control (crit-path)"
-                    f" / measured {meas_sf * 100:.1f}% scalar (AIV core)"
-                )
-                if gap_pts is not None:
-                    ovl_line += f"  -> Gap-OVL {gap_pts * 100:+.1f} pts"
-                    if gap_us is not None:
-                        ovl_line += f" (≈ {gap_us:,.0f} µs, capped)"
-                lines.append(ovl_line)
-            if n_sync is not None and ctrl_busy is not None:
-                lines.append(
-                    f"  {n_sync} sync/barrier ops;"
-                    f" control/sync = {ctrl_busy * 100:.1f}% of structural busy"
-                )
-            if ca.get("mis_binding"):
-                lines.append(f"  ** MIS-BINDING: {ca.get('note', '')}")
-            elif ca.get("note"):
-                lines.append(f"  note: {ca['note']}")
 
         return "\n".join(lines)
 

@@ -1,9 +1,23 @@
 # Author Headroom Gap Analysis: Decomposing the T_measured − T_bound Gap
 
-**Status**: Research complete (v3 — Gap-OVL wiring), spec for implementation
-**Date**: 2026-06-12
+**Status**: Implemented (v4 — converged into `profile_utilization`, paper-aligned)
+**Date**: 2026-06-13
 **Kernel**: `chunk_kda_bwd_kernel_wy_dqkg_fused_opt_v2` (bf16 fused attention backward)
 **Hardware**: Ascend 910B3, 20 AI Cores
+
+> **v4 note — naming + home.** This analysis now lives in
+> `perfbound/analyze/profile_utilization.py`, which reproduces the ASPLOS '25
+> paper's *component-based roofline* and bottleneck taxonomy. The headroom
+> mechanism is reported under the paper's verdict **"Insufficient Parallelism"**,
+> localized to the exposed Scalar control. The quantity this doc calls **Gap-OVL**
+> is the paper-faithful **exposed control/sync deficit** and is surfaced as
+> `exposed_control_deficit_pts` (= measured same-core scalar − model
+> critical-path exposed control ≈ **+72.7 pts**) and `exposed_control_deficit_us`
+> (≈ **58,216 µs**, capped at author headroom when a sound loop-scaled two-tier
+> bound is supplied). The earlier `combine/` "Gap-OVL" attribution (the duplicate)
+> has been retired; the sound bound still comes from `combine/`'s two-tier
+> pipeline, which `profile_utilization` consumes via `t_bound_us`. "Gap-OVL" is
+> kept below only as the historical internal name.
 
 > **v3 note.** v2 (retracted) attributed the dominant author headroom to
 > "Unmodeled Scalar Cost" and proposed US-SB-007 scalar calibration as the fix.
