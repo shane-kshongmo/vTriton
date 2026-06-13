@@ -580,6 +580,30 @@ def test_chunk_kda_exposed_control_is_insufficient_parallelism():
     # Multi-shard reduction picks the longest-duration row (~104,326 µs), not the
     # first shard (~104,316 µs).
     assert report.elapsed_time_us > 104_320.0
+    # Quantified exposed-control/sync deficit (addition beyond the paper):
+    # model exposes ~11.9% control on the DES critical path, hardware exposes
+    # ~84.6% same-core scalar -> deficit ≈ +72.7 pts. Scale-invariant, no bound.
+    assert 0.10 < report.exposed_control_frac_model < 0.15
+    assert 0.83 < report.exposed_control_frac_measured < 0.86
+    assert 0.70 < report.exposed_control_deficit_pts < 0.75
+    assert report.n_sync_ops == 402
+    # deficit_us needs a sound (loop-scaled two-tier) bound; None without one.
+    assert report.exposed_control_deficit_us is None
+
+
+@pytest.mark.skipif(not _KDA_DES.exists(), reason="real kda_des.json not present")
+def test_chunk_kda_exposed_control_deficit_us_capped_at_headroom():
+    """With the sound two-tier bound supplied, deficit_us ≈ 58,216 µs (capped)."""
+    report = run_from_files(
+        _CHUNK_KDA_CSV, _KDA_DES, None,
+        kernel_name="chunk_kda_bwd_kernel_wy_dqkg_fused_opt_v2",
+        t_bound_us=46_109.91,  # A.8 loop-scaled two-tier bound
+    )
+    assert report.exposed_control_deficit_us is not None
+    author_headroom = report.elapsed_time_us - 46_109.91
+    # Capped at author headroom, and matches the A.8 Gap-OVL magnitude.
+    assert report.exposed_control_deficit_us <= author_headroom + 1.0
+    assert 57_000.0 < report.exposed_control_deficit_us < 59_000.0
 
 
 @pytest.mark.skipif(not _KDA_DES.exists(), reason="real kda_des.json not present")
