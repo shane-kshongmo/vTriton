@@ -37,7 +37,10 @@ if(NOT TRITON_GEN_INC_DIR)
     message(FATAL_ERROR "mlir-tblgen not found")
   endif()
 
-  set(_I -I${TRITON_INCLUDE_DIR} -I${MLIR_INCLUDE_DIRS} -I${LLVM_INCLUDE_DIRS})
+  set(_I "")
+  foreach(_dir ${TRITON_INCLUDE_DIR} ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+    list(APPEND _I "-I${_dir}")
+  endforeach()
 
   macro(add_tblgen_rule _dir _td _file)
     set(_flags ${ARGN})
