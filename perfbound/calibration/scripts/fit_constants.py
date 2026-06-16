@@ -71,6 +71,7 @@ class MSProfRow:
     task_type: str = ""          # "AI_CORE", "AI_CPU", "AIV", etc.
     start_time_us: float = 0.0   # Task Start Time(us)
     fixpipe_time_us: float = 0.0
+    aiv_scalar_time_us: float = 0.0
     block_dim: int = 0
 
 
@@ -116,6 +117,11 @@ def read_msprof_csv(csv_path: Path) -> List[MSProfRow]:
                     fixpipe_time_us=float(_first_present(
                         line,
                         ["aic_fixpipe_time(us)", "AIC FixPipe Time(us)"],
+                        "0",
+                    )),
+                    aiv_scalar_time_us=float(_first_present(
+                        line,
+                        ["aiv_scalar_time(us)", "AIV Scalar Time(us)"],
                         "0",
                     )),
                     block_dim=int(float(_first_present(
@@ -385,6 +391,65 @@ def extract_l0c_to_gm_bandwidth(csv_path: Path) -> CalibrationConstant:
     )
 
 
+def extract_scalar_constant(csv_path: Path) -> CalibrationConstant:
+    """Extract sustained scalar FP32 FMA throughput from scalar_peak.
+
+    scalar_peak runs a dependent scalar recurrence:
+        acc = acc * c1 + c2
+    for kScalarRepeat iterations. Each iteration is one multiply plus one add,
+    and the dependency chain prevents vectorization. Use aiv_scalar_time(us)
+    rather than whole task duration so the final GM store does not pollute the
+    arithmetic throughput.
+    """
+    rows = read_msprof_csv(csv_path)
+    scalar_rows = [r for r in rows if r.op_name.lower() == "scalar_peak"]
+    if not scalar_rows:
+        scalar_rows = [r for r in rows if "scalar" in r.op_name.lower()]
+    if not scalar_rows:
+        raise ValueError(f"No scalar_peak op found in {csv_path}")
+
+    observed_block_dims = {r.block_dim for r in scalar_rows if r.block_dim > 0}
+    if observed_block_dims and observed_block_dims != {1}:
+        raise ValueError(
+            f"scalar_peak requires Block Dim 1, got {sorted(observed_block_dims)}"
+        )
+
+    raw_durations = [
+        r.aiv_scalar_time_us if r.aiv_scalar_time_us > 0 else r.duration_us
+        for r in scalar_rows
+        if r.aiv_scalar_time_us > 0 or r.duration_us > 0
+    ]
+    if len(raw_durations) < 30:
+        print(f"Warning: Only {len(raw_durations)} measurements for scalar_peak")
+
+    durations, warmup_samples = select_steady_state_samples(raw_durations)
+
+    scalar_repeat = 1_000_000
+    flops_per_iter = 2
+    total_flops = scalar_repeat * flops_per_iter
+    rates = [total_flops / duration / 1000.0 for duration in durations]
+    mean_gflops, ci_gflops = compute_mean_ci(rates)
+    cv = compute_cv(rates)
+    if cv > 0.05:
+        print(f"Warning: scalar_peak CV={cv:.3f} > 0.05")
+
+    return CalibrationConstant(
+        name="P_scalar_add_sustained",
+        value=mean_gflops,
+        unit="GFLOPS",
+        ci_95=ci_gflops,
+        source="cce_microbench",
+        n_runs=len(durations),
+        notes=(
+            f"dependent scalar FMA chain, N_iter={scalar_repeat}, "
+            f"flops_per_iter={flops_per_iter}, "
+            f"profiler_metric=aiv_scalar_time, warmup_samples={warmup_samples}, "
+            f"steady_samples={len(durations)}, selection=chronological, "
+            f"CV={cv:.6f}"
+        ),
+    )
+
+
 def extract_hbm_allcore_bandwidth(csv_path: Path) -> CalibrationConstant:
     """Extract all-core HBM sustained bandwidth.
 
@@ -646,11 +711,22 @@ def extract_all_constants(input_dir: Path) -> CalibrationDB:
     except Exception as e:
         print(f"✗ mandatory_handoff: {e}")
 
-    # Preserve the existing scalar-throughput evidence without treating it as
-    # a measurement. The bound ignores this estimate until a direct scalar
-    # benchmark can set scalar_throughput_measured=True.
+    scalar_measured = False
+    csv_path = input_dir / "scalar_peak.csv"
+    if csv_path.exists():
+        try:
+            const = extract_scalar_constant(csv_path)
+            constants[const.name] = const
+            scalar_measured = True
+            print(f"✓ {const.name}: {const.value:.4f} ± {const.ci_95:.4f} {const.unit}")
+        except Exception as e:
+            print(f"✗ scalar_peak: {e}")
+
+    # Preserve derived scalar-throughput evidence only when no direct scalar
+    # benchmark is available. Direct scalar measurements are allowed to tighten
+    # scalar-bound floors because they carry CCE provenance and confidence.
     vector_add = constants.get("P_vector_add_sustained")
-    if vector_add is not None:
+    if vector_add is not None and "P_scalar_add_sustained" not in constants:
         scalar = CalibrationConstant(
             name="P_scalar_add_sustained",
             value=vector_add.value / 128.0,
@@ -705,7 +781,7 @@ def extract_all_constants(input_dir: Path) -> CalibrationDB:
                 "P_scalar_add_sustained",
                 CalibrationConstant("missing", 0, "GFLOPS", 0, "missing", 0),
             ).value / 1000,
-            scalar_throughput_measured=False,
+            scalar_throughput_measured=scalar_measured,
         ),
         memory=memory,
         constants=constants,

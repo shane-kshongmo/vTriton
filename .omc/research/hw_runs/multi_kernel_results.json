@@ -100,13 +100,15 @@
     "us_sb_008_note": "Analytical-only feasibility result. chunk_kda's predicted compiler headroom (44.99us) is below measurement noise, so no equivalent hand-optimized HIVM was compiled/profiled to validate reachability. US-SB-008 requires hardware validation on a kernel with measurable compiler headroom."
   },
   "scalar_calibration": {
-    "description": "US-SB-007: derived scalar throughput from measured vector + SIMD width",
-    "p_scalar_gflops": 0.1182,
-    "p_vector_gflops": 15.133,
-    "ratio": "vector/128",
-    "methodology": "Derived: scalar ALU processes 1 elem/cycle vs vector SIMD 128/cycle; per-instruction overhead identical",
-    "source": "derived_from_vector_microbench",
-    "satisfies_us_sb_007": false,
-    "us_sb_007_note": "Derived (Vector/128), NOT a direct CCE scalar measurement. US-SB-007 requires a measured P_scalar from a CCE microbench on 910B3."
+    "description": "US-SB-007: direct scalar throughput measurement from scalar_peak CCE microbench",
+    "p_scalar_gflops": 0.5998078861614121,
+    "ci_95_gflops": 1.9171769977960938e-05,
+    "n_runs": 30,
+    "cv": 8.9e-05,
+    "profiler_metric": "aiv_scalar_time(us)",
+    "source": "cce_microbench",
+    "raw_csv": "perfbound/calibration/bench_output/scalar_peak.csv",
+    "satisfies_us_sb_007": true,
+    "us_sb_007_note": "Measured on 910B3 with scalar_peak dependent FMA chain and explicit CANN 8.2 msprof; calib_910b3_v1.json sets vector.scalar_throughput_measured=true."
   }
 }

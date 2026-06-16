@@ -210,7 +210,7 @@ The set spans both compute-bound (chunk_kda, Tier-2 DES) and memory-bound
 All soundness checks pass — the model never predicts a bound above the
 measured wall-clock time.
 
-## 8. Scalar throughput (US-SB-007) — direct CCE measurement attempted, BLOCKED (2026-06-11)
+## 8. Scalar throughput (US-SB-007) — CLOSED with direct CCE measurement (2026-06-16)
 
 **Goal:** replace the derived `P_scalar` (= P_vector/128) with a directly
 measured value from a CCE (AscendC, per project convention) microbench on
@@ -225,33 +225,35 @@ measured value from a CCE (AscendC, per project convention) microbench on
 - It **compiles and runs** on 910B3 (`vt_a1_bench_launcher --kernel scalar_peak`
   returns rc=0; the `scalar_peak` symbol is linked into the launcher).
 
-**Why a clean P_scalar (GFLOPS) is NOT obtainable here — two independent blocks:**
+**Measurement:** reran the CCE path with the explicit CANN 8.2 profiler binary
+that fixed Stage-A op-summary collection:
 
-1. **msprof op-level collection is currently broken on this 910B3 box.** A
-   freshly built+run kernel produces *no* `op_summary*.csv` and an empty
-   timeline ("There is no summary data to export"), for **both** the new
-   `scalar_peak` AND `vector_peak_elemwise_add` — the latter profiled cleanly
-   on 2026-06-07 with the identical harness. Reproduced on a clean from-scratch
-   rebuild and on a healthy device (`ASCEND_RT_VISIBLE_DEVICES=1`). NPU:0 reports
-   health=**Alarm** in `npu-smi`. This is a pre-existing environmental/profiling
-   regression, independent of the scalar work.
+```bash
+python3 perfbound/calibration/scripts/cce_remote_bench.py \
+  --host 910B3 --direct-ssh \
+  --remote-workdir /tmp/vtriton_scalar_cce \
+  --skip-sync --skip-direct-compile \
+  --n-repeat 45 --kernel-timeout-sec 300 \
+  --soc-version Ascend910B1 \
+  --cann-env /usr/local/Ascend/ascend-toolkit/8.2.RC1.alpha003/set_env.sh \
+  --cann-package-path /usr/local/Ascend/ascend-toolkit/8.2.RC1.alpha003 \
+  --msprof /usr/local/Ascend/ascend-toolkit/8.2.RC1.alpha003/tools/profiler/bin/msprof \
+  --kernels scalar_peak \
+  --output-dir /tmp/vtriton_scalar_calib
+```
 
-2. **Even with working profiling, the scalar unit is not independently
-   profilable as a compute path.** In the 2026-06-07 working CSVs, scalar time
-   appears *only* as `aiv_scalar_time(us)` — a sub-component of a vector/cube op
-   (≈73.35 µs across add/mul/max, n=45 each), representing the AIV's
-   **loop-control / address scalar instructions**, not standalone scalar
-   *arithmetic* throughput. A pure-scalar kernel surfaces no op of its own.
-   Deriving a `P_scalar` in GFLOPS from this loop-control time would be a
-   category error (instruction-issue overhead ≠ arithmetic FLOP/s).
+The runner built the launcher, executed 45 `scalar_peak` invocations, and synced
+`scalar_peak.csv`. The fitter uses `aiv_scalar_time(us)` for the dependent
+scalar FMA chain and discards the first 15 rows chronologically as warmup.
 
-**Resolution (honest):** US-SB-007 stays `passes:false`. The derived
-`P_scalar = P_vector/128` is retained as documented evidence only. Critically,
-the bound must NOT be tightened by an unmeasured estimate — the model uses the
-full measured Vector rate as an optimistic upper-rate fallback
-(`scalar_throughput_measured=False`), which can loosen but never illegitimately
-tighten the time floor. The CCE scalar microbench is committed so it can be
-re-run once msprof op-collection is restored on the box.
+| Constant | Measured value | 95% CI | Steady samples | CV |
+|----------|----------------|--------|----------------|----|
+| `P_scalar_add_sustained` | **0.5998 GFLOPS** | 0.000019 GFLOPS | 30 | 0.009% |
+
+**Resolution:** US-SB-007 is now closed. `calib_910b3_v1.json` promotes
+`P_scalar_add_sustained` with `source="cce_microbench"` and sets
+`vector.scalar_throughput_measured=true`, so scalar-bound floors now use the
+measured scalar rate instead of the prior Vector-rate fallback.
 
 ## 9. US-SB-006 (live gap counterfactual) + US-SB-008 (two-limit HW reachability) — attempted, BLOCKED (2026-06-11)
 

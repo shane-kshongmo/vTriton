@@ -36,8 +36,8 @@
     "vec_width_elements": 128,
     "throughput_fp16_tflops": 0.015133235851136873,
     "throughput_fp32_tflops": 0.0,
-    "scalar_throughput_fp16_tflops": 0.00011822840508700682,
-    "scalar_throughput_measured": false
+    "scalar_throughput_fp16_tflops": 0.0005998078861614121,
+    "scalar_throughput_measured": true
   },
   "memory": {
     "gm_size_gb": 32.0,
@@ -213,12 +213,12 @@
     },
     "P_scalar_add_sustained": {
       "name": "P_scalar_add_sustained",
-      "value": 0.11822840508700681,
+      "value": 0.5998078861614121,
       "unit": "GFLOPS",
-      "ci_95": 0.00019451399995543912,
-      "source": "derived_from_vector_microbench",
-      "n_runs": 45,
-      "notes": "DERIVED (NOT measured): P_vector_add_sustained / SIMD width 128. Evidence only; scalar_throughput_measured=false keeps this estimate out of the performance bound."
+      "ci_95": 1.9171769977960938e-05,
+      "source": "cce_microbench",
+      "n_runs": 30,
+      "notes": "dependent scalar FMA chain, N_iter=1000000, flops_per_iter=2, profiler_metric=aiv_scalar_time, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.000089"
     }
   },
   "startup_latency": {},

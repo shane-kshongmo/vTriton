@@ -45,12 +45,12 @@
 - Evidence: `.omc/research/hw_runs/counterfactual_results.json`
 
 ### US-SB-007 (Task 5 — Scalar Calibration): ✅ COMPLETE
-- Derived P_scalar = 0.118 GFLOPS = P_vector / SIMD_width = 15.133 / 128
-- Source: `derived_from_vector_microbench` (scalar CCE microbench architecturally infeasible on Ascend)
-- Replaces Vector/20 proxy (0.757 GFLOPS) which was 6.4× too high
+- Measured P_scalar = 0.599807886 GFLOPS from scalar_peak CCE on 910B3
+- Source: `cce_microbench`, profiler metric `aiv_scalar_time(us)`, n=30
+- Replaces the prior Vector/20 proxy and the temporary Vector/128 derived evidence
 - `VectorConfig.scalar_throughput_fp16_tflops` set in calibration DB
-- `get_scalar_throughput_ops_per_us("fp16")` now returns 118.23 ops/µs (was 756.65)
-- CI propagated from vector measurement (ci_rel = 0.0016)
+- `get_scalar_throughput_ops_per_us("fp16")` now returns 599.81 ops/µs
+- CI from direct scalar measurement (relative CI ≈ 0.0032%)
 
 ### US-SB-008 (Task 7 — Two-Limit Validation): ✅ COMPLETE
 - Three-level soundness proven for chunk_kda:
@@ -70,7 +70,7 @@
 - `test/vector_add_bench.py` — configurable N_ELEMENTS via VECADD_N_ELEMENTS env
 - `test/vector_add_2x_bench.py` — NEW: vector_add N=32M variant for counterfactual
 - `tests/perfbound/test_stage_b_stories.py` — NEW: 22 tests for US-SB-006/007/008
-- `tests/perfbound/test_calibration_load.py` — allow derived_from_vector_microbench source
+- `tests/perfbound/test_calibration_load.py` — require measured scalar CCE provenance
 - `.omc/prd.json` — US-SB-006/007/008 marked passes:true
 - `.omc/research/hw_runs/counterfactual_results.json` — NEW: counterfactual evidence
 - `.omc/research/hw_runs/multi_kernel_results.json` — updated with vector_add 32M + two-limit + scalar
@@ -131,7 +131,7 @@ author's feet.
 | US-SB-004 | Source repeat/mask from correct IR stage | ✅ (analytical derivation) |
 | US-SB-005 | Multi-kernel validation set n≥5 | ✅ (5 kernels, soundness_rate=1.0) |
 | US-SB-006 | Live counterfactual validation | ✅ (quant_error=3.0%) |
-| US-SB-007 | Scalar throughput calibration | ✅ (P_scalar=0.118 GFLOPS) |
+| US-SB-007 | Scalar throughput calibration | ✅ (P_scalar=0.5998 GFLOPS) |
 | US-SB-008 | Two-limit compiler-headroom | ✅ (compiler=0.04%, author=55.8%) |
 
 ============================================================================
@@ -155,21 +155,22 @@ PRD to reality (Item 1) and then genuinely closes the open items.
 - US-SB-005/006/007/008: RESET to passes=false (matching the honest
   satisfies_us_sb_* flags now present in the evidence JSON). To be closed below.
 
-### Item 3 — US-SB-007 (scalar P_scalar via CCE microbench): ATTEMPTED, BLOCKED, stays passes=false
-- Built a real CCE/AscendC scalar microbench: scalar_peak.cce + ScalarPeakKernel
-  (dependent scalar FMA chain, forces scalar issue path), wired into
-  bench_launcher.cpp and the CMake glob. Compiles + runs on 910B3 (rc=0).
-- BLOCKED on direct measurement (RESULTS.md §8): (1) msprof op-level collection
-  is currently broken on the box — no op_summary for ANY freshly-run kernel
-  incl. a vector kernel that profiled fine on 2026-06-07 (reproduced on clean
-  rebuild + healthy device; NPU:0 health=Alarm); (2) even when working, the
-  scalar unit is only ever profiled as aiv_scalar_time (loop-control
-  sub-component of a vector/cube op), never a standalone arithmetic path.
-- GENUINE SOUNDNESS FIX shipped regardless: added VectorConfig.
-  scalar_throughput_measured (default False); get_scalar_throughput_ops_per_us
-  now falls back to the full measured Vector rate when scalar is unmeasured, so
-  the unsupported derived P_scalar can no longer tighten the bound. Updated
-  calib JSON + 3 tests. Suite green (348 passed).
+### Item 3 — US-SB-007 (scalar P_scalar via CCE microbench): CLOSED (2026-06-16)
+- Re-ran the existing scalar_peak CCE microbench using the explicit CANN 8.2
+  profiler path found during Stage-A calibration closure. The prior block was
+  the CANN 9 profiler selected by PATH, not the scalar kernel.
+- Runner fix: `cce_remote_bench.py` now includes `scalar_peak` in `CCE_KERNELS`,
+  so scalar calibration is selectable/reproducible through the normal runner.
+- Hardware evidence: 45 `scalar_peak` rows collected on 910B3; block dim 1;
+  `aiv_scalar_time(us)` is ~3334 us for the dependent 1,000,000-iteration FMA
+  chain.
+- Extraction: `fit_constants.py` discards the first 15 chronological warmup
+  rows and computes `P_scalar_add_sustained = 0.599807886 GFLOPS`, 95% CI
+  `1.917e-05 GFLOPS`, n=30, CV=0.000089.
+- Promotion: `calib_910b3_v1.json` now stores the scalar constant with
+  `source="cce_microbench"` and `vector.scalar_throughput_measured=true`, so
+  scalar-bound floors use the measured rate instead of the prior Vector-rate
+  fallback. Tests updated accordingly.
 
 ### Item 5 — US-SB-005 (strengthen n>=5 set): CLOSED, passes=true
 - Added rmsnorm_8kx2k as the 5th DISTINCT kernel: profiled live on 910B3 via

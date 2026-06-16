@@ -98,8 +98,8 @@
         "Calibration tests updated"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "OPEN (reset 2026-06-11; scalar_calibration.source=derived_from_vector_microbench, satisfies_us_sb_007=false). P_scalar=0.118 GFLOPS is DERIVED as P_vector/128, not a direct CCE measurement. The bound currently uses the full measured Vector rate as an optimistic upper-rate fallback (scalar_throughput_measured=False). Real closure requires a CCE microbench measuring scalar throughput on 910B3, fit via fit_constants.py, with scalar_throughput_measured=True."
+      "passes": true,
+      "notes": "CLOSED 2026-06-16. scalar_peak.cce measured on 910B3 with explicit CANN 8.2 msprof after Stage-A profiler remediation. 45 rows collected; fitter discards the first 15 chronological warmup rows and extracts P_scalar_add_sustained=0.599807886 GFLOPS from aiv_scalar_time(us), 95% CI=1.917e-05 GFLOPS, n=30, CV=0.000089. calib_910b3_v1.json now has source=cce_microbench and vector.scalar_throughput_measured=true."
     },
     {
       "id": "US-SB-008",

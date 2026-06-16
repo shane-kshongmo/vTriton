@@ -118,6 +118,7 @@ def test_calib_db_uses_measured_cce_provenance():
     assert db.constants
     assert all(v.source != "pending_measurement" for v in db.constants.values())
     measured = db.constants
-    assert all(const.source in ("cce_microbench", "derived_from_vector_microbench")
-               for const in measured.values())
+    assert all(const.source == "cce_microbench" for const in measured.values())
     assert all(const.ci_95 / const.value < 0.025 for const in measured.values() if const.value > 0)
+    assert db.vector.scalar_throughput_measured is True
+    assert db.constants["P_scalar_add_sustained"].value == pytest.approx(0.5998078861614121)

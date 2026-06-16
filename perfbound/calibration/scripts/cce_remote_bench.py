@@ -42,6 +42,7 @@ CCE_KERNELS = [
     "vector_peak_elemwise_max",
     "vector_peak_elemwise_min",
     "vector_peak_transcendental",
+    "scalar_peak",
     "mte_gm_to_ub",
     "mte_ub_to_gm",
     "mte_gm_to_l1",

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))
 from perfbound.calibration.constants import DType
 from perfbound.calibration.scripts.fit_constants import (
     extract_all_constants,
+    extract_scalar_constant,
     extract_hbm_allcore_bandwidth,
     extract_l0c_to_gm_bandwidth,
     read_msprof_csv,
@@ -78,13 +79,14 @@ def test_read_msprof_csv_accepts_current_task_duration_headers(tmp_path):
 def test_read_msprof_csv_parses_fixpipe_time_and_block_dim(tmp_path):
     csv_path = tmp_path / "op_summary.csv"
     csv_path.write_text(
-        "Op Name,Task Duration(us),aic_fixpipe_time(us),Block Dim\n"
-        "mte_l0c_to_gm,100.0,40.0,20\n"
+        "Op Name,Task Duration(us),aic_fixpipe_time(us),aiv_scalar_time(us),Block Dim\n"
+        "mte_l0c_to_gm,100.0,40.0,12.0,20\n"
     )
 
     rows = read_msprof_csv(csv_path)
 
     assert rows[0].fixpipe_time_us == 40.0
+    assert rows[0].aiv_scalar_time_us == 12.0
     assert rows[0].block_dim == 20
 
 
@@ -226,6 +228,26 @@ def test_l0c_extraction_uses_fixpipe_profiler_time(tmp_path):
 
     assert constant.value == pytest.approx(200.0)
     assert "profiler_metric=aic_fixpipe_time" in constant.notes
+
+
+def test_scalar_extraction_uses_aiv_scalar_profiler_time(tmp_path):
+    csv_path = tmp_path / "scalar_peak.csv"
+    scalar_duration = 2_000_000 / (0.6 * 1000.0)
+    csv_path.write_text(
+        "Op Name,Task Duration(us),aiv_scalar_time(us),Block Dim\n"
+        + "\n".join(
+            f"scalar_peak,999.0,{scalar_duration:.9f},1"
+            for _ in range(45)
+        )
+        + "\n"
+    )
+
+    constant = extract_scalar_constant(csv_path)
+
+    assert constant.value == pytest.approx(0.6)
+    assert constant.source == "cce_microbench"
+    assert constant.n_runs == 30
+    assert "profiler_metric=aiv_scalar_time" in constant.notes
 
 
 def test_allcore_extraction_rejects_wrong_block_dim(tmp_path):
