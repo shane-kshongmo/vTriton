@@ -48,6 +48,17 @@ static llvm::cl::opt<unsigned> removeGMTrips(
     llvm::cl::desc("Remove N redundant GM round-trips (load+sync pairs)"),
     llvm::cl::value_desc("N"), llvm::cl::init(0));
 
+// Helper function to collect ops by name (supports both regular and HIR ops)
+void collectOpsByName(HivmOpsEditor &editor, const std::string &opName, 
+                      std::vector<Operation *> &ops) {
+  auto allOps = editor.listOps();
+  for (auto op : allOps) {
+    if (op->getName().getStringRef().contains(opName)) {
+      ops.push_back(op);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   llvm::InitLLVM y(argc, argv);
   llvm::cl::ParseCommandLineOptions(argc, argv,
@@ -85,28 +96,43 @@ int main(int argc, char **argv) {
   if (crudMode == "read") {
     editor.printSummary(llvm::outs());
   } else if (crudMode == "add") {
-    auto vadds = editor.collectOps<VAddOp>();
-    if (!vadds.empty()) {
-      MLIRContext *ctx = vadds[0]->getContext();
-      // 使用正确的枚举类型创建属性
+    // 收集所有类型的 vadd 操作（包括 hivm.hir.vadd）
+    std::vector<Operation *> allVAddOps;
+    collectOpsByName(editor, "vadd", allVAddOps);
+    
+    if (!allVAddOps.empty()) {
+      MLIRContext *ctx = allVAddOps[0]->getContext();
       editor.addSetFlagWaitFlagBefore(
-          vadds[0],
+          allVAddOps[0],
           hivm::PipeAttr::get(ctx, hivm::PIPE::PIPE_V), 
           hivm::PipeAttr::get(ctx, hivm::PIPE::PIPE_MTE2), 
           hivm::EventAttr::get(ctx, hivm::EVENT::EVENT_ID2));
       llvm::outs() << "Added set_flag+wait_flag before first vadd\n";
     } else {
-      llvm::errs() << "Error: No VAddOp found to modify\n";
+      llvm::errs() << "Error: No vadd op found to modify\n";
       return 1;
     }
   } else if (crudMode == "delete") {
-    editor.deleteAllOpsOfKind<SetFlagOp>();
-    editor.deleteAllOpsOfKind<WaitFlagOp>();
-    llvm::outs() << "Deleted all set_flag and wait_flag ops\n";
+    // 收集并删除所有 set_flag 和 wait_flag 操作
+    std::vector<Operation *> setFlagOps, waitFlagOps;
+    collectOpsByName(editor, "set_flag", setFlagOps);
+    collectOpsByName(editor, "wait_flag", waitFlagOps);
+    
+    for (auto op : setFlagOps) editor.deleteOp(op);
+    for (auto op : waitFlagOps) editor.deleteOp(op);
+    llvm::outs() << "Deleted " << setFlagOps.size() << " set_flag and " 
+                 << waitFlagOps.size() << " wait_flag ops\n";
   } else if (crudMode == "modify") {
-    auto vadds = editor.collectOps<VAddOp>();
-    for (auto vadd : vadds)
-      editor.replaceOpWith<VAddOp, VSubOp>(vadd, vadd.getSrc(), vadd.getDst());
+    std::vector<Operation *> allVAddOps;
+    collectOpsByName(editor, "vadd", allVAddOps);
+    
+    llvm::outs() << "Found " << allVAddOps.size() << " vadd ops to replace\n";
+    for (auto op : allVAddOps) {
+      auto vadd = dyn_cast<VAddOp>(op);
+      if (vadd) {
+        editor.replaceOpWith<VAddOp, VSubOp>(vadd, vadd.getSrc(), vadd.getDst());
+      }
+    }
     llvm::outs() << "Replaced all vadd with vsub\n";
   } else if (crudMode == "roundtrip") {
     llvm::outs() << "=== Before ===\n";
@@ -117,9 +143,16 @@ int main(int argc, char **argv) {
       llvm::outs() << "Removed " << removeGMTrips << " redundant GM trips\n";
     }
 
-    auto vadds = editor.collectOps<VAddOp>();
-    for (auto vadd : vadds)
-      editor.replaceOpWith<VAddOp, VSubOp>(vadd, vadd.getSrc(), vadd.getDst());
+    std::vector<Operation *> allVAddOps;
+    collectOpsByName(editor, "vadd", allVAddOps);
+    
+    llvm::outs() << "Found " << allVAddOps.size() << " vadd ops to replace\n";
+    for (auto op : allVAddOps) {
+      auto vadd = dyn_cast<VAddOp>(op);
+      if (vadd) {
+        editor.replaceOpWith<VAddOp, VSubOp>(vadd, vadd.getSrc(), vadd.getDst());
+      }
+    }
 
     llvm::outs() << "\n=== After ===\n";
     editor.printSummary(llvm::outs());
