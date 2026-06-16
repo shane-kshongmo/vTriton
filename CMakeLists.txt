@@ -189,7 +189,8 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
 
   if(EXISTS "${_bishengir_src_inc}/bishengir/Dialect/HIVM/IR/HIVM.h" AND
      EXISTS "${_bishengir_gen_inc}/bishengir/Dialect/HIVM/IR/HIVMOps.h.inc" AND
-     EXISTS "${_bishengir_hivm_lib}")
+     (EXISTS "${_bishengir_hivm_lib}" OR
+      EXISTS "${TRITONSIM_BISHENGIR_BUILD_DIR}/tools/bishengir/bishengir/lib/Dialect"))
     file(GLOB_RECURSE _bishengir_all_libs
       "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/libBiShengIR*.a"
       "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/**/*.a")
@@ -223,6 +224,21 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
         list(REMOVE_ITEM _bishengir_all_libs "${_lib}")
       endif()
     endforeach()
+    # Prefer raw .cpp.o object files over .a archives — they contain
+    # interface implementations (getPipe, inferCoreType, etc.) that are
+    # missing from manually-packed .a files.  Use .o as sole source when
+    # available to avoid duplicate-symbol conflicts with .a members.
+    file(GLOB_RECURSE _bishengir_objects
+      "${TRITONSIM_BISHENGIR_BUILD_DIR}/tools/bishengir/bishengir/lib/Dialect/**/*.cpp.o")
+    list(LENGTH _bishengir_objects _obj_count)
+    if(_obj_count GREATER 0)
+      message(STATUS "BiShengIR: using ${_obj_count} raw .cpp.o files (interface-complete)")
+      set(TRITONSIM_BISHENGIR_HIVM_LIBS ${_bishengir_objects})
+    else()
+      list(APPEND TRITONSIM_BISHENGIR_HIVM_LIBS ${_bishengir_all_libs})
+    endif()
+    # Wrap in --start-group/--end-group to resolve circular deps between
+    # bishengir dialect libraries (e.g. DialectUtils -> MemRefDialect)
     list(APPEND TRITONSIM_BISHENGIR_HIVM_LIBS ${_bishengir_all_libs})
     set(TRITONSIM_BISHENGIR_HIVM_LIBS
       -Wl,--start-group ${TRITONSIM_BISHENGIR_HIVM_LIBS} -Wl,--end-group)
