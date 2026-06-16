@@ -12,7 +12,12 @@
 
 #include "AscendModel/Transforms/HivmOpsEditor.h"
 
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/MLIRContext.h"
+
+#ifdef TRITONSIM_HAS_BISHENGIR_HIVM
+#include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#endif
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
@@ -50,6 +55,10 @@ int main(int argc, char **argv) {
   registry.insert<arith::ArithDialect>();
   registry.insert<func::FuncDialect>();
   registry.insert<memref::MemRefDialect>();
+  registry.insert<scf::SCFDialect>();
+#ifdef TRITONSIM_HAS_BISHENGIR_HIVM
+  registry.insert<mlir::annotation::AnnotationDialect>();
+#endif
 
   MLIRContext ctx(registry);
   ctx.loadAllAvailableDialects();
@@ -70,10 +79,20 @@ int main(int argc, char **argv) {
   if (crudMode == "read") {
     editor.printSummary(llvm::outs());
   } else if (crudMode == "add") {
-    editor.addSetFlagWaitFlagBefore(
-        editor.collectOps<VAddOp>()[0],
-        PIPE::PIPE_V, PIPE::PIPE_MTE2, EVENT_ID::EVENT_ID2);
-    llvm::outs() << "Added set_flag+wait_flag before first vadd\n";
+    auto vadds = editor.collectOps<VAddOp>();
+    if (!vadds.empty()) {
+      MLIRContext *ctx = vadds[0]->getContext();
+      // 使用正确的枚举类型创建属性
+      editor.addSetFlagWaitFlagBefore(
+          vadds[0],
+          hivm::PipeAttr::get(ctx, hivm::PIPE::PIPE_V), 
+          hivm::PipeAttr::get(ctx, hivm::PIPE::PIPE_MTE2), 
+          hivm::EventAttr::get(ctx, hivm::EVENT::EVENT_ID2));
+      llvm::outs() << "Added set_flag+wait_flag before first vadd\n";
+    } else {
+      llvm::errs() << "Error: No VAddOp found to modify\n";
+      return 1;
+    }
   } else if (crudMode == "delete") {
     editor.deleteAllOpsOfKind<SetFlagOp>();
     editor.deleteAllOpsOfKind<WaitFlagOp>();

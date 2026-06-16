@@ -90,10 +90,16 @@ if(TRITONSIM_HAS_BISHENGIR_HIVM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/hivm-cru
   target_link_libraries(hivm-crud
     PRIVATE
     AscendModelTransforms
+    ${TRITONSIM_BISHENGIR_HIVM_LIBS}
     MLIRIR
     MLIRParser
     MLIRSupport
     LLVMSupport
+  )
+
+  target_include_directories(hivm-crud
+    PRIVATE
+    ${TRITONSIM_BISHENGIR_INCLUDE_DIRS}
   )
 
   mlir_check_all_link_libraries(hivm-crud)

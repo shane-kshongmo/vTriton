@@ -49,8 +49,8 @@ public:
   static OwningOpRef<ModuleOp> loadFromFile(MLIRContext &ctx,
                                             llvm::StringRef path);
 
-  LogicalResult exportToFile(llvm::StringRef path) const;
-  std::string exportToString() const;
+  LogicalResult exportToFile(llvm::StringRef path);
+  std::string exportToString();
 
   ModuleOp getModule() const { return module; }
 
@@ -58,12 +58,12 @@ public:
   // READ
   //===--------------------------------------------------------------------===//
 
-  SmallVector<HivmOpInfo> listOps() const;
-  std::map<std::string, unsigned> opCounts() const;
-  void printSummary(raw_ostream &os) const;
+  SmallVector<HivmOpInfo> listOps();
+  std::map<std::string, unsigned> opCounts();
+  void printSummary(raw_ostream &os);
 
   template <typename OpT>
-  SmallVector<OpT> collectOps() const {
+  SmallVector<OpT> collectOps() {
     SmallVector<OpT> result;
     module.walk([&](OpT op) { result.push_back(op); });
     return result;
@@ -113,10 +113,10 @@ public:
                                         Value src, Value dst);
   hivm::AtomicRMWOp addAtomicRMWBefore(Operation *target, Value src,
                                        Value dst,
-                                       hivm::AtomicKind kind);
+                                       hivm::AtomicKindAttr kind);
   hivm::AtomicRMWOp addAtomicRMWAfter(Operation *target, Value src,
                                       Value dst,
-                                      hivm::AtomicKind kind);
+                                      hivm::AtomicKindAttr kind);
 
   //===--------------------------------------------------------------------===//
   // CREATE - Vector Unary Ops
@@ -239,10 +239,6 @@ public:
                                    ValueRange dst);
   hivm::VMulExtOp addVMulExtAfter(Operation *target, ValueRange src,
                                   ValueRange dst);
-  hivm::VMulExtUiOp addVMulExtUiBefore(Operation *target, ValueRange src,
-                                       ValueRange dst);
-  hivm::VMulExtUiOp addVMulExtUiAfter(Operation *target, ValueRange src,
-                                      ValueRange dst);
 
   //===--------------------------------------------------------------------===//
   // CREATE - Vector Ternary / Special Ops
@@ -256,11 +252,11 @@ public:
   hivm::VBrcOp addVBrcAfter(Operation *target, Value src, Value dst);
   hivm::VReduceOp addVReduceBefore(Operation *target, Value src,
                                    ValueRange dst,
-                                   hivm::ReduceOp arith,
+                                   hivm::ReduceOpAttr arith,
                                    DenseI64ArrayAttr reduceDims);
   hivm::VReduceOp addVReduceAfter(Operation *target, Value src,
                                   ValueRange dst,
-                                  hivm::ReduceOp arith,
+                                  hivm::ReduceOpAttr arith,
                                   DenseI64ArrayAttr reduceDims);
   hivm::VConcatOp addVConcatBefore(Operation *target, int64_t dim,
                                    ValueRange src, Value dst);
@@ -374,55 +370,47 @@ public:
                                        Value initCondition,
                                        int32_t padding, int32_t groups);
   hivm::Conv2DL1Op addConv2DL1After(Operation *target, Value input,
-                                      Value weight, Value init,
-                                      Value initCondition,
-                                      int32_t padding, int32_t groups);
-  hivm::Conv3DL1Op addConv3DL1Before(Operation *target, Value input,
-                                       Value weight, Value init,
-                                       Value initCondition,
-                                       int32_t padding, int32_t groups);
-  hivm::Conv3DL1Op addConv3DL1After(Operation *target, Value input,
-                                      Value weight, Value init,
-                                      Value initCondition,
-                                      int32_t padding, int32_t groups);
+                                     Value weight, Value init,
+                                     Value initCondition,
+                                     int32_t padding, int32_t groups);
 
   //===--------------------------------------------------------------------===//
   // CREATE - Synchronization Ops
   //===--------------------------------------------------------------------===//
 
-  void addSetFlagWaitFlagBefore(Operation *target, PIPE setPipe,
-                                PIPE waitPipe, EVENT_ID eventId);
-  void addSetFlagWaitFlagAfter(Operation *target, PIPE setPipe,
-                               PIPE waitPipe, EVENT_ID eventId);
-  hivm::SetFlagOp addSetFlagBefore(Operation *target, PIPE setPipe,
-                                   PIPE waitPipe, EVENT_ID eventId);
-  hivm::SetFlagOp addSetFlagAfter(Operation *target, PIPE setPipe,
-                                  PIPE waitPipe, EVENT_ID eventId);
-  hivm::WaitFlagOp addWaitFlagBefore(Operation *target, PIPE setPipe,
-                                     PIPE waitPipe, EVENT_ID eventId);
-  hivm::WaitFlagOp addWaitFlagAfter(Operation *target, PIPE setPipe,
-                                    PIPE waitPipe, EVENT_ID eventId);
-  hivm::PipeBarrierOp addPipeBarrierBefore(Operation *target, PIPE pipe);
-  hivm::PipeBarrierOp addPipeBarrierAfter(Operation *target, PIPE pipe);
+  void addSetFlagWaitFlagBefore(Operation *target, hivm::PipeAttr setPipe,
+                                hivm::PipeAttr waitPipe, hivm::EventAttr eventId);
+  void addSetFlagWaitFlagAfter(Operation *target, hivm::PipeAttr setPipe,
+                               hivm::PipeAttr waitPipe, hivm::EventAttr eventId);
+  hivm::SetFlagOp addSetFlagBefore(Operation *target, hivm::PipeAttr setPipe,
+                                   hivm::PipeAttr waitPipe, hivm::EventAttr eventId);
+  hivm::SetFlagOp addSetFlagAfter(Operation *target, hivm::PipeAttr setPipe,
+                                  hivm::PipeAttr waitPipe, hivm::EventAttr eventId);
+  hivm::WaitFlagOp addWaitFlagBefore(Operation *target, hivm::PipeAttr setPipe,
+                                     hivm::PipeAttr waitPipe, hivm::EventAttr eventId);
+  hivm::WaitFlagOp addWaitFlagAfter(Operation *target, hivm::PipeAttr setPipe,
+                                    hivm::PipeAttr waitPipe, hivm::EventAttr eventId);
+  hivm::PipeBarrierOp addPipeBarrierBefore(Operation *target, hivm::PipeAttr pipe);
+  hivm::PipeBarrierOp addPipeBarrierAfter(Operation *target, hivm::PipeAttr pipe);
   hivm::SyncBlockOp addSyncBlockBefore(Operation *target,
-                                       hivm::SyncBlockMode mode);
+                                       hivm::SyncBlockModeAttr mode);
   hivm::SyncBlockOp addSyncBlockAfter(Operation *target,
-                                      hivm::SyncBlockMode mode);
+                                      hivm::SyncBlockModeAttr mode);
   hivm::SyncBlockSetOp addSyncBlockSetBefore(Operation *target,
-                                             hivm::TCoreType coreType,
-                                             PIPE tpipe, PIPE pipe,
+                                             hivm::TCoreTypeAttr coreType,
+                                             hivm::PipeAttr tpipe, hivm::PipeAttr pipe,
                                              int64_t flagId);
   hivm::SyncBlockSetOp addSyncBlockSetAfter(Operation *target,
-                                            hivm::TCoreType coreType,
-                                            PIPE tpipe, PIPE pipe,
+                                            hivm::TCoreTypeAttr coreType,
+                                            hivm::PipeAttr tpipe, hivm::PipeAttr pipe,
                                             int64_t flagId);
   hivm::SyncBlockWaitOp addSyncBlockWaitBefore(Operation *target,
-                                               hivm::TCoreType coreType,
-                                               PIPE tpipe, PIPE pipe,
+                                               hivm::TCoreTypeAttr coreType,
+                                               hivm::PipeAttr tpipe, hivm::PipeAttr pipe,
                                                int64_t flagId);
   hivm::SyncBlockWaitOp addSyncBlockWaitAfter(Operation *target,
-                                              hivm::TCoreType coreType,
-                                              PIPE tpipe, PIPE pipe,
+                                              hivm::TCoreTypeAttr coreType,
+                                              hivm::PipeAttr tpipe, hivm::PipeAttr pipe,
                                               int64_t flagId);
   hivm::CreateSyncBlockLockOp addCreateSyncBlockLockBefore(
       Operation *target);
@@ -460,9 +448,9 @@ public:
   hivm::BitcastOp addBitcastAfter(Operation *target, Value src,
                                   Type resultType);
   hivm::SetAtomicOp addSetAtomicBefore(Operation *target,
-                                       hivm::AtomicKind kind);
+                                       hivm::AtomicKindAttr kind);
   hivm::SetAtomicOp addSetAtomicAfter(Operation *target,
-                                      hivm::AtomicKind kind);
+                                      hivm::AtomicKindAttr kind);
   hivm::SetCtrlOp addSetCtrlBefore(Operation *target, bool enable,
                                    int64_t idx);
   hivm::SetCtrlOp addSetCtrlAfter(Operation *target, bool enable,
@@ -483,10 +471,10 @@ public:
                                           Type resultType);
   hivm::LoadScalarOp addLoadScalarAfter(Operation *target, Value addr,
                                          Type resultType);
-  hivm::DCCIOp addDCCIBefore(Operation *target, hivm::DCCIMode mode,
-                             hivm::DataCacheKind dataCacheKind);
-  hivm::DCCIOp addDCCIAfter(Operation *target, hivm::DCCIMode mode,
-                            hivm::DataCacheKind dataCacheKind);
+  hivm::DCCIOp addDCCIBefore(Operation *target, hivm::DCCIModeAttr mode,
+                             hivm::DataCacheKindAttr dataCacheKind);
+  hivm::DCCIOp addDCCIAfter(Operation *target, hivm::DCCIModeAttr mode,
+                            hivm::DataCacheKindAttr dataCacheKind);
   hivm::SetFFTSBaseAddrOp addSetFFTSBaseAddrBefore(Operation *target,
                                                    Value fftsBaseAddr);
   hivm::SetFFTSBaseAddrOp addSetFFTSBaseAddrAfter(Operation *target,
@@ -521,10 +509,6 @@ public:
   hivm::InitDebugOp addInitDebugAfter(Operation *target);
   hivm::FinishDebugOp addFinishDebugBefore(Operation *target);
   hivm::FinishDebugOp addFinishDebugAfter(Operation *target);
-  hivm::IndirectStoreOp addIndirectStoreBefore(Operation *target, Value dst,
-                                               Value offsets, Value src);
-  hivm::IndirectStoreOp addIndirectStoreAfter(Operation *target, Value dst,
-                                              Value offsets, Value src);
 
   //===--------------------------------------------------------------------===//
   // DELETE
@@ -565,27 +549,27 @@ public:
 
   void changeElementType(Type oldType, Type newType);
   void changeMemorySpace(llvm::StringRef oldSpace, llvm::StringRef newSpace);
-  void changePipeAttr(PIPE oldPipe, PIPE newPipe);
-  void changeEventAttr(EVENT_ID oldEvent, EVENT_ID newEvent);
+  void changePipeAttr(hivm::PipeAttr oldPipe, hivm::PipeAttr newPipe);
+  void changeEventAttr(hivm::EventAttr oldEvent, hivm::EventAttr newEvent);
   void changeShape(ArrayRef<int64_t> oldShape, ArrayRef<int64_t> newShape);
 
   //===--------------------------------------------------------------------===//
   // MODIFY - Op-specific attribute setters
   //===--------------------------------------------------------------------===//
 
-  void setSetFlagPipe(Operation *setFlagOp, PIPE newPipe);
-  void setWaitFlagPipe(Operation *waitFlagOp, PIPE newPipe);
-  void setEventId(Operation *syncOp, EVENT_ID newEvent);
-  void setLoadPadMode(hivm::LoadOp loadOp, hivm::PadMode mode);
-  void setStoreAtomicKind(hivm::StoreOp storeOp, hivm::AtomicKind kind);
-  void setCopyPadMode(hivm::CopyOp copyOp, hivm::PadMode mode);
+  void setSetFlagPipe(Operation *setFlagOp, hivm::PipeAttr newPipe);
+  void setWaitFlagPipe(Operation *waitFlagOp, hivm::PipeAttr newPipe);
+  void setEventId(Operation *syncOp, hivm::EventAttr newEvent);
+  void setLoadPadMode(hivm::LoadOp loadOp, hivm::PadModeAttr mode);
+  void setStoreAtomicKind(hivm::StoreOp storeOp, hivm::AtomicKindAttr kind);
+  void setCopyPadMode(hivm::CopyOp copyOp, hivm::PadModeAttr mode);
   void setFixpipeDMAMode(hivm::FixpipeOp fixpipeOp,
-                         hivm::FixpipeDMAMode mode);
+                         hivm::FixpipeDMAModeAttr mode);
   void setND2NZDstContinuous(hivm::ND2NZOp nd2nzOp, bool continuous);
   void setLoadInitOutBuffer(hivm::LoadOp loadOp, bool init);
-  void setVCastRoundMode(hivm::VCastOp castOp, hivm::RoundMode mode);
-  void setVCmpCompareMode(hivm::VCmpOp cmpOp, hivm::CompareMode mode);
-  void setVReduceOp(hivm::VReduceOp reduceOp, hivm::ReduceOp arith);
+  void setVCastRoundMode(hivm::VCastOp castOp, hivm::RoundModeAttr mode);
+  void setVCmpCompareMode(hivm::VCmpOp cmpOp, hivm::CompareModeAttr mode);
+  void setVReduceOp(hivm::VReduceOp reduceOp, hivm::ReduceOpAttr arith);
   void setVTransposePermutation(hivm::VTransposeOp transposeOp,
                                 ArrayRef<int64_t> permutation);
   void setVShRRound(hivm::VShROp vshrOp, bool round);
@@ -598,8 +582,8 @@ public:
   void setMatmulTranspose(hivm::MatmulOp matmulOp, bool aTrans,
                           bool bTrans);
   void setAtomicRMWKind(hivm::AtomicRMWOp atomicRmwOp,
-                        hivm::AtomicKind kind);
-  void setDCCIMode(hivm::DCCIOp dcciOp, hivm::DCCIMode mode);
+                        hivm::AtomicKindAttr kind);
+  void setDCCIMode(hivm::DCCIOp dcciOp, hivm::DCCIModeAttr mode);
   void setCustomOpName(hivm::CustomOp customOp, llvm::StringRef name);
 
   //===--------------------------------------------------------------------===//
@@ -620,8 +604,8 @@ public:
   void removeRedundantLoadStorePair(unsigned n);
   void fuseConsecutiveComputeOps();
   void insertDoubleBuffering(Value src, Value ub0, Value ub1,
-                             PIPE setPipe, PIPE waitPipe,
-                             EVENT_ID eventId);
+                             hivm::PipeAttr setPipe, hivm::PipeAttr waitPipe,
+                             hivm::EventAttr eventId);
 
 private:
   ModuleOp module;
