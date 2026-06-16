@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
-from perfbound.extract.op_classifier import Component
+from perfbound.calibration.constants import CalibrationDB
+from perfbound.extract.op_classifier import Component, Precision
 from perfbound.model.component_model import ComponentBound
+from perfbound.analyze.hivm_bottleneck_diagnosis import (
+    diagnose_hivm_bottleneck_from_des_ops,
+)
 from perfbound.analyze.profile_utilization import (
     KernelProfileStats,
     ProfileComponentStats,
@@ -542,6 +548,126 @@ def test_warning_when_u_or_e_is_unphysical():
     assert any("E > 1.05" in item for item in report.warnings)
 
 
+def test_hivm_bottleneck_diagnosis_flags_sync_overhead_from_des_ops():
+    """HIVM Bottleneck Diagnosis：sync/barrier 占比超过阈值时判定 SyncOverhead。"""
+    ops = [
+        SimpleNamespace(
+            op_id=0,
+            op_name="load",
+            pipe="PIPE_MTE2_V",
+            bytes_transferred=0,
+            elements=0,
+            flops=0,
+            duration_cycles=70,
+            loop_multiplier=1,
+            start_cycle=0,
+            end_cycle=70,
+            src_space="gm",
+            dst_space="ub",
+            precision=Precision.FP16,
+        ),
+        SimpleNamespace(
+            op_id=1,
+            op_name="pipe_barrier",
+            pipe="PIPE_ALL",
+            bytes_transferred=0,
+            elements=0,
+            flops=0,
+            duration_cycles=30,
+            loop_multiplier=1,
+            start_cycle=70,
+            end_cycle=100,
+            src_space="",
+            dst_space="",
+            precision=Precision.FP16,
+        ),
+    ]
+    des_metadata = {
+        0: {
+            "id": 0,
+            "name": "load",
+            "pipe": "PIPE_MTE2_V",
+            "duration": 70,
+            "start_cycle": 0,
+            "end_cycle": 70,
+            "depends_on": [],
+            "is_sync": False,
+            "is_barrier": False,
+            "bytes": 0,
+            "elements": 0,
+            "flops": 0,
+            "loop_multiplier": 1,
+            "src_space": "gm",
+            "dst_space": "ub",
+            "elem_type": "fp16",
+            "repeat": 1,
+            "mask": 128,
+            "line": 201,
+            "core_type": "aiv",
+            "event_id": 0,
+        },
+        1: {
+            "id": 1,
+            "name": "pipe_barrier",
+            "pipe": "PIPE_ALL",
+            "duration": 30,
+            "start_cycle": 70,
+            "end_cycle": 100,
+            "depends_on": [0],
+            "is_sync": True,
+            "is_barrier": True,
+            "bytes": 0,
+            "elements": 0,
+            "flops": 0,
+            "loop_multiplier": 1,
+            "src_space": "",
+            "dst_space": "",
+            "elem_type": "fp16",
+            "repeat": 1,
+            "mask": 0,
+            "line": 202,
+            "core_type": "aiv",
+            "event_id": 1,
+        },
+    }
+
+    report = diagnose_hivm_bottleneck_from_des_ops(
+        ops,
+        CalibrationDB(),
+        des_metadata=des_metadata,
+    )
+
+    assert report.global_root_cause == "SyncOverhead"
+    assert report.sync_overhead_ratio == 30.0
+    assert report.barrier_overhead_ratio == 30.0
+    assert not any("未提供原始 DES metadata" in warning for warning in report.warnings)
+
+
+def test_hivm_bottleneck_warns_when_raw_des_metadata_is_missing():
+    """直接消费完整 OpRecord 时，line/is_sync/is_barrier 来源仍不可见。"""
+    ops = [
+        SimpleNamespace(
+            op_id=0,
+            op_name="vadd",
+            pipe="PIPE_V",
+            bytes_transferred=0,
+            elements=128,
+            flops=0,
+            duration_cycles=40,
+            loop_multiplier=1,
+            start_cycle=0,
+            end_cycle=40,
+            src_space="ub",
+            dst_space="ub",
+            precision=Precision.FP16,
+        )
+    ]
+
+    report = diagnose_hivm_bottleneck_from_des_ops(ops, CalibrationDB())
+
+    assert any("未提供原始 DES metadata" in warning for warning in report.warnings)
+
+
 # ── Real-kernel coverage: chunk_kda end-to-end through run_from_files ──────────
 #
 # Synthetic tests above never exercise run_from_files on a real msprof export.
@@ -554,11 +680,76 @@ def test_warning_when_u_or_e_is_unphysical():
 
 import pytest
 
-from perfbound.analyze.profile_utilization import run_from_files
+from perfbound.analyze.profile_utilization import (
+    emit_perfetto_trace_from_des,
+    run_from_files,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CHUNK_KDA_CSV = _FIXTURES / "chunk_kda_op_summary_910b3.csv"
 _KDA_DES = Path(__file__).parents[2] / ".omc" / "research" / "hw_runs" / "kda_des.json"
+
+
+def test_perfetto_trace_is_emitted_from_des_graph(tmp_path):
+    """Python path should emit a Perfetto trace from the same DES graph input."""
+    des_path = tmp_path / "des.json"
+    trace_path = tmp_path / "perfetto_trace.json"
+    des_path.write_text(
+        json.dumps(
+            {
+                "clock_ghz": 1.85,
+                "schedule_truncated": False,
+                "operations": [
+                    {
+                        "id": 0,
+                        "name": "fake_matmul_compute_bound",
+                        "pipe": "Cube",
+                        "duration": 200,
+                        "start_cycle": 0,
+                        "end_cycle": 200,
+                        "line": 1,
+                        "depends_on": [],
+                        "is_sync": False,
+                        "is_barrier": False,
+                        "event_id": "",
+                        "event_generation": 0,
+                        "sender_pipe": "Unknown",
+                        "receiver_pipe": "Unknown",
+                        "core_type": "AIC",
+                        "bytes": 0,
+                        "elements": 1000000,
+                        "flops": 1000000,
+                        "loop_multiplier": 1,
+                        "read_buffers": [],
+                        "write_buffers": [],
+                        "read_versions": [],
+                        "write_versions": [],
+                        "src_space": "l0a",
+                        "dst_space": "l0c",
+                        "elem_type": "bf16",
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+    emit_perfetto_trace_from_des(des_path, trace_path)
+
+    trace = json.loads(trace_path.read_text())
+    assert trace["displayTimeUnit"] == "us"
+    events = trace["traceEvents"]
+    assert any(
+        event.get("ph") == "M"
+        and event.get("name") == "process_name"
+        and event.get("args", {}).get("name") == "AIC (Cube Core)"
+        for event in events
+    )
+    op_events = [event for event in events if event.get("ph") == "X"]
+    assert len(op_events) == 1
+    assert op_events[0]["name"] == "fake_matmul_compute_bound"
+    assert op_events[0]["pid"] == 1
+    assert op_events[0]["tid"] == 1
+    assert op_events[0]["args"]["cycles"] == 200
 
 
 @pytest.mark.skipif(not _KDA_DES.exists(), reason="real kda_des.json not present")
