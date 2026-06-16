@@ -255,19 +255,20 @@ scalar FMA chain and discards the first 15 rows chronologically as warmup.
 `vector.scalar_throughput_measured=true`, so scalar-bound floors now use the
 measured scalar rate instead of the prior Vector-rate fallback.
 
-## 9. US-SB-006 (live gap counterfactual) + US-SB-008 (two-limit HW reachability) — attempted, BLOCKED (2026-06-11)
+## 9. US-SB-006 (live gap counterfactual) + US-SB-008 (two-limit HW reachability) — attempted, BLOCKED (re-audited 2026-06-16)
 
 Both stories need a *measurable* gap removed on real hardware. Every concrete
 path was tried; each hits a real blocker on the one kernel with a full
 NPUIR→des.json pipeline (chunk_kda).
 
-**Executable Gap-3 edit works analytically but predicts a 0 µs delta.**
-`tritonsim-hivm --remove-pipe-barrier-index=N --edited-npuir-file=...` removes a
-pipe_barrier through the MLIR API and emits a bishengir-compilable
-`.npuir.mlir` (verified: 80→79 barriers). But the model's predicted bound delta
-for chunk_kda is **0.0 µs** — chunk_kda's Gap-3 attribution is 6.2e-6 (≈0), so
-removing a barrier does not move the binding component floor. Nothing measurable
-to validate.
+**Executable Gap-3 edit is not present in the current checkout, and would be
+vacuous for chunk_kda anyway.** A prior note referenced
+`tritonsim-hivm --remove-pipe-barrier-index=N --edited-npuir-file=...`, but the
+current `tritonsim-hivm --help` output exposes no such option and the current
+source tree has no matching implementation. Even if restored, the model's
+predicted bound delta for chunk_kda is **0.0 µs** — chunk_kda's Gap-3
+attribution is effectively zero, so removing a barrier does not move the
+binding component floor. Nothing measurable to validate on this kernel.
 
 **Gap-4 (`raise_repeat`) moves the attribution but not the bound.** After
 fixing `raise_repeat` to match the real des.json pipe tokens (`PIPE_M/PIPE_V/
@@ -294,14 +295,21 @@ completed:** it requires a *second* gap-seeded kernel carried through the full
 NPUIR→des.json pipeline plus a hardware npuir-recompile-and-launch harness that
 is not proven end-to-end in this tree. Documented as the next concrete step.
 
+**Accepted-evidence fixture:** `.omc/research/hw_runs/counterfactual_gap_results.json`
+records the accepted counterfactual contract, all attempted paths, and explicitly
+keeps `satisfies_us_sb_006=false` / `satisfies_us_sb_008=false`. The vector-add
+2× work-scaling run remains a useful sanity check (`quantification_error=2.95%`,
+outputs verified) but is intentionally excluded because it changes problem size
+rather than removing a seeded Gap-1/2/3/4 cause from an equivalent kernel.
+
 **Honest outcome:** US-SB-006 and US-SB-008 remain `passes:false`. The
 analytical two-limit ordering (T_bound_HIVM ≤ T_bound_DSL ≤ T_measured) and the
-model's gap-quantification mechanism are validated on real chunk_kda data, and
-the executable Gap-3 edit is proven to emit bishengir-compilable MLIR — but
-chunk_kda's compiler headroom is below measurement noise, so no hardware
-speedup can be validated on it, and no alternative large-headroom kernel was
-carried to a hardware measurement. The `raise_repeat` real-pipe fix is kept as a
-genuine bug fix.
+model's gap-quantification mechanism are validated on real chunk_kda data, but
+chunk_kda's compiler headroom is below measurement noise, no current
+compiler-reachable edit exists in this checkout, and no alternative
+large-headroom kernel was carried to a hardware measurement. The `raise_repeat`
+real-pipe fix is kept as a genuine bug fix for analytical DES edits, not as a
+hardware counterfactual closure.
 
 ## Reproduce
 

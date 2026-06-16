@@ -2,7 +2,7 @@
 #
 # US-SB-007: Scalar throughput calibration.
 # US-SB-008: Two-limit compiler-headroom validation (chunk_kda).
-# US-SB-006: Live counterfactual via vector_add work-scaling experiment.
+# US-SB-006: accepted seeded-gap counterfactual audit.
 
 import json
 from pathlib import Path
@@ -224,7 +224,7 @@ class TestTwoLimitCompilerHeadroom:
 
 
 # ===========================================================================
-# US-SB-006: Live counterfactual via vector_add work scaling
+# US-SB-006: work-scaling sanity check guard
 # ===========================================================================
 
 VECADD_16M_CSV = PROJECT_ROOT / "tests" / "perfbound" / "fixtures" / "vector_add_op_summary_910b3.csv"
@@ -260,24 +260,24 @@ class TestScalarCalibrationSoundness:
 # ===========================================================================
 
 COUNTERFACTUAL_RESULTS = PROJECT_ROOT / ".omc" / "research" / "hw_runs" / "counterfactual_results.json"
+COUNTERFACTUAL_GAP_RESULTS = PROJECT_ROOT / ".omc" / "research" / "hw_runs" / "counterfactual_gap_results.json"
 
 requires_counterfactual = pytest.mark.skipif(
     not COUNTERFACTUAL_RESULTS.exists(),
     reason="counterfactual results fixture not present"
 )
+requires_counterfactual_gap = pytest.mark.skipif(
+    not COUNTERFACTUAL_GAP_RESULTS.exists(),
+    reason="counterfactual gap audit fixture not present"
+)
 
 
 @requires_counterfactual
-class TestLiveCounterfactual:
-    """US-SB-006: Live counterfactual validation via vector_add work-scaling.
+class TestWorkScalingSanityCheck:
+    """Vector-add work scaling is a sanity check, not US-SB-006 closure.
 
     Validates that the model correctly predicts the performance change when
     work (data size) doubles for a memory-bound kernel (vector_add).
-
-    Acceptance (US-SB-006):
-    - >= 1 CounterfactualResult with output_verified=True and
-      quantification_error < 0.20
-    - Evidence committed under .omc/research/hw_runs/
     """
 
     @staticmethod
@@ -286,13 +286,20 @@ class TestLiveCounterfactual:
             return json.load(f)
 
     def test_counterfactual_result_exists(self):
-        """Counterfactual results JSON is present and valid."""
+        """Work-scaling results JSON is present and internally consistent."""
         data = self._load_results()
         assert "kernel_name" in data
         assert "gap_name" in data
         assert "t_before_us" in data
         assert "t_after_us" in data
         assert "predicted_gap_us" in data
+
+    def test_work_scaling_is_not_accepted_us_sb_006_evidence(self):
+        """Problem-size scaling must not be counted as seeded-gap evidence."""
+        data = self._load_results()
+        assert data.get("experiment_kind") == "work_scaling_sanity_check"
+        assert data.get("satisfies_us_sb_006") is False
+        assert "sanity check" in data.get("satisfies_us_sb_006_note", "").lower()
 
     def test_output_verified(self):
         """Both kernel variants produce correct output (output_verified=True)."""
@@ -318,6 +325,42 @@ class TestLiveCounterfactual:
         data = self._load_results()
         assert data.get("baseline_sound") is True, "baseline must be sound"
         assert data.get("scaled_sound") is True, "scaled kernel must be sound"
+
+
+@requires_counterfactual_gap
+class TestAcceptedSeededGapCounterfactualAudit:
+    """US-SB-006/008 accepted counterfactual evidence must be explicit."""
+
+    @staticmethod
+    def _load_results():
+        with open(COUNTERFACTUAL_GAP_RESULTS) as f:
+            return json.load(f)
+
+    def test_no_accepted_counterfactual_is_claimed_without_evidence(self):
+        data = self._load_results()
+        assert data.get("satisfies_us_sb_006") is False
+        assert data.get("accepted_results") == []
+
+    def test_acceptance_contract_excludes_work_scaling(self):
+        data = self._load_results()
+        contract = data["acceptance_contract"]
+        assert contract["requires_seeded_gap_intervention"] is True
+        assert contract["requires_compiler_reachable_edit"] is True
+        assert contract["requires_output_verified"] is True
+        assert contract["work_scaling_sanity_checks_do_not_satisfy"] is True
+
+    def test_attempts_record_actual_blockers(self):
+        data = self._load_results()
+        attempts = data["attempted_results"]
+        assert attempts, "expected attempted counterfactual records"
+        assert any(a["intervention_kind"] == "des_json_raise_repeat" for a in attempts)
+        assert any(a["intervention_kind"] == "work_scaling_sanity_check" for a in attempts)
+        assert all(a["satisfies_us_sb_006"] is False for a in attempts)
+
+    def test_two_limit_hardware_reachability_not_claimed(self):
+        data = self._load_results()
+        assert data.get("satisfies_us_sb_008") is False
+        assert "large-headroom kernel" in data["next_required"]
 
 
 # ===========================================================================

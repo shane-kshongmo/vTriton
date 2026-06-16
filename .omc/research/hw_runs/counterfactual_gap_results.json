@@ -1,0 +1,64 @@
+{
+  "description": "US-SB-006 accepted seeded-gap counterfactual audit for Stage B",
+  "satisfies_us_sb_006": false,
+  "satisfies_us_sb_008": false,
+  "accepted_results": [],
+  "acceptance_contract": {
+    "requires_seeded_gap_intervention": true,
+    "requires_compiler_reachable_edit": true,
+    "requires_output_verified": true,
+    "requires_quantification_error_lt": 0.2,
+    "work_scaling_sanity_checks_do_not_satisfy": true
+  },
+  "attempted_results": [
+    {
+      "kernel_name": "chunk_kda",
+      "gap_name": "gap3_avoidable_serial",
+      "intervention_kind": "mlir_pipe_barrier_removal",
+      "compiler_reachable": false,
+      "output_verified": false,
+      "predicted_gap_us": 0.0,
+      "measured_delta_us": null,
+      "quantification_error": null,
+      "satisfies_us_sb_006": false,
+      "satisfies_us_sb_008": false,
+      "blockers": [
+        "Current tritonsim-hivm --help exposes no --remove-pipe-barrier-index or --edited-npuir-file option, and the current source tree has no matching implementation.",
+        "chunk_kda Gap-3 attribution is effectively zero, so even a valid pipe-barrier edit would not move the binding bound by a measurable amount."
+      ]
+    },
+    {
+      "kernel_name": "chunk_kda",
+      "gap_name": "gap4_intra_unit_exec",
+      "intervention_kind": "des_json_raise_repeat",
+      "compiler_reachable": false,
+      "model_visible": true,
+      "output_verified": false,
+      "predicted_bound_delta_us": 0.0,
+      "measured_delta_us": null,
+      "quantification_error": null,
+      "satisfies_us_sb_006": false,
+      "satisfies_us_sb_008": false,
+      "blockers": [
+        "raise_repeat edits DES JSON, which is an analytical report format rather than input accepted by bishengir-compile.",
+        "For chunk_kda, changing repeat shifts attribution but does not change the binding bound."
+      ]
+    },
+    {
+      "kernel_name": "vector_add",
+      "gap_name": "work_scaling_2x",
+      "intervention_kind": "work_scaling_sanity_check",
+      "compiler_reachable": true,
+      "output_verified": true,
+      "predicted_gap_us": 307.03,
+      "measured_delta_us": 298.22,
+      "quantification_error": 0.0295,
+      "satisfies_us_sb_006": false,
+      "satisfies_us_sb_008": false,
+      "blockers": [
+        "This changes problem size rather than removing a seeded Gap-1/2/3/4 cause from an equivalent kernel."
+      ]
+    }
+  ],
+  "next_required": "Add or capture one large-headroom kernel with a compiler-reachable MLIR/HIVM intervention, semantic output verification, and measured speedup within 20% of the predicted compiler/gap headroom."
+}

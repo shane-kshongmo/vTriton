@@ -85,7 +85,9 @@
     "quantification_error": 0.0295,
     "is_valid": true,
     "satisfies_us_sb_006": false,
-    "evidence": ".omc/research/hw_runs/counterfactual_results.json"
+    "evidence": ".omc/research/hw_runs/counterfactual_results.json",
+    "accepted_gap_evidence": ".omc/research/hw_runs/counterfactual_gap_results.json",
+    "note": "Valid work-scaling sanity check only; accepted US-SB-006 evidence requires a compiler-reachable seeded Gap-1/2/3/4 intervention on a semantically equivalent kernel."
   },
   "two_limit": {
     "description": "US-SB-008: two-limit compiler-headroom for chunk_kda",
