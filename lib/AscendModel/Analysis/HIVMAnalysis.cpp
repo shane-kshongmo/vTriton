@@ -740,8 +740,16 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
            parsed.op.opName == "pointer_cast")
     parsed.op.pipe = HIVMPipe::Unknown;
   else if (llvm::isa<mlir::hivm::MmadL1Op, mlir::hivm::MatmulOp,
-                     mlir::hivm::MixMatmulOp, mlir::hivm::MixGroupMatmulOp>(op))
+                     mlir::hivm::MixMatmulOp, mlir::hivm::MixGroupMatmulOp>(op)) {
     parsed.op.pipe = HIVMPipe::Cube;
+    for (mlir::Value operand : op->getOperands()) {
+      llvm::StringRef elemTy = getElementTypeName(operand.getType());
+      if (!elemTy.empty())
+        parsed.op.elemType = elemTy.str();
+      parsed.op.bytes = std::max(parsed.op.bytes, inferValueBytes(operand));
+      parsed.op.elements = std::max(parsed.op.elements, inferValueElements(operand));
+    }
+  }
 
   if (auto barrier = llvm::dyn_cast<mlir::hivm::PipeBarrierOp>(op)) {
     parsed.op.opName = "pipe_barrier";
@@ -2175,7 +2183,7 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
         if (hasConcreteInductionValue)
           loopState.boundValues[forOp.getInductionVar()] =
               lowerBound + iter * step;
-        analyzeParsedRegion(op->getRegion(0), loopMultiplier, loopState, report,
+        analyzeParsedRegion(op->getRegion(0), nestedMultiplier, loopState, report,
                             config, replayIterations);
         if (iter + 1 < tripCount)
           advanceLoopCarriedState(forOp, loopState);
