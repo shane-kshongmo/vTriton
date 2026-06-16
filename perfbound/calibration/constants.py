@@ -228,9 +228,15 @@ class VectorConfig:
     # Per-operation cycles per vector instruction (128-element SIMD chunk)
     op_cycles: dict[tuple[VecOpType, DType], float] = field(default_factory=dict)
 
-    # Scalar throughput (rough estimate for two-limit Gap-1 analysis)
-    # Scalar is ~10-50× slower than Vector; use conservative 20× slower than Vector FP16
-    scalar_throughput_fp16_tflops: float = 0.0  # optional; defaults to Vector/20 if not set
+    # Scalar throughput.
+    # NOTE: this is a DERIVED estimate (P_vector / SIMD_width), not a direct CCE
+    # measurement — see RESULTS.md §8 (US-SB-007).  It is retained as evidence
+    # but MUST NOT tighten the time bound.  Until scalar_throughput_measured is
+    # True, get_scalar_throughput_ops_per_us() returns the full measured Vector
+    # rate as an optimistic upper-rate fallback (can loosen, never illegitimately
+    # tighten, the floor).
+    scalar_throughput_fp16_tflops: float = 0.0  # derived estimate (evidence only)
+    scalar_throughput_measured: bool = False    # True only after a direct CCE measurement
 
     def get_op_cycles(self, op: VecOpType, dtype: DType) -> float:
         """Cycles for one vector instruction of this op+dtype."""
@@ -244,11 +250,14 @@ class VectorConfig:
         return 1.0  # conservative default
 
     def get_scalar_throughput_ops_per_us(self, prec_str: str) -> float:
-        """Rough Scalar throughput in operations per microsecond.
+        """Scalar throughput in operations per microsecond, for the bound.
 
-        Scalar is ~10-50× slower than Vector; we use a conservative 20× slower
-        than Vector FP16 for two-limit Gap-1 analysis. This is NOT a calibrated
-        constant — just a rough proxy to make two-limit non-vacuous.
+        SOUNDNESS RULE (US-SB-007, RESULTS.md §8): the stored
+        scalar_throughput_fp16_tflops is a DERIVED estimate (P_vector / 128),
+        not a direct CCE measurement, so it must NOT be used to tighten the
+        time floor.  Unless scalar_throughput_measured is True, this returns the
+        full measured Vector rate as an optimistic upper-rate fallback — this
+        can only loosen the floor, never illegitimately tighten it.
 
         Args:
             prec_str: Precision string (e.g., "fp16", "bf16", "fp32")
@@ -266,10 +275,13 @@ class VectorConfig:
         if vec_tflops <= 0:
             return 0.0
 
-        # Use explicit scalar throughput if set, else default to Vector/20
-        scalar_tflops = self.scalar_throughput_fp16_tflops
-        if scalar_tflops <= 0:
-            scalar_tflops = vec_tflops / 20.0
+        # Only a *measured* scalar rate may tighten the bound.  Otherwise fall
+        # back to the full Vector rate (optimistic upper bound on the rate ->
+        # lower bound on time stays sound).
+        if self.scalar_throughput_measured and self.scalar_throughput_fp16_tflops > 0:
+            scalar_tflops = self.scalar_throughput_fp16_tflops
+        else:
+            scalar_tflops = vec_tflops
 
         return scalar_tflops * 1e6  # FLOP/us
 
@@ -434,6 +446,7 @@ class CalibrationDB:
                 "throughput_fp16_tflops": self.vector.throughput_fp16_tflops,
                 "throughput_fp32_tflops": self.vector.throughput_fp32_tflops,
                 "scalar_throughput_fp16_tflops": self.vector.scalar_throughput_fp16_tflops,
+                "scalar_throughput_measured": self.vector.scalar_throughput_measured,
             },
             "memory": {
                 "gm_size_gb": self.memory.gm_size_gb,
@@ -480,6 +493,7 @@ class CalibrationDB:
             throughput_fp16_tflops=vec_d.get("throughput_fp16_tflops", 0.0),
             throughput_fp32_tflops=vec_d.get("throughput_fp32_tflops", 0.0),
             scalar_throughput_fp16_tflops=vec_d.get("scalar_throughput_fp16_tflops", 0.0),
+            scalar_throughput_measured=vec_d.get("scalar_throughput_measured", False),
         )
         # Memory hierarchy
         mem_d = d.get("memory", {})
@@ -553,5 +567,7 @@ def required_p0_constant_names() -> list[str]:
         "BW_ub_to_gm_sustained",
         "BW_gm_to_l1_sustained",
         "BW_l1_to_l0a_sustained",
+        "BW_l0c_to_gm_sustained",
+        "BW_hbm_allcore_sustained",
         "mandatory_handoff_cost_l0c_to_gm_to_ub",
     ]

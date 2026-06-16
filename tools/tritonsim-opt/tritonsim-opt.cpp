@@ -27,6 +27,12 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #endif
 
+#ifdef TRITONSIM_HAS_BISHENGIR_HIVM
+#include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/HACC/IR/HACC.h"
+#include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#endif
+
 using namespace mlir;
 
 int main(int argc, char **argv) {
@@ -46,6 +52,12 @@ int main(int argc, char **argv) {
 
 #ifdef TRITONSIM_HAS_TRITON
   registry.insert<mlir::triton::TritonDialect>();
+#endif
+
+#ifdef TRITONSIM_HAS_BISHENGIR_HIVM
+  registry.insert<mlir::hivm::HIVMDialect>();
+  registry.insert<mlir::hacc::HACCDialect>();
+  registry.insert<mlir::annotation::AnnotationDialect>();
 #endif
 
   // Register all AscendModel passes and the ascend-perf-model pipeline

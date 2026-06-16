@@ -95,8 +95,17 @@ class TestTwoLimitRecomputation:
     """compute_two_limit recomputes bound from idealized extract."""
 
     def test_gap1_kernel_hivm_lower_than_dsl(self):
-        """Kernel with Gap-1 mis-placement → T_bound_HIVM < T_bound_DSL."""
+        """Kernel with Gap-1 mis-placement → T_bound_HIVM < T_bound_DSL.
+
+        This exercises the two-limit Gap-1 *mechanism* (idealizing a Scalar-
+        placed op onto Vector lowers the bound), which requires a distinct,
+        slower-than-vector scalar rate.  The default DB leaves scalar UNMEASURED
+        (US-SB-007 open) and falls back to the Vector rate for soundness, so we
+        opt this synthetic mechanism test into the derived/measured scalar rate
+        explicitly.
+        """
         db = load_default_calib_db()
+        db.vector.scalar_throughput_measured = True  # exercise the slow scalar path
 
         # Create a kernel with a genuine Gap-1 mis-placement:
         # FP16 compare on Scalar (should be on Vector) plus Cube work

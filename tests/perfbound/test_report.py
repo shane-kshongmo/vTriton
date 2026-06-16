@@ -105,6 +105,7 @@ class TestReportRoundTrip:
         assert d["kernel_name"] == "test_kernel"
         assert d["t_bound_us"] == pytest.approx(50.0)
         assert "attribution" in d
+        assert "attribution_us" in d
         assert "recommended_action" in d
 
     def test_to_json_parseable(self):

@@ -8,6 +8,9 @@ sys.path.insert(0, str(Path(__file__).parents[2]))
 from perfbound.calibration.constants import DType
 from perfbound.calibration.scripts.fit_constants import (
     extract_all_constants,
+    extract_scalar_constant,
+    extract_hbm_allcore_bandwidth,
+    extract_l0c_to_gm_bandwidth,
     read_msprof_csv,
     write_bandwidth_csv,
 )
@@ -73,6 +76,20 @@ def test_read_msprof_csv_accepts_current_task_duration_headers(tmp_path):
     assert rows[0].task_id == 11
 
 
+def test_read_msprof_csv_parses_fixpipe_time_and_block_dim(tmp_path):
+    csv_path = tmp_path / "op_summary.csv"
+    csv_path.write_text(
+        "Op Name,Task Duration(us),aic_fixpipe_time(us),aiv_scalar_time(us),Block Dim\n"
+        "mte_l0c_to_gm,100.0,40.0,12.0,20\n"
+    )
+
+    rows = read_msprof_csv(csv_path)
+
+    assert rows[0].fixpipe_time_us == 40.0
+    assert rows[0].aiv_scalar_time_us == 12.0
+    assert rows[0].block_dim == 20
+
+
 def test_extract_all_constants_from_synthetic_measured_csvs(tmp_path):
     for dtype, tflops in {"fp16": 280.0, "int8": 560.0, "bf16": 280.0}.items():
         _write_rows(tmp_path / f"cube_peak_{dtype}.csv", "cube", _cube_duration_for(tflops))
@@ -99,7 +116,11 @@ def test_extract_all_constants_from_synthetic_measured_csvs(tmp_path):
 
     db = extract_all_constants(tmp_path)
 
-    assert not db.validate_p0_constants()
+    violations = db.validate_p0_constants()
+    assert violations == [
+        "BW_l0c_to_gm_sustained: missing",
+        "BW_hbm_allcore_sustained: missing",
+    ]
     assert db.cube.throughput[DType.FP16] == pytest.approx(280.0)
     assert db.cube.throughput[DType.INT8] == pytest.approx(560.0)
     assert db.get_constant("P_vector_add_sustained").source == "cce_microbench"
@@ -145,7 +166,7 @@ def test_read_msprof_csv_defaults_for_missing_new_fields(tmp_path):
     assert rows[0].start_time_us == 0.0
 
 
-def test_mte_extraction_keeps_fastest_two_thirds(tmp_path):
+def test_mte_extraction_discards_chronological_warmup_third(tmp_path):
     csv_path = tmp_path / "mte_gm_to_ub.csv"
     fast_duration = _mte_duration_for(180.0)
     slow_duration = _mte_duration_for(90.0)
@@ -153,7 +174,7 @@ def test_mte_extraction_keeps_fastest_two_thirds(tmp_path):
         "op_name,op_type,duration(us),cycles,task_id,core_id\n"
         + "\n".join(
             f"mte_gm_to_ub,bench,{duration:.9f},{duration * 1850:.3f},{idx},0"
-            for idx, duration in enumerate([fast_duration] * 20 + [slow_duration] * 10)
+            for idx, duration in enumerate([slow_duration] * 15 + [fast_duration] * 30)
         )
         + "\n"
     )
@@ -163,4 +184,82 @@ def test_mte_extraction_keeps_fastest_two_thirds(tmp_path):
     constant = extract_mte_bandwidth(csv_path, "gm", "ub")
 
     assert constant.value == pytest.approx(180.0)
-    assert constant.n_runs == 20
+    assert constant.n_runs == 30
+    assert "warmup_samples=15" in constant.notes
+    assert "selection=chronological" in constant.notes
+
+
+def test_mte_extraction_does_not_select_fastest_samples(tmp_path):
+    csv_path = tmp_path / "mte_gm_to_ub.csv"
+    fast_duration = _mte_duration_for(180.0)
+    slow_duration = _mte_duration_for(90.0)
+    csv_path.write_text(
+        "op_name,op_type,duration(us),cycles,task_id,core_id\n"
+        + "\n".join(
+            f"mte_gm_to_ub,bench,{duration:.9f},{duration * 1850:.3f},{idx},0"
+            for idx, duration in enumerate(
+                [slow_duration] * 15 + [fast_duration] * 15 + [slow_duration] * 15
+            )
+        )
+        + "\n"
+    )
+
+    from perfbound.calibration.scripts.fit_constants import extract_mte_bandwidth
+
+    constant = extract_mte_bandwidth(csv_path, "gm", "ub")
+
+    assert constant.value == pytest.approx(135.0)
+    assert constant.n_runs == 30
+
+
+def test_l0c_extraction_uses_fixpipe_profiler_time(tmp_path):
+    csv_path = tmp_path / "mte_l0c_to_gm.csv"
+    fixpipe_duration = (128 * 128 * 4 * 1280) / (200.0 * 1000.0)
+    csv_path.write_text(
+        "Op Name,Task Duration(us),aic_fixpipe_time(us),Block Dim\n"
+        + "\n".join(
+            f"mte_l0c_to_gm,999.0,{fixpipe_duration:.9f},1"
+            for _ in range(45)
+        )
+        + "\n"
+    )
+
+    constant = extract_l0c_to_gm_bandwidth(csv_path)
+
+    assert constant.value == pytest.approx(200.0)
+    assert "profiler_metric=aic_fixpipe_time" in constant.notes
+
+
+def test_scalar_extraction_uses_aiv_scalar_profiler_time(tmp_path):
+    csv_path = tmp_path / "scalar_peak.csv"
+    scalar_duration = 2_000_000 / (0.6 * 1000.0)
+    csv_path.write_text(
+        "Op Name,Task Duration(us),aiv_scalar_time(us),Block Dim\n"
+        + "\n".join(
+            f"scalar_peak,999.0,{scalar_duration:.9f},1"
+            for _ in range(45)
+        )
+        + "\n"
+    )
+
+    constant = extract_scalar_constant(csv_path)
+
+    assert constant.value == pytest.approx(0.6)
+    assert constant.source == "cce_microbench"
+    assert constant.n_runs == 30
+    assert "profiler_metric=aiv_scalar_time" in constant.notes
+
+
+def test_allcore_extraction_rejects_wrong_block_dim(tmp_path):
+    csv_path = tmp_path / "mte_hbm_allcore.csv"
+    _write_rows(csv_path, "mte_hbm_allcore", _mte_duration_for(20.0), 45)
+    text = csv_path.read_text().replace(
+        "op_name,op_type,duration(us),cycles,task_id,core_id",
+        "op_name,op_type,duration(us),cycles,task_id,core_id,Block Dim",
+    )
+    csv_path.write_text(
+        "\n".join(f"{line},1" for line in text.splitlines()) + "\n"
+    )
+
+    with pytest.raises(ValueError, match="Block Dim 20"):
+        extract_hbm_allcore_bandwidth(csv_path)

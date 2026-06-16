@@ -67,7 +67,7 @@ class TestBinaryNaming:
                 recompile_remote(
                     remote_host="user@host",
                     remote_path="~/vTriton",
-                    hivm_path=Path("/tmp/edited.json"),
+                    hivm_path=Path("/tmp/edited.npuir.mlir"),
                     kernel_name="test_kernel",
                 )
             except Exception:
@@ -89,6 +89,20 @@ class TestBinaryNaming:
             assert "bishengir-compile-a5" not in script, (
                 f"Stale '-a5' suffix found in script: {script[:200]}"
             )
+
+    def test_recompile_rejects_des_json(self):
+        """DES JSON edits are analytical-only and must not reach bishengir."""
+        with patch("scripts.remote_bench.subprocess") as mock_sub:
+            mock_sub.run = MagicMock(return_value=_make_subprocess_result())
+            with pytest.raises(ValueError, match="not DES JSON"):
+                recompile_remote(
+                    remote_host="user@host",
+                    remote_path="~/vTriton",
+                    hivm_path=Path("/tmp/edited.json"),
+                    kernel_name="test_kernel",
+                )
+
+        mock_sub.run.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════

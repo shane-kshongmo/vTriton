@@ -114,48 +114,34 @@ def _install_compile_command_capture(dump_dir):
             return False
         return Path(str(cmd[0])).name in ("bishengir-compile", "npu-compile")
 
-    def _extract_mlir_module(text):
-        """Extract just the MLIR module from bishengir IR dump output."""
+    def _extract_mlir_modules(text):
+        """Extract ALL MLIR modules from bishengir IR dump output."""
         lines = text.splitlines()
-        start_idx = None
-        end_idx = None
-
-        for i, line in enumerate(lines):
-            if _NPUIR_START in line:
-                # Module starts after the next line (skip the header line itself).
-                start_idx = i + 1
-            elif start_idx is not None and _NPUIR_END in line:
-                end_idx = i
-                break
-
-        if start_idx is None:
-            # No header marker found; look for the first 'func.func' as fallback.
-            for i, line in enumerate(lines):
-                if line.strip().startswith("func.func"):
-                    start_idx = i
+        modules = []
+        i = 0
+        while i < len(lines):
+            if _NPUIR_START not in lines[i]:
+                i += 1
+                continue
+            i += 1  # skip header line
+            start = i
+            # scan for matching func.func block
+            while i < len(lines):
+                if _NPUIR_END in lines[i] and i > start + 1:
                     break
-
-        if start_idx is not None:
-            module_lines = lines[start_idx:end_idx]
-            if end_idx is None:
-                balanced = []
-                depth = 0
-                saw_body = False
-                for line in module_lines:
-                    balanced.append(line)
-                    depth += line.count("{")
-                    depth -= line.count("}")
-                    saw_body = saw_body or "{" in line
-                    if saw_body and depth <= 0:
-                        break
-                module_lines = balanced
-            # Strip leading/trailing blank lines.
-            while module_lines and not module_lines[0].strip():
-                module_lines.pop(0)
-            while module_lines and not module_lines[-1].strip():
-                module_lines.pop()
-            return "\n".join(module_lines)
-        return None
+                i += 1
+            block = lines[start:i]
+            # verify it contains func.func
+            has_func = any("func.func" in l for l in block)
+            if has_func:
+                # strip blank lines
+                while block and not block[0].strip():
+                    block.pop(0)
+                while block and not block[-1].strip():
+                    block.pop()
+                modules.append("\n".join(block))
+            i += 1
+        return modules
 
     def _find_bishengir_opt():
         found = shutil.which("bishengir-opt")
@@ -234,12 +220,13 @@ def _install_compile_command_capture(dump_dir):
             Path(tmp_bin.name).unlink(missing_ok=True)
             combined = (ret.stdout or b"") + b"\n" + (ret.stderr or b"")
             text = combined.decode("utf-8", errors="replace")
-            module_text = _extract_mlir_module(text)
-            if module_text and "func.func" in module_text:
+            modules = _extract_mlir_modules(text)
+            for module_text in modules:
                 _npuir_index[0] += 1
                 fname = f"kernel_{_npuir_index[0]:03d}.npuir.mlir"
                 module_text = _normalize_npuir(module_text)
                 (Path(dump_dir) / fname).write_text(module_text, encoding="utf-8")
+            if modules:
                 return True
         except Exception:
             # Dump failed; primary compilation already succeeded, so ignore.
@@ -282,8 +269,9 @@ def _install_compile_command_capture(dump_dir):
         # Always attempt secondary HIVM dump.
         # This runs whether primary succeeded or crashed — if the compiler
         # printed HIVM IR to stdout before crashing, we can still capture it.
-        if _dump_npuir_secondary(cmd):
-            _exit_success()
+        # Do NOT _exit_success() — mix kernels produce multiple
+        # compilation variants (AIC + AIV), and we want all of them.
+        _dump_npuir_secondary(cmd)
 
         # Secondary dump failed; propagate the original outcome.
         if compile_exception is not None:

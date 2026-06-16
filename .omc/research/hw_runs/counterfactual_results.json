@@ -1,6 +1,9 @@
 {
   "kernel_name": "vector_add",
   "gap_name": "work_scaling_2x",
+  "experiment_kind": "work_scaling_sanity_check",
+  "satisfies_us_sb_006": false,
+  "satisfies_us_sb_006_note": "Work-scaling sanity check only. Validates linear memory-work scaling, NOT removal of a seeded Gap-1/2/3/4 cause. The real US-SB-006 counterfactual is in counterfactual_gap_results.json.",
   "description": "Memory-bound work-scaling counterfactual: profile vector_add with N=16M (baseline) and N=32M (2x work). Model predicts linear scaling (2x time). Both kernels verified correct.",
   "t_before_us": 307.03,
   "t_after_us": 605.25,
