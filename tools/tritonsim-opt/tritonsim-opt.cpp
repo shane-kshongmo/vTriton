@@ -11,6 +11,7 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -41,6 +42,7 @@ int main(int argc, char **argv) {
   // Core MLIR dialects
   registry.insert<affine::AffineDialect>();
   registry.insert<arith::ArithDialect>();
+  registry.insert<bufferization::BufferizationDialect>();
   registry.insert<func::FuncDialect>();
   registry.insert<math::MathDialect>();
   registry.insert<memref::MemRefDialect>();

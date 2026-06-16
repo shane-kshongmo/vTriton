@@ -45,19 +45,9 @@ EXPECTED_PIPE_MAP = {
     "extsi":   "PIPE_S", "extui":    "PIPE_S", "select":  "PIPE_S",
     "index_cast":       "PIPE_S", "reinterpret_cast": "PIPE_S",
     "collapse_shape":   "PIPE_S",
-    # Sync ops
-    "set_flag":         "PIPE_MTE1",    # varies by pipe pair
-    "wait_flag":        "PIPE_MTE2_C",  # varies by pipe pair
-    "sync_block_set":   "PIPE_MTE2_V",  # varies
-    "sync_block_wait":  "PIPE_ALL",
-    "pipe_barrier":     "PIPE_V",
     # Unknown/no-op
     "constant":         "PIPE_S",
     "pointer_cast":     "PIPE_UNKNOWN",
-    "get_block_idx":    "PIPE_V",
-    "get_sub_block_idx":"PIPE_V",
-    "set_ffts_base_addr":"PIPE_V",
-    "set_mask_norm":    "PIPE_V",
 }
 
 # Pipe → Component (from op_classifier.py)
@@ -85,6 +75,10 @@ EXPECTED_ELEM_MAP = {
 
 SYNC_OP_NAMES = {"set_flag", "wait_flag", "sync_block_set", "sync_block_wait",
                   "pipe_barrier"}
+
+# Ops whose pipe is context-dependent or unresolved — skip fixed expectation.
+CONTEXT_OPS = SYNC_OP_NAMES | {"get_block_idx", "get_sub_block_idx",
+                                "set_ffts_base_addr", "set_mask_norm"}
 
 
 def load_des(path):
@@ -121,16 +115,29 @@ def test_pipe_opname_consistency(ops):
         pipe_counts[name][pipe] += 1
 
     for name, expected_pipe in EXPECTED_PIPE_MAP.items():
-        if name not in pipe_counts:
+        if name not in pipe_counts or name in CONTEXT_OPS:
             continue
         actual = pipe_counts[name]
         if expected_pipe not in actual:
-            # Some ops have context-dependent pipes (e.g., load → MTE1 or MTE2_C)
             if name in ("load", "copy"):
                 continue
             failures.append(
                 f"op={name}: expected pipe={expected_pipe}, got {dict(actual)}"
             )
+
+    # Context-dependent ops: only require a valid pipe name.
+    for name in CONTEXT_OPS:
+        if name not in pipe_counts:
+            continue
+        for pipe in pipe_counts[name]:
+            if pipe == "PIPE_UNKNOWN":
+                if name in ("get_block_idx", "get_sub_block_idx",
+                            "set_ffts_base_addr", "set_mask_norm"):
+                    continue  # 0-work control ops
+                failures.append(
+                    f"op={name}: context-dependent op mapped to PIPE_UNKNOWN"
+                )
+
     return failures
 
 

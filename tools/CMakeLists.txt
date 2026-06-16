@@ -32,6 +32,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tritonsim-opt/tritonsim-opt.cpp")
     MLIRFuncDialect
     MLIRSCFDialect
     MLIRArithDialect
+    MLIRBufferizationDialect
     MLIRMathDialect
     MLIRTensorDialect
     LLVMSupport

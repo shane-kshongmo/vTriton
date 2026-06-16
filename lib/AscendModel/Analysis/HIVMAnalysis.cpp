@@ -685,10 +685,15 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
   parsed.op.opName = getLeafOpName(op).str();
 
   if (auto pipeIface = llvm::dyn_cast<mlir::hivm::OpPipeInterface>(op)) {
-    if (pipeIface.isSinglePipeOp()) {
-      parsed.op.pipe = convertTypedPipe(pipeIface.getPipe());
-    } else if (!isTypedCubeOpName(parsed.op.opName)) {
-      parsed.op.pipe = convertTypedPipe(pipeIface.getOutPipe());
+    // VBrcOp::getPipe() internally calls getHIVMAddressSpace() which
+    // dereferences a memory-space attribute that may be absent on
+    // non-standard memref types in some MLIR variants.
+    if (parsed.op.opName != "vbrc") {
+      if (pipeIface.isSinglePipeOp()) {
+        parsed.op.pipe = convertTypedPipe(pipeIface.getPipe());
+      } else if (!isTypedCubeOpName(parsed.op.opName)) {
+        parsed.op.pipe = convertTypedPipe(pipeIface.getOutPipe());
+      }
     }
   }
   if (auto coreIface = llvm::dyn_cast<mlir::hivm::CoreTypeInterface>(op)) {
@@ -739,6 +744,8 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
   else if (parsed.op.opName == "convert_layout" ||
            parsed.op.opName == "pointer_cast")
     parsed.op.pipe = HIVMPipe::Unknown;
+  else if (parsed.op.opName == "vbrc")
+    parsed.op.pipe = HIVMPipe::Vector;
   else if (llvm::isa<mlir::hivm::MmadL1Op, mlir::hivm::MatmulOp,
                      mlir::hivm::MixMatmulOp, mlir::hivm::MixGroupMatmulOp>(op)) {
     parsed.op.pipe = HIVMPipe::Cube;
