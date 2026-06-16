@@ -52,9 +52,9 @@ static llvm::cl::opt<unsigned> removeGMTrips(
 void collectOpsByName(HivmOpsEditor &editor, const std::string &opName, 
                       std::vector<Operation *> &ops) {
   auto allOps = editor.listOps();
-  for (auto op : allOps) {
-    if (op->getName().getStringRef().contains(opName)) {
-      ops.push_back(op);
+  for (auto &info : allOps) {
+    if (info.op->getName().getStringRef().contains(opName)) {
+      ops.push_back(info.op);
     }
   }
 }
