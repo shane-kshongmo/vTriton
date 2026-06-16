@@ -57,6 +57,20 @@ def test_to_text_three_levels():
     assert "Reachability Hierarchy" in text
 
 
+def test_to_text_labels_author_value_as_residual_not_attainable_headroom():
+    br = _make_bound_result(t_bound_us=1000.0)
+    two_limit = TwoLimitResult(
+        kernel_name="test_kernel",
+        t_bound_hivm_us=800.0,
+        t_bound_dsl_us=1000.0,
+        t_measured_us=5000.0,
+    )
+    report = KernelReport.from_bound(br, two_limit=two_limit)
+    text = report.to_text()
+    assert "author residual" in text.lower()
+    assert "not proven attainable" in text.lower()
+
+
 def test_to_text_not_measured():
     """not yet measured when t_measured_us=None."""
     br = _make_bound_result()
@@ -132,6 +146,7 @@ def test_to_dict_reachability_key():
     d = report.to_dict()
     assert "reachability" in d
     assert d["reachability"]["t_bound_dsl_us"] == 1000.0
+    assert "author_residual_us" in d["reachability"]
 
 
 def test_to_dict_is_violation_flag():
@@ -196,29 +211,129 @@ def test_merge_validation_sets_provenance_fields():
     assert report.author_headroom_us == 500.0
 
 
-def test_merge_validation_from_csv_end_to_end():
-    """_merge_validation_from_csv populates provenance from fixture CSV."""
-    from pathlib import Path
-    from perfbound.combine.run_report import _merge_validation_from_csv
+# ── merge_profile tests ────────────────────────────────────────────────
 
-    fixture = Path(__file__).parent / "fixtures" / "op_summary_sample.csv"
 
-    br = _make_bound_result(kernel_name="target_kernel", t_bound_us=500.0)
+def _make_mock_profile(
+    diagnosis: str = "Insufficient Parallelism",
+    n_sync_ops: int = 402,
+    exposed_control_deficit_pts: float = 0.727,
+    exposed_control_deficit_us: float = 58216.0,
+    exposed_control_frac_measured: float = 0.846,
+    exposed_control_frac_model: float = 0.119,
+):
+    from perfbound.extract.op_classifier import Component
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        diagnosis=diagnosis,
+        dominant_component=Component.SCALAR,
+        n_sync_ops=n_sync_ops,
+        exposed_control_deficit_pts=exposed_control_deficit_pts,
+        exposed_control_deficit_us=exposed_control_deficit_us,
+        exposed_control_frac_measured=exposed_control_frac_measured,
+        exposed_control_frac_model=exposed_control_frac_model,
+    )
+
+
+def test_merge_profile_overrides_recommendation_when_headroom_large():
+    """merge_profile overrides recommended_action when author headroom >15% of T_measured."""
+    br = _make_bound_result(t_bound_us=46110.0)
     two_limit = TwoLimitResult(
-        kernel_name="target_kernel",
-        t_bound_hivm_us=400.0,
-        t_bound_dsl_us=500.0,
+        kernel_name="chunk_kda",
+        t_bound_hivm_us=40000.0,
+        t_bound_dsl_us=46110.0,
+        t_measured_us=80000.0,
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
-    assert report.t_measured_us is None
+    report.merge_profile(_make_mock_profile())
+    assert "402" in report.recommended_action
+    assert "barrier" in report.recommended_action.lower() or "sync" in report.recommended_action.lower()
 
-    _merge_validation_from_csv(report, fixture, "target_kernel", n_warmup=0)
 
-    # target_kernel has durations 1000, 1050, 5000 → median=1050 (no warmup)
-    assert report.t_measured_us == 1050.0
-    assert report.msprof_source == str(fixture)
-    assert report.n_invocations == 3
-    # AI_CORE dominates (7050 vs AI_CPU 800) → matches CUBE prediction
-    assert report.component_match is True
-    # author_headroom = 1050 - 500 = 550
-    assert report.author_headroom_us == 550.0
+def test_merge_profile_no_override_when_headroom_small():
+    """merge_profile does NOT override recommended_action when headroom ≤15%."""
+    br = _make_bound_result(t_bound_us=1000.0)
+    two_limit = TwoLimitResult(
+        kernel_name="test_kernel",
+        t_bound_hivm_us=850.0,
+        t_bound_dsl_us=1000.0,
+        t_measured_us=1050.0,  # headroom = 50 = 4.8% of T_measured
+    )
+    report = KernelReport.from_bound(br, two_limit=two_limit)
+    original_action = report.recommended_action
+    report.merge_profile(_make_mock_profile())
+    assert report.recommended_action == original_action
+
+
+def test_merge_profile_populates_fields():
+    """merge_profile sets all profile fields regardless of headroom threshold."""
+    br = _make_bound_result()
+    two_limit = TwoLimitResult(
+        kernel_name="test_kernel",
+        t_bound_hivm_us=800.0,
+        t_bound_dsl_us=1000.0,
+        t_measured_us=5000.0,
+    )
+    report = KernelReport.from_bound(br, two_limit=two_limit)
+    report.merge_profile(_make_mock_profile())
+    assert report.profile_diagnosis == "Insufficient Parallelism"
+    assert report.profile_dominant_component == "scalar"
+    assert report.n_sync_ops == 402
+    assert report.exposed_control_deficit_pts == pytest.approx(0.727)
+    assert report.headroom_status == "diagnostic_upper_bound"
+    assert report.recoverable_headroom_lower_us == 0.0
+    assert report.recoverable_headroom_upper_us == pytest.approx(4000.0)
+    assert report.recoverable_headroom_estimate_us is None
+    assert report.headroom_confidence == "low"
+
+
+def test_to_text_shows_profile_section():
+    """to_text includes Profile Diagnosis section after merge_profile."""
+    br = _make_bound_result()
+    two_limit = TwoLimitResult(
+        kernel_name="test_kernel",
+        t_bound_hivm_us=800.0,
+        t_bound_dsl_us=1000.0,
+        t_measured_us=5000.0,
+    )
+    report = KernelReport.from_bound(br, two_limit=two_limit)
+    report.merge_profile(_make_mock_profile())
+    text = report.to_text()
+    assert "Profile Diagnosis" in text
+    assert "Insufficient Parallelism" in text
+
+
+def test_to_dict_includes_profile_block():
+    """to_dict includes profile key after merge_profile, None before."""
+    br = _make_bound_result()
+    two_limit = TwoLimitResult(
+        kernel_name="test_kernel",
+        t_bound_hivm_us=800.0,
+        t_bound_dsl_us=1000.0,
+    )
+    report = KernelReport.from_bound(br, two_limit=two_limit)
+    assert report.to_dict().get("profile") is None
+    report.merge_profile(_make_mock_profile())
+    d = report.to_dict()
+    assert d["profile"]["diagnosis"] == "Insufficient Parallelism"
+    assert d["profile"]["n_sync_ops"] == 402
+    assert d["headroom_assessment"]["status"] == "unavailable"
+    assert d["headroom_assessment"]["point_estimate_us"] is None
+
+
+def test_merge_calibration_populates_provenance():
+    from perfbound.calibration.calib_loader import load_default_calib_db
+
+    report = KernelReport.from_bound(_make_bound_result())
+    report.merge_calibration(
+        load_default_calib_db(),
+        "perfbound/calibration/data/calib_910b3_v1.json",
+    )
+    data = report.to_dict()["calibration"]
+
+    assert data["version"] == "v1"
+    assert data["hardware_name"] == "Ascend 910B3"
+    assert data["measured_constant_count"] >= 10
+    assert data["max_measured_ci_rel"] < 0.05
+    assert any("scalar_overhead_factor" in item for item in data["warnings"])
+    assert any("Gap 4 startup latency" in item for item in data["fallbacks"])

@@ -117,7 +117,7 @@ def combine(
     serial: SerializationSplit,
     kernel_name: str = "unknown",
     extract: Optional[HIVMExtract] = None,
-    calibration: Optional[dict] = None,
+    calibration: Optional[CalibrationDB | dict] = None,
 ) -> BoundResult:
     """Combine Tier 1 + Tier 2 + serialization into a single conservative bound.
 
@@ -142,8 +142,8 @@ def combine(
         serial: Mandatory/avoidable serialization split.
         kernel_name: Label for the result.
         extract: Optional M3 HIVM extract for per-op Gap 1/2/4 computation.
-        calibration: Optional dict with keys "cube", "vector", "memory", "core"
-                     for rate-based gap quantification.  If omitted, gap
+        calibration: CalibrationDB, or a legacy dict with calibration sections,
+                     for rate-based gap quantification. If omitted, gap
                      estimates use proportional allocation from component times.
 
     Returns:
@@ -291,7 +291,14 @@ def bound_from_extract(
             clock_ghz=1.85,
         )
 
-    return combine(grid, comp, serial, kernel_name=kernel_name, extract=extract)
+    return combine(
+        grid,
+        comp,
+        serial,
+        kernel_name=kernel_name,
+        extract=extract,
+        calibration=calib_db,
+    )
 
 
 # ── Gap helpers (diagnostic only — not part of the bound) ──────────────────
@@ -376,7 +383,7 @@ def _compute_gap1(
 
 def _compute_gap2(
     extract: HIVMExtract,
-    calibration: Optional[dict] = None,
+    calibration: Optional[CalibrationDB | dict] = None,
 ) -> float:
     """Estimate Gap 2: coalescing / transfer-efficiency gap.
 
@@ -389,7 +396,10 @@ def _compute_gap2(
     if calibration is None:
         return 0.0
 
-    memory = calibration.get("memory")
+    if isinstance(calibration, CalibrationDB):
+        memory = calibration.memory
+    else:
+        memory = calibration.get("memory")
     if memory is None:
         return 0.0
 
@@ -433,7 +443,7 @@ def _compute_gap2(
 def _compute_gap4(
     extract: HIVMExtract,
     component: ComponentBound,
-    calibration: Optional[dict] = None,
+    calibration: Optional[CalibrationDB | dict] = None,
 ) -> float:
     """Estimate Gap 4: intra-unit execution inefficiency (per-instruction).
 
@@ -467,12 +477,22 @@ def _compute_gap4(
     MAX_REPEAT = 255
     PER_ITER_CYC = 1.0
     startup_cyc = {Component.VECTOR: 35.0, Component.CUBE: 20.0}
-    if calibration:
-        startups = calibration.get("startup_latencies") or {}
-        if "vector_startup_cycles" in startups:
-            startup_cyc[Component.VECTOR] = float(startups["vector_startup_cycles"])
-        if "cube_startup_cycles" in startups:
-            startup_cyc[Component.CUBE] = float(startups["cube_startup_cycles"])
+    if isinstance(calibration, CalibrationDB):
+        startups = calibration.startup_latency
+    elif calibration:
+        startups = (
+            calibration.get("startup_latency")
+            or calibration.get("startup_latencies")
+            or {}
+        )
+    else:
+        startups = {}
+    vector_startup = startups.get("vector", startups.get("vector_startup_cycles"))
+    cube_startup = startups.get("cube", startups.get("cube_startup_cycles"))
+    if vector_startup is not None:
+        startup_cyc[Component.VECTOR] = float(vector_startup)
+    if cube_startup is not None:
+        startup_cyc[Component.CUBE] = float(cube_startup)
 
     # SIMD lanes per 256-byte register iteration.  Matches the 128-wide SIMD
     # convention used elsewhere in the model (a 4-byte/lane assumption).
@@ -543,7 +563,7 @@ def _wire_gaps(
     attribution: Attribution,
     extract: HIVMExtract,
     component: ComponentBound,
-    calibration: Optional[dict] = None,
+    calibration: Optional[CalibrationDB | dict] = None,
 ) -> None:
     """Populate Gap 1/2/4 into an Attribution from extract data."""
     gap1 = _compute_gap1(extract, component)

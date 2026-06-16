@@ -35,6 +35,8 @@ This directory contains CCE microbenchmark kernels used to measure sustained har
 | `mte_ub_to_gm.cce` | UB→GM bandwidth (Vector store path) | 256 KiB transfer, 2048× repeat | BW[ub→gm] sustained |
 | `mte_gm_to_l1.cce` | GM→L1 bandwidth (Cube load path) | 256 KiB transfer, 2048× repeat | BW[gm→l1] sustained |
 | `mte_l1_to_l0a.cce` | L1→L0A bandwidth (Cube input staging) | 256 KiB staged through 16 KiB L0A tiles, 2048× repeat | BW[l1→l0a] sustained |
+| `mte_l0c_to_gm.cce` | L0C→GM FixPipe bandwidth (Cube output path) | 128×128 FP32 tile, 1280× FixPipe | BW[l0c→gm] sustained |
+| `mte_hbm_allcore.cce` | HBM bandwidth under 20-core contention | 20 disjoint 16 MiB regions, 1280× GM→L1 | Per-core BW under full load |
 
 ### Pipeline Serialization
 
@@ -76,12 +78,16 @@ Use the orchestration script from the parent directory:
 # From vTriton root
 cd perfbound/calibration
 
-# Set remote host and run
-export REMOTE_HOST=user@910b3-server
-bash scripts/run_benchmarks.sh ./bench_output/
+# Run the remote AscendC launcher and collect profiler CSVs
+python3 scripts/cce_remote_bench.py \
+  --host 910B3 \
+  --n-repeat 45 \
+  --output-dir bench_output
 ```
 
-This runs all 13 logical benchmarks with 45 raw repeats and `msprof`, producing one CSV per kernel plus per-K handoff CSVs in `./bench_output/`.
+This runs all 15 default calibration kernels with 45 raw repeats and `msprof`,
+producing one CSV per kernel plus per-K handoff CSVs in `./bench_output/`.
+Use `--msprof PATH` when multiple CANN profiler versions are installed.
 
 ### Expected Output Format
 Each kernel produces a CSV with msprof op_summary format:
@@ -91,7 +97,8 @@ Each kernel produces a CSV with msprof op_summary format:
 cube,matrix,59.87,110763,0,0
 ```
 
-The `duration(us)` column is read by `fit_constants.py` to compute sustained rates.
+`fit_constants.py` reads task duration for ordinary kernels and
+`aic_fixpipe_time(us)` for the L0C→GM benchmark.
 
 ---
 

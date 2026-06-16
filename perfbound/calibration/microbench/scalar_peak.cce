@@ -1,0 +1,19 @@
+/*
+ * Scalar Peak Microbenchmark
+ *
+ * Measures sustained *scalar* ALU throughput (PIPE_S) via a dependent
+ * fused-multiply-add chain on a single scalar register.  This is the direct
+ * measurement of P_scalar that US-SB-007 requires (vs the Vector/128
+ * derivation).  Two FLOP per loop iteration; kScalarRepeat iterations.
+ *
+ * Runs on AIV (the scalar unit is part of each vector core).  BlockDim=1.
+ */
+#include "vt_microbench_common.h"
+
+extern "C" __global__ __aicore__ void scalar_peak(GM_ADDR z)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    VTCalib::ScalarPeakKernel op;
+    op.Init(z);
+    op.Process();
+}

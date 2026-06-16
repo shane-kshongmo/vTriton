@@ -409,12 +409,10 @@ static int64_t getTypeByteWidth(mlir::Type type) {
 /// Returns "" if the type cannot be classified.
 static std::string getElementTypeName(mlir::Type type) {
   if (!type)
+
     return "";
-  auto shaped = llvm::dyn_cast<mlir::ShapedType>(type);
-  mlir::Type elemTy = shaped ? shaped.getElementType() : type;
-  if (!elemTy)
-    return "";
-  if (auto floatTy = llvm::dyn_cast<mlir::FloatType>(elemTy)) {
+  // Check scalar types first — these use TypeID, never touch ShapedType
+  if (auto floatTy = llvm::dyn_cast<mlir::FloatType>(type)) {
     if (floatTy.isBF16())
       return "bf16";
     switch (floatTy.getWidth()) {
@@ -424,14 +422,42 @@ static std::string getElementTypeName(mlir::Type type) {
     default: return "";
     }
   }
-  if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(elemTy))
-    return ("i" + llvm::Twine(intTy.getWidth())).str();
+  if (auto intTy = llvm::dyn_cast<mlir::IntegerType>(type)) {
+    std::string s;
+    llvm::raw_string_ostream os(s);
+    os << "i" << intTy.getWidth();
+    return s;
+  }
+  if (llvm::isa<mlir::IndexType>(type))
+    return "index";
+  // Unwrap shaped types via concrete MemRefType/TensorType (safe TypeID path)
+  // Avoid dyn_cast<ShapedType> which triggers interface dispatch and may
+  // crash on types from unregistered dialects (LLVM 19 bug).
+  if (auto memref = llvm::dyn_cast<mlir::MemRefType>(type))
+    return getElementTypeName(memref.getElementType());
+  if (auto tensor = llvm::dyn_cast<mlir::TensorType>(type))
+    return getElementTypeName(tensor.getElementType());
+  auto shaped = llvm::dyn_cast<mlir::ShapedType>(type);
+  if (shaped)
+    return getElementTypeName(shaped.getElementType());
   return "";
 }
 
 static int64_t getShapedTypeElementCount(mlir::Type type) {
-  if (!type)
-    return 0;
+
+  // Use concrete type casts (TypeID-based) before ShapedType interface
+  if (auto memref = llvm::dyn_cast<mlir::MemRefType>(type)) {
+    if (!memref.hasStaticShape()) return 0;
+    int64_t count = 1;
+    for (int64_t dim : memref.getShape()) count *= dim;
+    return count;
+  }
+  if (auto tensor = llvm::dyn_cast<mlir::TensorType>(type)) {
+    if (!tensor.hasStaticShape()) return 0;
+    int64_t count = 1;
+    for (int64_t dim : tensor.getShape()) count *= dim;
+    return count;
+  }
   auto shaped = llvm::dyn_cast<mlir::ShapedType>(type);
   if (!shaped || !shaped.hasStaticShape())
     return 0;
@@ -442,8 +468,18 @@ static int64_t getShapedTypeElementCount(mlir::Type type) {
 }
 
 static int64_t getShapedTypeBytes(mlir::Type type) {
-  if (!type)
-    return 0;
+
+  // Use concrete type casts (TypeID-based) before ShapedType interface
+  if (auto memref = llvm::dyn_cast<mlir::MemRefType>(type)) {
+    int64_t count = getShapedTypeElementCount(type);
+    if (count <= 0) return 0;
+    return count * getTypeByteWidth(memref.getElementType());
+  }
+  if (auto tensor = llvm::dyn_cast<mlir::TensorType>(type)) {
+    int64_t count = getShapedTypeElementCount(type);
+    if (count <= 0) return 0;
+    return count * getTypeByteWidth(tensor.getElementType());
+  }
   auto shaped = llvm::dyn_cast<mlir::ShapedType>(type);
   if (!shaped)
     return 0;
@@ -622,19 +658,16 @@ static std::string stringifyTypedCore(std::optional<mlir::hivm::TCoreType> core)
   return mlir::hivm::stringifyTCoreType(*core).str();
 }
 
-static std::string stringifyTypedEvent(std::optional<mlir::hivm::EventAttr> staticId,
-                                       mlir::Value dynamicId) {
-  if (staticId)
-    return mlir::hivm::stringifyEVENT(staticId->getEvent()).str();
-  (void)dynamicId;
+
+static std::string stringifyTypedEvent(std::optional<mlir::hivm::EventAttr> staticEvent) {
+  if (staticEvent)
+    return ("event_" + mlir::hivm::stringifyEVENT(staticEvent->getEvent()).str());
   return "";
 }
 
-static std::string stringifyTypedFlag(std::optional<mlir::IntegerAttr> staticId,
-                                      mlir::Value dynamicId) {
-  if (staticId)
-    return std::to_string(staticId->getInt());
-  (void)dynamicId;
+static std::string stringifyTypedFlag(std::optional<mlir::IntegerAttr> staticFlag) {
+  if (staticFlag)
+    return ("flag_" + std::to_string(staticFlag->getInt()));
   return "";
 }
 
@@ -728,7 +761,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     parsed.senderEvent = stringifyTypedPipe(setFlag.getSetPipe().getPipe());
     parsed.receiverEvent = stringifyTypedPipe(setFlag.getWaitPipe().getPipe());
     parsed.eventId =
-        stringifyTypedEvent(setFlag.getStaticEventId(), setFlag.getDynamicEventId());
+        stringifyTypedEvent(setFlag.getStaticEventId());
     parsed.syncIdValue = setFlag.getDynamicEventId();
     parsed.senderPipe = disambiguateMTE2Pipe(
         convertTypedPipe(setFlag.getSetPipe().getPipe()),
@@ -745,8 +778,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     if (!waitFlag.getSetPipe() || !waitFlag.getWaitPipe()) return true;
     parsed.senderEvent = stringifyTypedPipe(waitFlag.getSetPipe().getPipe());
     parsed.receiverEvent = stringifyTypedPipe(waitFlag.getWaitPipe().getPipe());
-    parsed.eventId = stringifyTypedEvent(waitFlag.getStaticEventId(),
-                                         waitFlag.getDynamicEventId());
+    parsed.eventId = stringifyTypedEvent(waitFlag.getStaticEventId());
     parsed.syncIdValue = waitFlag.getDynamicEventId();
     parsed.senderPipe = disambiguateMTE2Pipe(
         convertTypedPipe(waitFlag.getSetPipe().getPipe()),
@@ -774,7 +806,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
         convertTypedPipe(syncSet.getPipe().getPipe()), parsed.senderPipe,
         parsed.op.coreType);
     parsed.eventId =
-        stringifyTypedFlag(syncSet.getStaticFlagId(), syncSet.getDynamicFlagId());
+        stringifyTypedFlag(syncSet.getStaticFlagId());
     parsed.syncIdValue = syncSet.getDynamicFlagId();
     parsed.op.pipe = parsed.senderPipe;
     return true;
@@ -802,7 +834,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
         convertTypedPipe(syncWait.getPipe().getPipe()), parsed.senderPipe,
         parsed.op.coreType);
     parsed.eventId =
-        stringifyTypedFlag(syncWait.getStaticFlagId(), syncWait.getDynamicFlagId());
+        stringifyTypedFlag(syncWait.getStaticFlagId());
     parsed.syncIdValue = syncWait.getDynamicFlagId();
     parsed.op.pipe = HIVMPipe::All;
     parsed.barrierPipes.push_back(HIVMPipe::All);

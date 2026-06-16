@@ -75,7 +75,11 @@ def raise_repeat(hivm_path: Path, factor: int = 2) -> Path:
     data = _load_hivm_data(hivm_path)
     ops = data["operations"]
 
-    compute_pipes = {"Cube", "Vector", "Scalar"}
+    # Accept both the synthetic test pipe names ("Cube"/"Vector"/"Scalar") and
+    # the raw HIVM pipe tokens emitted into real des.json by the C++ emitter
+    # ("PIPE_M" = cube/matrix, "PIPE_V" = vector, "PIPE_S" = scalar).  Matching
+    # only the synthetic names silently no-op'd on every real kernel.
+    compute_pipes = {"Cube", "Vector", "Scalar", "PIPE_M", "PIPE_V", "PIPE_S"}
 
     matched = 0
     for op in ops:

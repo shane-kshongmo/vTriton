@@ -30,16 +30,20 @@ class Precision(str, Enum):
 
 
 # HIVM pipe → Component mapping
+# Covers both raw HIVM pipe names (typed ingestion) and C++ stringifyPipe()
+# output names (emitDESGraph JSON path).  See HIVMAnalysis::stringifyPipe().
 PIPE_TO_COMPONENT = {
+    # Raw HIVM names (typed ingestion via BiShengIR)
     "Cube": Component.CUBE,
-    "CubeMTE2": Component.MTE_GM,     # GM → L1 for cube path
-    "MTE1": Component.MTE_L1,         # L1 → L0A/B
-    "FixPipe": Component.MTE_UB,      # L0C → GM/UB
+    "CubeMTE2": Component.MTE_GM,
+    "MTE1": Component.MTE_L1,
+    "FixPipe": Component.MTE_UB,
     "Vector": Component.VECTOR,
-    "VectorMTE2": Component.MTE_GM,   # GM → UB for vector path
-    "MTE3": Component.MTE_UB,         # UB → GM
+    "VectorMTE2": Component.MTE_GM,
+    "MTE3": Component.MTE_UB,
     "Scalar": Component.SCALAR,
     # HIVMAnalysis.cpp internal pipe names (PIPE_* enum)
+    "PIPE_CUBE": Component.CUBE,
     "PIPE_M": Component.CUBE,         # Matrix (Cube)
     "PIPE_V": Component.VECTOR,
     "PIPE_S": Component.SCALAR,

@@ -298,6 +298,26 @@ def fetch_output_from_remote(
     return local_output
 
 
+def _validate_bishengir_input(hivm_path: Path) -> None:
+    """Reject analytical DES JSON before invoking bishengir-compile.
+
+    The counterfactual model can mutate DES JSON for analysis, but
+    bishengir-compile consumes compiler IR.  Failing here prevents a remote run
+    from pretending an analytical JSON edit is hardware-reachable.
+    """
+    name = hivm_path.name
+    if name.endswith(".json"):
+        raise ValueError(
+            "bishengir-compile accepts MLIR/NPUIR, not DES JSON; "
+            f"got {hivm_path}"
+        )
+    if not name.endswith(".mlir"):
+        raise ValueError(
+            "edited compiler input must be an MLIR/NPUIR file ending in .mlir; "
+            f"got {hivm_path}"
+        )
+
+
 def recompile_remote(
     remote_host: str,
     remote_path: str,
@@ -323,6 +343,8 @@ def recompile_remote(
     Raises:
         RuntimeError: If compilation fails on remote.
     """
+    _validate_bishengir_input(hivm_path)
+
     remote_hivm = f"{remote_path}/tmp_edits/{hivm_path.name}"
     remote_bin = f"{remote_path}/build/bin/{kernel_name}"
 
@@ -375,7 +397,7 @@ def run_remote_bench(
         kernel_script: Path to kernel run script (.py for Triton kernels).
         output_csv: Local path for output CSV (auto-generated if None).
         remote_path: Remote repo path.
-        hivm_in: Path to edited HIVM file (triggers recompile before profiling).
+        hivm_in: Path to edited NPUIR/MLIR file (triggers recompile before profiling).
         output_npy: Local path for kernel output .npy (auto-generated if None).
 
     Returns:
@@ -393,7 +415,7 @@ def run_remote_bench(
     # Sync local → remote
     sync_to_remote(local_repo, remote_host, remote_path)
 
-    # Recompile if HIVM provided
+    # Recompile if compiler-facing IR is provided.
     if hivm_in is not None:
         recompile_remote(
             remote_host, remote_path, hivm_in, kernel_name
@@ -440,7 +462,7 @@ def _cli():
     parser.add_argument("--output", required=True, help="Local output CSV path")
     parser.add_argument("--script", help="Kernel run script (optional; .py for Triton kernels)")
     parser.add_argument("--remote-path", default=None, help="Remote repo path (default: ~/vTriton)")
-    parser.add_argument("--hivm-in", help="Edited HIVM file to recompile on remote (optional)")
+    parser.add_argument("--hivm-in", help="Edited NPUIR/MLIR file to recompile on remote (optional)")
     parser.add_argument("--output-npy", help="Local output .npy path for kernel output (optional)")
 
     args = parser.parse_args()

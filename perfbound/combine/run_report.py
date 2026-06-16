@@ -26,7 +26,11 @@ from typing import Optional
 
 from ..extract.hivm_extractor import extract_hivm, HIVMExtract
 from ..extract.dsl_extractor import GridInfo
-from ..calibration.calib_loader import load_default_calib_db
+from ..calibration.calib_loader import (
+    DEFAULT_CALIB_PATH,
+    load_calibration,
+    load_default_calib_db,
+)
 from ..calibration.constants import CalibrationDB
 from ..model.bounds import compute_bounds
 from .bound_combiner import combine, BoundResult
@@ -71,6 +75,9 @@ def report_from_desgraph(
     load_balance: float = 1.0,
     kernel_name: str = "unknown",
     t_measured_us: float | None = None,
+    op_summary_csv: "str | Path | None" = None,
+    op_name_filter: "str | None" = None,
+    calibration_source: "str | Path | None" = None,
 ) -> KernelReport:
     """Build a full A.5 report from an existing DES graph JSON.
 
@@ -88,6 +95,9 @@ def report_from_desgraph(
     """
     if calib_db is None:
         calib_db = load_default_calib_db()
+        calibration_source = calibration_source or DEFAULT_CALIB_PATH
+    elif calibration_source is None:
+        calibration_source = "provided CalibrationDB"
 
     extract = extract_hivm(des_json)
     grid_info = _build_grid_info(grid_dims, n_cores, occupancy, load_balance)
@@ -100,7 +110,7 @@ def report_from_desgraph(
     )
     result = combine(
         pieces.grid, pieces.component, pieces.serial,
-        kernel_name=kernel_name, extract=extract,
+        kernel_name=kernel_name, extract=extract, calibration=calib_db,
     )
 
     # Compute two-limit
@@ -115,7 +125,17 @@ def report_from_desgraph(
         total_programs=total_programs,
     )
 
-    return KernelReport.from_bound(result, two_limit=two_limit)
+    report = KernelReport.from_bound(result, two_limit=two_limit)
+    report.merge_calibration(calib_db, str(calibration_source))
+
+    if op_summary_csv is not None:
+        _apply_csv_analysis(
+            report, result, op_summary_csv,
+            op_name_filter or kernel_name,
+            des_json, calib_db,
+        )
+
+    return report
 
 
 def report_from_npuir(
@@ -130,6 +150,9 @@ def report_from_npuir(
     tritonsim_hivm: str = "tritonsim-hivm",
     python_path: str = sys.executable,
     t_measured_us: float | None = None,
+    op_summary_csv: "str | Path | None" = None,
+    op_name_filter: "str | None" = None,
+    calibration_source: "str | Path | None" = None,
 ) -> KernelReport:
     """Build a full A.5 report by first running tritonsim-hivm on an NPU IR file.
 
@@ -186,6 +209,9 @@ def report_from_npuir(
         load_balance=load_balance,
         kernel_name=kernel_name,
         t_measured_us=t_measured_us,
+        op_summary_csv=op_summary_csv,
+        op_name_filter=op_name_filter,
+        calibration_source=calibration_source,
     )
 
 
@@ -222,13 +248,18 @@ def _cli():
                         help="Path to msprof op_summary CSV (extracts timing + component match)")
     parser.add_argument("--measured-op-name", default=None,
                         help="Op name filter for measured CSV (default: --kernel-name)")
+    parser.add_argument(
+        "--calibration",
+        default=str(DEFAULT_CALIB_PATH),
+        help="Path to measured calibration JSON",
+    )
     parser.add_argument("--output-json",
                         help="Write report JSON to this path")
 
     args = parser.parse_args()
     grid_dims = _parse_grid(args.grid)
 
-    calib_db = load_default_calib_db()
+    calib_db = load_calibration(args.calibration)
 
     if args.desgraph:
         report = report_from_desgraph(
@@ -240,6 +271,9 @@ def _cli():
             load_balance=args.load_balance,
             kernel_name=args.kernel_name,
             t_measured_us=args.measured_us,
+            op_summary_csv=args.measured_csv,
+            op_name_filter=args.measured_op_name,
+            calibration_source=args.calibration,
         )
     else:
         report = report_from_npuir(
@@ -254,12 +288,10 @@ def _cli():
             tritonsim_hivm=args.tritonsim_hivm,
             python_path=args.python,
             t_measured_us=args.measured_us,
+            op_summary_csv=args.measured_csv,
+            op_name_filter=args.measured_op_name,
+            calibration_source=args.calibration,
         )
-
-    # Bridge: if --measured-csv provided, run full validation (not just bare float)
-    if args.measured_csv:
-        op_name = args.measured_op_name or args.kernel_name
-        _merge_validation_from_csv(report, args.measured_csv, op_name)
 
     print(report.to_text())
     if args.output_json:
@@ -267,63 +299,51 @@ def _cli():
         print(f"\nJSON written to {args.output_json}")
 
 
-# ── Validation bridge ──────────────────────────────────────────────────
-
-def _merge_validation_from_csv(
+def _apply_csv_analysis(
     report: KernelReport,
-    csv_path: str | Path,
-    profiler_op_name: str,
+    bound_result: BoundResult,
+    csv_path: "str | Path",
+    op_name: str,
+    des_json: "str | Path",
+    calib_db: Optional[CalibrationDB],
     n_warmup: int = 1,
 ) -> None:
-    """Run validate_from_csv and merge provenance into report in-place.
-
-    Bridges the gap between the validation harness (which computes timing,
-    component match, and provenance) and KernelReport (which renders them).
-    Without this bridge, the CLI path only passes a bare float (--measured-us)
-    and the source/invocations/component-match fields never surface.
-
-    Args:
-        report: KernelReport to mutate in-place.
-        csv_path: Path to msprof op_summary CSV.
-        profiler_op_name: Op name to match in CSV.
-        n_warmup: Invocations to discard as warmup.
-    """
+    """Run validation + profile utilization from op_summary CSV; merge into report."""
+    import sys as _sys
     from ..validate.harness import ValidationCase, validate_from_csv, ValidationStatus
+    from ..analyze.profile_utilization import run_from_files as _profile
 
-    # Build a minimal BoundResult for ValidationCase
-    from .bound_combiner import BoundResult as _BR, BindingTier as _BT, Attribution as _Attr
-    from ..extract.op_classifier import Component as _Comp
-
-    bound_result = _BR(
-        kernel_name=report.kernel_name,
-        t_bound_us=report.t_bound_us,
-        t_grid_floor_us=report.t_grid_floor_us,
-        t_core_floor_us=report.t_core_floor_us,
-        t_serial_irreducible_us=report.t_serial_irreducible_us,
-        binding_tier=_BT(report.binding_tier),
-        binding_component=_Comp(report.binding_component) if report.binding_component else None,
-        attribution=_Attr(),
-    )
     case = ValidationCase(
         kernel_name=report.kernel_name,
-        profiler_op_name=profiler_op_name,
+        profiler_op_name=op_name,
         bound_result=bound_result,
         csv_path=Path(csv_path),
         n_warmup=n_warmup,
     )
     vr = validate_from_csv(case)
+    if vr.status not in (ValidationStatus.PASS, ValidationStatus.BOUND_VIOLATION):
+        print(f"Warning: validation failed ({vr.notes})", file=_sys.stderr)
+        return
 
-    if vr.status in (ValidationStatus.PASS, ValidationStatus.BOUND_VIOLATION):
-        report.merge_validation(
-            t_measured_us=vr.t_measured_us,
-            msprof_source=vr.msprof_source,
-            n_invocations=vr.n_invocations,
-            component_match=vr.component_match,
+    report.merge_validation(
+        t_measured_us=vr.t_measured_us,
+        msprof_source=vr.msprof_source,
+        n_invocations=vr.n_invocations,
+        component_match=vr.component_match,
+    )
+
+    try:
+        profile_report = _profile(
+            op_summary_path=csv_path,
+            desgraph_path=des_json,
+            calibration_path=None,
+            calibration_db=calib_db,
+            kernel_name=op_name if op_name != report.kernel_name else None,
+            t_bound_us=report.t_bound_dsl_us,
         )
-    else:
-        # EXECUTION_ERROR: still set t_measured_us=None to signal failure
-        import sys
-        print(f"Warning: validation failed ({vr.notes})", file=sys.stderr)
+        report.merge_profile(profile_report)
+    except Exception as exc:
+        print(f"Warning: profile utilization skipped: {exc}", file=_sys.stderr)
 
 
 if __name__ == "__main__":

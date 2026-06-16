@@ -57,19 +57,37 @@
       "fixture": "tests/perfbound/fixtures/layernorm_op_summary_910b3.csv",
       "harness": "test/layernorm_bench.py",
       "notes": "LayerNorm fwd (8192x2048 fp32). Vector-scalar bound: aiv_scalar_ratio=0.52, aiv_vec_ratio=0.18. HBM floor = 2*ROWS*COLS*4 / 1.525 TB/s. Correctness verified: output finite, non-trivial variance per row."
+    },
+    {
+      "kernel": "rmsnorm_8kx2k",
+      "bound_kind": "analytic_hbm_floor",
+      "t_bound_us": 88.01,
+      "t_measured_us": 702.86,
+      "status": "PASS",
+      "tightness": 7.99,
+      "component_match": false,
+      "fixture": "tests/perfbound/fixtures/rmsnorm_op_summary_910b3.csv",
+      "harness": "test/rmsnorm_bench.py",
+      "notes": "RMSNorm fwd (8192x2048 fp32), 5th DISTINCT kernel added 2026-06-11. Mean-of-squares reduction + rsqrt scale + weight (lighter reduction than layernorm; no mean subtraction). AI_VECTOR_CORE. T_measured = median(post-warmup) = 702.86 us (11 msprof invocations). HBM floor = 2*ROWS*COLS*4 / 1.525 TB/s = 88.01 us. Correctness verified vs torch reference: max_abs_err=1.9e-6, rel=1.1e-7, finite."
     }
   ],
   "soundness_rate": 1.0,
-  "n_kernels": 5,
+  "n_kernels": 6,
+  "n_distinct_kernels": 5,
   "target_n": 5,
   "remaining": [],
+  "satisfies_us_sb_005": true,
+  "us_sb_005_note": "CLOSED 2026-06-11. Six entries spanning FIVE distinct kernels (chunk_kda, vector_add, softmax, layernorm, rmsnorm); rmsnorm is the new 5th distinct kernel, profiled on 910B3 with correctness verified vs torch (rel err 1.1e-7). vector_add still appears as two shape variants (16M/32M) but is no longer the only source of distinctness. soundness_rate=1.0 across all six (no BOUND_VIOLATION). Tier-2 DES coverage remains chunk_kda-only; the four vector kernels use the conservative analytic HBM floor (a sound lower bound), documented as the looser tier.",
   "counterfactual": {
     "description": "US-SB-006: work-scaling counterfactual (vector_add N=16M vs N=32M)",
     "scaling_ratio": 1.9713,
     "predicted_ratio": 2.0,
     "quantification_error": 0.0295,
     "is_valid": true,
-    "evidence": ".omc/research/hw_runs/counterfactual_results.json"
+    "satisfies_us_sb_006": false,
+    "evidence": ".omc/research/hw_runs/counterfactual_results.json",
+    "accepted_gap_evidence": ".omc/research/hw_runs/counterfactual_gap_results.json",
+    "note": "Valid work-scaling sanity check only; accepted US-SB-006 evidence requires a compiler-reachable seeded Gap-1/2/3/4 intervention on a semantically equivalent kernel."
   },
   "two_limit": {
     "description": "US-SB-008: two-limit compiler-headroom for chunk_kda",
@@ -79,14 +97,20 @@
     "compiler_headroom_us": 44.99,
     "author_headroom_us": 58216.09,
     "gap_interpretation": "Gap-1/Gap-3 only (resolved by spec author 2026-06-11)",
-    "finding": "Compiler headroom is negligible (0.04% of measured). Author headroom dominates at 55.8%. bishengir's lowering is near-optimal for chunk_kda."
+    "finding": "Compiler headroom is negligible (0.04% of measured). Author headroom dominates at 55.8%. bishengir's lowering is near-optimal for chunk_kda.",
+    "satisfies_us_sb_008": false,
+    "us_sb_008_note": "Analytical-only feasibility result. chunk_kda's predicted compiler headroom (44.99us) is below measurement noise, so no equivalent hand-optimized HIVM was compiled/profiled to validate reachability. US-SB-008 requires hardware validation on a kernel with measurable compiler headroom."
   },
   "scalar_calibration": {
-    "description": "US-SB-007: derived scalar throughput from measured vector + SIMD width",
-    "p_scalar_gflops": 0.1182,
-    "p_vector_gflops": 15.133,
-    "ratio": "vector/128",
-    "methodology": "Derived: scalar ALU processes 1 elem/cycle vs vector SIMD 128/cycle; per-instruction overhead identical",
-    "source": "derived_from_vector_microbench"
+    "description": "US-SB-007: direct scalar throughput measurement from scalar_peak CCE microbench",
+    "p_scalar_gflops": 0.5998078861614121,
+    "ci_95_gflops": 1.9171769977960938e-05,
+    "n_runs": 30,
+    "cv": 8.9e-05,
+    "profiler_metric": "aiv_scalar_time(us)",
+    "source": "cce_microbench",
+    "raw_csv": "perfbound/calibration/bench_output/scalar_peak.csv",
+    "satisfies_us_sb_007": true,
+    "us_sb_007_note": "Measured on 910B3 with scalar_peak dependent FMA chain and explicit CANN 8.2 msprof; calib_910b3_v1.json sets vector.scalar_throughput_measured=true."
   }
 }
