@@ -35,6 +35,19 @@ Five modules, built in dependency order: Calibration → DSL extractor →
 HIVM extractor → the two analytical models → the combiner. A sixth module
 (validation harness) is built alongside but is not part of the model.
 
+**Stage wiring contract.** A.0 defines the interfaces and dataflow; A.1
+populates the measured `CalibrationDB`. The promoted A.1 database is a required
+input to A.4, and the same in-memory database must continue through A.5 gap
+quantification, A.6 profile-utilization analysis, and A.7 two-limit
+recomputation. A report is incomplete if it computes a bound with measured
+constants but silently falls back to defaults for attribution or profiling.
+Every report must record the calibration path, version, hardware target, and
+measurement-quality summary.
+
+A.0 therefore contributes the calibration schema, benchmark protocol,
+provenance requirements, and consumer interfaces to A.1. It does not provide
+hardware-rate values itself; only A.1 measurements may populate those fields.
+
 ## A.1 Module 1 — Calibration Database (Weeks 1–2)
 
 The only place measurement enters the model. Produces a versioned JSON of
@@ -189,6 +202,12 @@ T_bound_DSL  = bound over HIVM that bishengir actually emits from Triton
 gap_attribution = (T_bound_DSL − T_bound_HIVM) attributes headroom to the
                   compiler vs (T_measured − T_bound_DSL) to the kernel author
 ```
+
+`T_measured − T_bound_DSL` is an **author residual**, not automatically an
+attainable optimization estimate. Until a correctness-verified counterfactual
+is measured, report any mechanism-specific headroom only as a diagnostic range
+or upper bound with explicit confidence and method. Do not present the full
+residual as a predicted speedup.
 
 ## A.8 Timeline
 

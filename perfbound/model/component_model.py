@@ -40,6 +40,12 @@ _COMPONENT_MTE_PATHS: dict[Component, tuple[str, str]] = {
     Component.MTE_UB: ("ub", "gm"),       # UB→GM (covers both FixPipe and MTE3)
 }
 
+# FixPipe is the Cube-side L0C→GM drain path.  When BW_l0c_to_gm_sustained
+# is measured, it provides a more accurate bandwidth for Cube output transfers
+# than the generic UB→GM (MTE3) path.  The component model falls back to
+# UB→GM when L0C→GM is not calibrated.
+_FIXPIPE_MTE_PATH = ("l0c", "gm")
+
 # Precision string → DType (for throughput lookup)
 def _prec_to_dtype(prec: Precision) -> DType:
     """Map extract Precision enum to calibration DType."""
@@ -95,8 +101,20 @@ def _get_vector_throughput_ops_per_us(
 def _get_mte_throughput_bytes_per_us(
     component: Component, memory: MemHierarchy, op: Optional[OpRecord] = None,
 ) -> float:
-    """Sustained MTE bandwidth in bytes per microsecond."""
-    path = _COMPONENT_MTE_PATHS.get(component)
+    """Sustained MTE bandwidth in bytes per microsecond.
+
+    Uses the operation's concrete transfer path when available.  FixPipe is
+    identified by pipe/source because some DES emitters report its destination
+    as UB even though the hardware drain being calibrated is L0C→GM.
+    """
+    path: tuple[str, str] | None = None
+    if op is not None:
+        if op.pipe.lower() == "fixpipe" or op.src_space == "l0c":
+            path = _FIXPIPE_MTE_PATH
+        elif op.src_space and op.dst_space:
+            path = (op.src_space, op.dst_space)
+    if path is None:
+        path = _COMPONENT_MTE_PATHS.get(component)
     if path is None:
         return 0.0
 
@@ -109,7 +127,14 @@ def _get_mte_throughput_bytes_per_us(
         bw, _ = memory.lookup_bw(src, dst, pkt_size=pkt_size)
         return bw  # already in B/us
     except KeyError:
-        return 0.0
+        fallback = _COMPONENT_MTE_PATHS.get(component)
+        if fallback is None or fallback == path:
+            return 0.0
+        try:
+            bw, _ = memory.lookup_bw(*fallback, pkt_size=pkt_size)
+            return bw
+        except KeyError:
+            return 0.0
 
 
 def _get_scalar_throughput_ops_per_us(prec: Precision, vector: VectorConfig) -> float:
@@ -199,6 +224,7 @@ def compute_component_floor(
     # compute_work[(comp, prec)] = total ops (or bytes for MTE)
     compute_work: dict[tuple[Component, Optional[Precision]], float] = {}
     mte_bytes: dict[Component, float] = {}
+    mte_operations: dict[Component, list[tuple[OpRecord, float]]] = {}
 
     for op in extract.operations:
         comp = op.component
@@ -217,6 +243,7 @@ def compute_component_floor(
             # Work in bytes
             work = float(op.bytes_transferred) * float(op.loop_multiplier)
             mte_bytes[comp] = mte_bytes.get(comp, 0.0) + work
+            mte_operations.setdefault(comp, []).append((op, work))
             # Also record per-precision for type-level tracking
             key = (comp, prec)
             compute_work[key] = compute_work.get(key, 0.0) + work
@@ -306,17 +333,29 @@ def compute_component_floor(
                 t_c = 0.0
 
         elif comp in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB):
-            # MTE: single BW per path, harmonic reduces to that BW
-            bw = _get_mte_throughput_bytes_per_us(comp, memory)
             total_bytes[comp_str] = mte_bytes.get(comp, 0.0)
-            i_c = bw
-            t_c = total_bytes[comp_str] / bw if bw > 0 else float("inf")
-            for prec, w in precision_work:
+            t_c = 0.0
+            path_work: dict[tuple[Optional[Precision], float], float] = {}
+            for op, work in mte_operations.get(comp, []):
+                bw = _get_mte_throughput_bytes_per_us(comp, memory, op)
+                if bw <= 0:
+                    t_c = float("inf")
+                    break
+                t_c += work / bw
+                path_work[(op.precision, bw)] = (
+                    path_work.get((op.precision, bw), 0.0) + work
+                )
+            i_c = (
+                total_bytes[comp_str] / t_c
+                if t_c > 0 and t_c != float("inf")
+                else 0.0
+            )
+            for (prec, bw), work in path_work.items():
                 prec_str = prec.value if prec else "bytes"
-                key = f"{comp_str}/{prec_str}"
+                key = f"{comp_str}/{prec_str}/{bw:g}"
                 rates[key] = ComponentRate(
                     component=comp, precision=prec,
-                    i_c=bw, o_c=w, t_c_us=w / bw if bw > 0 else float("inf"),
+                    i_c=bw, o_c=work, t_c_us=work / bw,
                 )
 
         else:

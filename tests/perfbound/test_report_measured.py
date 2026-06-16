@@ -57,6 +57,20 @@ def test_to_text_three_levels():
     assert "Reachability Hierarchy" in text
 
 
+def test_to_text_labels_author_value_as_residual_not_attainable_headroom():
+    br = _make_bound_result(t_bound_us=1000.0)
+    two_limit = TwoLimitResult(
+        kernel_name="test_kernel",
+        t_bound_hivm_us=800.0,
+        t_bound_dsl_us=1000.0,
+        t_measured_us=5000.0,
+    )
+    report = KernelReport.from_bound(br, two_limit=two_limit)
+    text = report.to_text()
+    assert "author residual" in text.lower()
+    assert "not proven attainable" in text.lower()
+
+
 def test_to_text_not_measured():
     """not yet measured when t_measured_us=None."""
     br = _make_bound_result()
@@ -132,6 +146,7 @@ def test_to_dict_reachability_key():
     d = report.to_dict()
     assert "reachability" in d
     assert d["reachability"]["t_bound_dsl_us"] == 1000.0
+    assert "author_residual_us" in d["reachability"]
 
 
 def test_to_dict_is_violation_flag():
@@ -265,6 +280,11 @@ def test_merge_profile_populates_fields():
     assert report.profile_dominant_component == "scalar"
     assert report.n_sync_ops == 402
     assert report.exposed_control_deficit_pts == pytest.approx(0.727)
+    assert report.headroom_status == "diagnostic_upper_bound"
+    assert report.recoverable_headroom_lower_us == 0.0
+    assert report.recoverable_headroom_upper_us == pytest.approx(4000.0)
+    assert report.recoverable_headroom_estimate_us is None
+    assert report.headroom_confidence == "low"
 
 
 def test_to_text_shows_profile_section():
@@ -297,3 +317,23 @@ def test_to_dict_includes_profile_block():
     d = report.to_dict()
     assert d["profile"]["diagnosis"] == "Insufficient Parallelism"
     assert d["profile"]["n_sync_ops"] == 402
+    assert d["headroom_assessment"]["status"] == "unavailable"
+    assert d["headroom_assessment"]["point_estimate_us"] is None
+
+
+def test_merge_calibration_populates_provenance():
+    from perfbound.calibration.calib_loader import load_default_calib_db
+
+    report = KernelReport.from_bound(_make_bound_result())
+    report.merge_calibration(
+        load_default_calib_db(),
+        "perfbound/calibration/data/calib_910b3_v1.json",
+    )
+    data = report.to_dict()["calibration"]
+
+    assert data["version"] == "v1"
+    assert data["hardware_name"] == "Ascend 910B3"
+    assert data["measured_constant_count"] >= 10
+    assert data["max_measured_ci_rel"] < 0.05
+    assert any("scalar_overhead_factor" in item for item in data["warnings"])
+    assert any("Gap 4 startup latency" in item for item in data["fallbacks"])

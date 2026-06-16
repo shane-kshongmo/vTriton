@@ -28,7 +28,7 @@ The "dump-before-codegen" spike (`TestDumpBeforeCodegen`) is therefore moot:
 codegen completes, no crash to survive. `test_chunk_kda_milestone.py` xfail
 reasons updated to reflect this (local xfail now only because WSL has no NPU).
 
-## 2. Real T_measured + author_headroom — POPULATED (was always None)
+## 2. Real T_measured + initial naive-floor residual — POPULATED
 
 chunk_kda profiled under `msprof` (10 iters → 6 recorded MIX_AIC invocations).
 Raw CSV: `chunk_kda_op_summary.csv` (also fixtured at
@@ -42,12 +42,12 @@ Raw CSV: `chunk_kda_op_summary.csv` (also fixtured at
 | binding (predicted) | MTE_GM (memory) | max(floor) = HBM |
 | Soundness status | **PASS** (T_bound ≤ T_measured) | `validate_from_csv` |
 | Tightness | **75.3×** | T_measured / T_bound |
-| author_headroom | **102,940 µs** | T_measured − T_bound_DSL (`TwoLimitResult`) |
+| naive-floor residual | **102,940 µs** | T_measured − naive 1,386 µs HBM floor |
 | component_match | **False** | predicted `mte`, measured `aicore`-dominant |
 
 ### Findings
-- **author_headroom is now a real number** (102.9 ms), closing the A.7/M6
-  caveat that it was structurally present but never populated.
+- This was the initial naive-floor residual, not an attainable-headroom
+  estimate and not the current two-limit result.
 - **The naive HBM-floor bound is sound but very loose (75×)** for chunk_kda,
   and **mispredicts the binding component**: it predicts memory-bound, but the
   kernel measures as AI compute-core dominated. chunk_kda's dots use tiny
@@ -104,10 +104,11 @@ paper's AvgPool `repeat=1` case) issues many instructions, each paying the
 fixed startup latency. Bounded `inefficiency ∈ (0,1)` keeps the bound sound.
 
 **Result on chunk_kda:** real Tier-2 bound `t_bound = 46,110 µs ≤ t_measured =
-104,326 µs` (**2.26×** — vs the 75× HBM grid floor); Gap-4 is non-zero
+104,289 µs` (**2.26×** — vs the 75× HBM grid floor); Gap-4 is non-zero
 (~2.6% of measured) and now the dominant attributed gap. `mask` is left 0 (the
 per-instruction model does not use it; a lane-fill `mask` model is a future
-refinement).
+refinement). The v1 database has no measured vector/cube startup latency, so
+the current Gap-4 value uses explicitly reported diagnostic defaults.
 
 ## 6. HIVM IR optimization feasibility analysis (2026-06-11)
 
@@ -117,11 +118,15 @@ or hinted for performance optimization. The two-limit result for chunk_kda:
 ```
 T_bound_HIVM = 46,065 µs  (idealized — Gap-1/3 relaxed)
 T_bound_DSL  = 46,110 µs  (realized bishengir structure)
-T_measured   = 104,326 µs (actual on 910B3 NPU:1)
+T_measured   = 104,289 µs (post-warmup median of 5 launches on 910B3 NPU:1)
 
 Compiler headroom = T_bound_DSL − T_bound_HIVM = 44.99 µs  (0.04%)
-Author headroom   = T_measured  − T_bound_DSL  = 58,216 µs (55.8%)
+Author residual   = T_measured  − T_bound_DSL  = 58,179 µs (55.8%)
 ```
+
+The author residual is not a predicted attainable win. Without a
+correctness-verified counterfactual, the pipeline reports only a low-confidence
+diagnostic range from 0 to the residual.
 
 ### Intervention levels
 
@@ -129,7 +134,7 @@ Author headroom   = T_measured  − T_bound_DSL  = 58,216 µs (55.8%)
 |-------|-----------|-------------|---------|
 | HIVM IR (des.json) editing | Gap-1/3 | Model only — bishengir-compile cannot accept des.json | ~45 µs |
 | bishengir MLIR hints (ascend-tiling-opt) | Gap-4 (2.6%) | Actionable — modify MLIR, standard compile | ~2.7 ms |
-| Triton kernel rewrite (author level) | Author headroom (55.8%) | Highest impact — tiling, fusion, layout | ~58 ms |
+| Triton kernel rewrite (author level) | Author residual (55.8%) | Highest-impact search space — tiling, fusion, layout | ≤58 ms diagnostic cap |
 
 ### Gap attribution guide for hints
 
@@ -142,11 +147,13 @@ Author headroom   = T_measured  − T_bound_DSL  = 58,216 µs (55.8%)
 
 ### Conclusion
 
-The compiler is near-optimal for chunk_kda. The 55.8% performance opportunity
-is at the Triton kernel author level — tiling strategy, op fusion, and memory
-access pattern. `ascend-tiling-opt` is the tool to search this space using the
-white-box model. Direct HIVM IR editing provides marginal improvement (~0.04%)
-and lacks a back-compilation path to hardware.
+The compiler-side structural residual is small for chunk_kda. The remaining
+55.8% is an author-level residual, not a demonstrated performance opportunity.
+Tiling strategy, op fusion, and memory access pattern are the primary
+counterfactual search space. `ascend-tiling-opt` can rank candidates with the
+white-box model, but only correctness-verified hardware measurements can
+promote a diagnostic cap to attainable headroom. Direct HIVM IR editing has a
+small modeled effect (~0.04%) and lacks a back-compilation path to hardware.
 
 ## 7. Multi-kernel validation set — US-SB-005 (2026-06-11)
 
@@ -203,7 +210,7 @@ The set spans both compute-bound (chunk_kda, Tier-2 DES) and memory-bound
 All soundness checks pass — the model never predicts a bound above the
 measured wall-clock time.
 
-## 8. Scalar throughput (US-SB-007) — direct CCE measurement attempted, BLOCKED (2026-06-11)
+## 8. Scalar throughput (US-SB-007) — CLOSED with direct CCE measurement (2026-06-16)
 
 **Goal:** replace the derived `P_scalar` (= P_vector/128) with a directly
 measured value from a CCE (AscendC, per project convention) microbench on
@@ -218,47 +225,50 @@ measured value from a CCE (AscendC, per project convention) microbench on
 - It **compiles and runs** on 910B3 (`vt_a1_bench_launcher --kernel scalar_peak`
   returns rc=0; the `scalar_peak` symbol is linked into the launcher).
 
-**Why a clean P_scalar (GFLOPS) is NOT obtainable here — two independent blocks:**
+**Measurement:** reran the CCE path with the explicit CANN 8.2 profiler binary
+that fixed Stage-A op-summary collection:
 
-1. **msprof op-level collection is currently broken on this 910B3 box.** A
-   freshly built+run kernel produces *no* `op_summary*.csv` and an empty
-   timeline ("There is no summary data to export"), for **both** the new
-   `scalar_peak` AND `vector_peak_elemwise_add` — the latter profiled cleanly
-   on 2026-06-07 with the identical harness. Reproduced on a clean from-scratch
-   rebuild and on a healthy device (`ASCEND_RT_VISIBLE_DEVICES=1`). NPU:0 reports
-   health=**Alarm** in `npu-smi`. This is a pre-existing environmental/profiling
-   regression, independent of the scalar work.
+```bash
+python3 perfbound/calibration/scripts/cce_remote_bench.py \
+  --host 910B3 --direct-ssh \
+  --remote-workdir /tmp/vtriton_scalar_cce \
+  --skip-sync --skip-direct-compile \
+  --n-repeat 45 --kernel-timeout-sec 300 \
+  --soc-version Ascend910B1 \
+  --cann-env /usr/local/Ascend/ascend-toolkit/8.2.RC1.alpha003/set_env.sh \
+  --cann-package-path /usr/local/Ascend/ascend-toolkit/8.2.RC1.alpha003 \
+  --msprof /usr/local/Ascend/ascend-toolkit/8.2.RC1.alpha003/tools/profiler/bin/msprof \
+  --kernels scalar_peak \
+  --output-dir /tmp/vtriton_scalar_calib
+```
 
-2. **Even with working profiling, the scalar unit is not independently
-   profilable as a compute path.** In the 2026-06-07 working CSVs, scalar time
-   appears *only* as `aiv_scalar_time(us)` — a sub-component of a vector/cube op
-   (≈73.35 µs across add/mul/max, n=45 each), representing the AIV's
-   **loop-control / address scalar instructions**, not standalone scalar
-   *arithmetic* throughput. A pure-scalar kernel surfaces no op of its own.
-   Deriving a `P_scalar` in GFLOPS from this loop-control time would be a
-   category error (instruction-issue overhead ≠ arithmetic FLOP/s).
+The runner built the launcher, executed 45 `scalar_peak` invocations, and synced
+`scalar_peak.csv`. The fitter uses `aiv_scalar_time(us)` for the dependent
+scalar FMA chain and discards the first 15 rows chronologically as warmup.
 
-**Resolution (honest):** US-SB-007 stays `passes:false`. The derived
-`P_scalar = P_vector/128` is retained as documented evidence only. Critically,
-the bound must NOT be tightened by an unmeasured estimate — the model uses the
-full measured Vector rate as an optimistic upper-rate fallback
-(`scalar_throughput_measured=False`), which can loosen but never illegitimately
-tighten the time floor. The CCE scalar microbench is committed so it can be
-re-run once msprof op-collection is restored on the box.
+| Constant | Measured value | 95% CI | Steady samples | CV |
+|----------|----------------|--------|----------------|----|
+| `P_scalar_add_sustained` | **0.5998 GFLOPS** | 0.000019 GFLOPS | 30 | 0.009% |
 
-## 9. US-SB-006 (live gap counterfactual) + US-SB-008 (two-limit HW reachability) — attempted, BLOCKED (2026-06-11)
+**Resolution:** US-SB-007 is now closed. `calib_910b3_v1.json` promotes
+`P_scalar_add_sustained` with `source="cce_microbench"` and sets
+`vector.scalar_throughput_measured=true`, so scalar-bound floors now use the
+measured scalar rate instead of the prior Vector-rate fallback.
+
+## 9. US-SB-006 (live gap counterfactual) + US-SB-008 (two-limit HW reachability) — attempted, BLOCKED (re-audited 2026-06-16)
 
 Both stories need a *measurable* gap removed on real hardware. Every concrete
 path was tried; each hits a real blocker on the one kernel with a full
 NPUIR→des.json pipeline (chunk_kda).
 
-**Executable Gap-3 edit works analytically but predicts a 0 µs delta.**
-`tritonsim-hivm --remove-pipe-barrier-index=N --edited-npuir-file=...` removes a
-pipe_barrier through the MLIR API and emits a bishengir-compilable
-`.npuir.mlir` (verified: 80→79 barriers). But the model's predicted bound delta
-for chunk_kda is **0.0 µs** — chunk_kda's Gap-3 attribution is 6.2e-6 (≈0), so
-removing a barrier does not move the binding component floor. Nothing measurable
-to validate.
+**Executable Gap-3 edit is restored but vacuous for chunk_kda.**
+`tritonsim-hivm --remove-pipe-barrier-index=N --edited-npuir-file=...` now
+parses the NPUIR module, erases the selected `hivm.hir.pipe_barrier`, writes the
+edited MLIR, and analyzes that edited file. Local verification on chunk_kda
+removed one barrier (**128→127**, operations **1378→1377**) but the model's
+predicted bound delta is **0.0 µs** — chunk_kda's Gap-3 attribution is
+effectively zero, so removing the barrier does not move the binding component
+floor. Nothing measurable to validate on this kernel.
 
 **Gap-4 (`raise_repeat`) moves the attribution but not the bound.** After
 fixing `raise_repeat` to match the real des.json pipe tokens (`PIPE_M/PIPE_V/
@@ -285,14 +295,21 @@ completed:** it requires a *second* gap-seeded kernel carried through the full
 NPUIR→des.json pipeline plus a hardware npuir-recompile-and-launch harness that
 is not proven end-to-end in this tree. Documented as the next concrete step.
 
+**Accepted-evidence fixture:** `.omc/research/hw_runs/counterfactual_gap_results.json`
+records the accepted counterfactual contract, all attempted paths, and explicitly
+keeps `satisfies_us_sb_006=false` / `satisfies_us_sb_008=false`. The vector-add
+2× work-scaling run remains a useful sanity check (`quantification_error=2.95%`,
+outputs verified) but is intentionally excluded because it changes problem size
+rather than removing a seeded Gap-1/2/3/4 cause from an equivalent kernel.
+
 **Honest outcome:** US-SB-006 and US-SB-008 remain `passes:false`. The
 analytical two-limit ordering (T_bound_HIVM ≤ T_bound_DSL ≤ T_measured) and the
-model's gap-quantification mechanism are validated on real chunk_kda data, and
-the executable Gap-3 edit is proven to emit bishengir-compilable MLIR — but
-chunk_kda's compiler headroom is below measurement noise, so no hardware
-speedup can be validated on it, and no alternative large-headroom kernel was
-carried to a hardware measurement. The `raise_repeat` real-pipe fix is kept as a
-genuine bug fix.
+model's gap-quantification mechanism are validated on real chunk_kda data, but
+chunk_kda's compiler headroom is below measurement noise, the restored
+compiler-reachable edit has zero predicted speedup on this kernel, and no
+alternative large-headroom kernel was carried to a hardware measurement. The
+`raise_repeat` real-pipe fix is kept as a genuine bug fix for analytical DES
+edits, not as a hardware counterfactual closure.
 
 ## Reproduce
 
@@ -314,3 +331,43 @@ ssh 910B3 'source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # fetch op_summary_*.csv, then:
 pytest tests/perfbound/test_chunk_kda_hw_validation.py -q
 ```
+
+## 10. Stage A P0 calibration closure (2026-06-15)
+
+The final two P0 CCE microbenchmarks were reviewed, corrected, compiled, and
+profiled on 910B3:
+
+| Constant | Measured value | 95% CI | Steady samples | CV |
+|----------|----------------|--------|----------------|----|
+| `BW_l0c_to_gm_sustained` | **143.523 GB/s** | 1.141 GB/s | 30 | 2.2% |
+| `BW_hbm_allcore_sustained` | **77.043 GB/s/core** | 0.027 GB/s/core | 30 | 0.1% |
+
+The FixPipe benchmark initializes one valid L0C tile with MMAD, synchronizes
+the L0C producer/consumer through the CO1 queue, then profiles 1280 repeated
+FixPipe transfers using `aic_fixpipe_time(us)`. The all-core benchmark launches
+with block dim 20 and assigns each core a disjoint 16 MiB region; the aggregate
+320 MiB footprint exceeds the 192 MiB L2 capacity.
+
+The CANN 9.0 `msprof` selected by PATH still emitted no AscendC op summary.
+Using the explicit CANN 8.2 profiler binary produced 45 rows for each kernel.
+The fitter discards the first 15 rows chronologically as warmup and computes
+statistics over the final 30; it does not select fastest samples. Therefore the
+broad profiler caveat in sections 8 and 9 does not apply to these two
+measurements. The calibration database now reports 18 measured constants,
+maximum relative 95% CI 1.07%, and no P0 violations.
+
+Running the complete Stage A report with this promoted database gives:
+
+```text
+T_bound_HIVM = 46,064.92 us
+T_bound_DSL  = 46,109.91 us
+T_measured   = 104,288.94 us
+binding      = vector
+compiler headroom = 44.99 us
+author residual   = 58,179.04 us
+```
+
+Profile diagnosis is `Insufficient Parallelism`, with scalar residency as the
+measured dominant component. Until a correctness-verified counterfactual is
+measured, realistic performance headroom remains an explicitly low-confidence
+diagnostic range of **0..58,179.04 us**, not a point estimate.

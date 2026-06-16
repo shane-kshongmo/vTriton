@@ -1,6 +1,6 @@
 # M1 — Load and validate a calibration JSON file.
 #
-# The calibration file (perfbound/data/calib_910b3_v1.json) is the single
+# The calibration file (perfbound/calibration/data/calib_910b3_v1.json) is the single
 # source of truth for all sustained hardware rates.  Every P0 constant must
 # be measured (≥30 runs, <5% CI) before the bound model is valid.
 #
@@ -45,7 +45,8 @@ def load_calibration(path: str | Path | None = None) -> CalibrationDB:
     """Load and validate a calibration JSON file.
 
     Args:
-        path: Path to calib JSON file.  Defaults to perfbound/data/calib_910b3_v1.json.
+        path: Path to calib JSON file. Defaults to
+              perfbound/calibration/data/calib_910b3_v1.json.
 
     Returns:
         CalibrationDB with all sustained-rate constants.
@@ -109,37 +110,21 @@ def validate_calibration(db: CalibrationDB) -> list[str]:
     Returns a list of warning strings.  An empty list means the DB is
     fully calibrated for bound computation.
     """
-    warnings = []
+    warnings = list(db.validate_p0_constants())
 
-    # 1. P0 constants with insufficient provenance
-    p0_keys = [
-        "P_cube_fp16", "P_cube_int8",
-        "P_vector_add_fp16", "P_vector_mul_fp16", "P_vector_exp_fp16",
-        "BW_gm_l1", "BW_gm_ub", "BW_l1_l0", "BW_ub_gm", "BW_l0c_gm",
-        "BW_hbm_allcore",
-        "mandatory_handoff",
-    ]
-    for key in p0_keys:
-        c = db.constants.get(key)
-        if c is None:
-            warnings.append(f"{key}: not present in calibration DB")
-        elif not c.is_valid:
-            warnings.append(
-                f"{key}: n_runs={c.n_runs} (need ≥30), "
-                f"ci_rel={c.ci_rel:.3f} (need <0.05)"
-            )
-
-    # 2. Mandatory handoff cost required for T_serial_irreducible
+    # Mandatory handoff cost is also materialized as a convenience field used
+    # by the serial-floor model. Validate that representation independently.
     if db.mandatory_handoff_cycles <= 0:
         warnings.append(
             "mandatory_handoff_cycles not measured — "
             "T_serial_irreducible will be 0 (unsound for Cube↔Vector kernels)"
         )
 
-    # 3. Scalar overhead required for kernel-level cycle estimates
+    # Scalar overhead is P1. Keep it visible, but do not confuse it with P0
+    # calibration completion.
     if db.scalar_overhead_factor <= 1.0:
         warnings.append(
-            "scalar_overhead_factor not calibrated — "
+            "P1 scalar_overhead_factor not calibrated — "
             "kernel-level bounds may be optimistic"
         )
 
@@ -297,6 +282,21 @@ def seed_calibration_from_ascend_json(
     # Scalar overhead (trust as seed)
     scalar = calib.get("scalar_overhead", {})
     db.scalar_overhead_factor = float(scalar.get("aiv_scalar_overhead_factor", 3.74))
+
+    # HBM all-core sustained bandwidth (datasheet seed — must measure)
+    # Per-core rate under full 20-core contention; datasheet peak is an
+    # upper bound that will be replaced by the mte_hbm_allcore microbench.
+    hbm = movers.get("hbm_allcore", {})
+    hbm_bw_gb = float(hbm.get("bandwidth_gbps", 0))
+    db.constants["BW_hbm_allcore_sustained"] = CalibrationConstant(
+        name="BW_hbm_allcore_sustained",
+        value=hbm_bw_gb,
+        unit="GB/s",
+        ci_95=0.0,
+        source="datasheet_seed",
+        n_runs=0,
+        notes="DATASHEET SEED for all-core HBM — replace with mte_hbm_allcore microbench",
+    )
 
     # Startup latencies (trust as seed)
     startup = calib.get("startup_latencies", {})

@@ -343,6 +343,13 @@ A realized kernel's measured time satisfies:
 
 Each factor is attributable and, in principle, independently checkable.
 
+The raw residual `T_measured - T_bound_DSL` is not by itself an attainable
+headroom estimate. It includes all unmodeled execution effects and can only be
+promoted to a point estimate after a correctness-verified counterfactual
+demonstrates that the attributed mechanism is removable. Before that evidence
+exists, reports must label it as an author residual and expose only a
+confidence-qualified diagnostic interval or upper bound.
+
 ### 4.3 The redundancy(grid) Term Is Second-Order and Optional
 
 `redundancy(grid)` — the inflation of HBM traffic from lost cross-core reuse
