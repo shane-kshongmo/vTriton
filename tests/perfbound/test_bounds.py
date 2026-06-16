@@ -59,6 +59,27 @@ class TestComputeBoundsMemoryBound:
         # Grid total_work should be bytes (393216), not flops
         assert result.grid.total_work == pytest.approx(393216.0, rel=1e-3)
 
+    def test_allcore_hbm_rate_only_applies_to_mte_gm(self):
+        ops = [
+            OpRecord(
+                op_id=1, op_name="store", component=Component.MTE_UB,
+                precision=Precision.FP16, pipe="MTE3",
+                bytes_transferred=180_000, src_space="ub", dst_space="gm",
+            ),
+        ]
+        extract = HIVMExtract(
+            operations=ops, handoffs=[], unit_assignment={1: "mte_ub"}
+        )
+        db = load_default_calib_db()
+        db.constants["BW_hbm_allcore_sustained"].value = 1.0
+
+        result = compute_bounds(
+            _make_grid(), extract, db, n_cores=20, total_programs=1
+        )
+
+        assert result.component.binding_component == Component.MTE_UB
+        assert result.grid.i_binding > 1_000.0
+
 
 class TestComputeBoundsComputeBound:
     """Cube-bound kernel: grid must use Cube throughput (FLOP/us) and total flops."""

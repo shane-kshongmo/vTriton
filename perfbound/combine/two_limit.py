@@ -202,7 +202,7 @@ def compute_two_limit(
     )
     ideal_result = combine(
         ideal_pieces.grid, ideal_pieces.component, ideal_pieces.serial,
-        kernel_name=kernel_name, extract=ideal_extract,
+        kernel_name=kernel_name, extract=ideal_extract, calibration=calib_db,
     )
 
     t_bound_hivm_us = ideal_result.t_bound_us

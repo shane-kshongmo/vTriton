@@ -1,0 +1,21 @@
+/*
+ * MTE All-Core HBM Bandwidth Microbenchmark
+ *
+ * Measures sustained HBM bandwidth when all 20 AIC cores read simultaneously.
+ * This captures memory contention effects that single-core benchmarks miss.
+ *
+ * P0 constant: BW_hbm_allcore_sustained
+ *
+ * The launcher must be configured to launch on all 20 AIC cores
+ * (block_dim = 20) so that all cores contend for HBM bandwidth.
+ */
+#include "vt_microbench_common.h"
+
+extern "C" __global__ __aicore__ void mte_hbm_allcore(
+    GM_ADDR src, GM_ADDR dst, uint32_t startIter, uint32_t iterCount)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    VTCalib::MteAllCoreHbmKernel op;
+    op.Init(src, dst, startIter, iterCount);
+    op.Process();
+}

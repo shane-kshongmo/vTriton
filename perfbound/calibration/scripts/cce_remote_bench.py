@@ -30,6 +30,7 @@ DEFAULT_CANN_ENV = "/usr/local/Ascend/cann/set_env.sh"
 DEFAULT_CANN_PACKAGE_PATH = "/usr/local/Ascend/ascend-toolkit/8.2.RC1.alpha003"
 DEFAULT_LAUNCHER = "./out/bin/vt_a1_bench_launcher"
 DEFAULT_SOC_VERSION = "Ascend910B1"
+DIRECT_SSH = False
 
 # CCE kernel list (order must match US-003 acceptance criteria)
 CCE_KERNELS = [
@@ -41,10 +42,13 @@ CCE_KERNELS = [
     "vector_peak_elemwise_max",
     "vector_peak_elemwise_min",
     "vector_peak_transcendental",
+    "scalar_peak",
     "mte_gm_to_ub",
     "mte_ub_to_gm",
     "mte_gm_to_l1",
     "mte_l1_to_l0a",
+    "mte_l0c_to_gm",
+    "mte_hbm_allcore",
     "mandatory_handoff",
 ]
 
@@ -55,6 +59,8 @@ CUBE_KERNELS = {
     "cube_peak_int8",
     "cube_peak_bf16",
     "mandatory_handoff",
+    "mte_l0c_to_gm",
+    "mte_hbm_allcore",
 }
 
 MTE_KERNELS = {
@@ -62,6 +68,8 @@ MTE_KERNELS = {
     "mte_ub_to_gm",
     "mte_gm_to_l1",
     "mte_l1_to_l0a",
+    "mte_l0c_to_gm",
+    "mte_hbm_allcore",
 }
 
 MANDATORY_HANDOFF_K_VALUES = [128, 256, 384, 512, 1024, 2048]
@@ -98,16 +106,18 @@ def sanitize_output(text: str) -> str:
 
 def compact_ssh_cmd(host: str, remote_command: str) -> list[str]:
     """Build SSH command with quiet flags."""
-    return [
+    cmd = [
         "ssh",
         "-q",
         "-S",
         "none",
         "-o",
         "ControlMaster=no",
-        host,
-        f"bash -lc {shlex.quote(remote_command)}",
     ]
+    if DIRECT_SSH:
+        cmd.extend(["-o", "ProxyCommand=none"])
+    cmd.extend([host, f"bash -lc {shlex.quote(remote_command)}"])
+    return cmd
 
 
 def source_cann(command: str, cann_env: str = DEFAULT_CANN_ENV) -> str:
@@ -168,9 +178,13 @@ def sync_cce_files(
         "-q",
         "-S", "none",
         "-o", "ControlMaster=no",
+    ]
+    if DIRECT_SSH:
+        tar_extract_cmd.extend(["-o", "ProxyCommand=none"])
+    tar_extract_cmd.extend([
         host,
         f"mkdir -p {remote_workdir_quoted} && find {remote_workdir_quoted} -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {{}} + && tar -xzf - -C {remote_workdir_quoted}",
-    ]
+    ])
 
     if dry_run:
         print("[DRY-RUN] Would sync CCE files:")
@@ -390,6 +404,7 @@ def run_cce_benchmark(
     cann_package_path: str,
     kernel_timeout_sec: int,
     launcher: str,
+    msprof: str,
     dry_run: bool
 ) -> bool:
     """Run a single CCE benchmark with msprof profiling."""
@@ -423,7 +438,7 @@ def run_cce_benchmark(
         f"chmod +x {shlex.quote(wrapper)} && "
         f"rm -rf {shlex.quote(msprof_output_dir)} && "
         f"timeout --kill-after=10 {kernel_timeout_sec} "
-        f"msprof --application={shlex.quote(application)} "
+        f"{shlex.quote(msprof)} --application={shlex.quote(application)} "
         f"--output={shlex.quote(msprof_output_dir)}"
     )
     run_cmd = source_cann(run_cmd, cann_env)
@@ -508,6 +523,14 @@ def expand_benchmark_jobs(selected_kernels: list[str], mandatory_k_values: list[
         if kernel == "mandatory_handoff":
             for k_value in mandatory_k_values:
                 jobs.append((kernel, f"mandatory_handoff_K{k_value}", f"--k {k_value}", ""))
+        elif kernel == "mte_hbm_allcore":
+            # All-core benchmark: launch on all 20 AIC cores
+            jobs.append((
+                kernel,
+                kernel,
+                "--mte-start 768 --mte-iters 1280 --block-dim 20",
+                "--mte-start 0 --mte-iters 768 --block-dim 20",
+            ))
         elif kernel in MTE_KERNELS:
             jobs.append((
                 kernel,
@@ -568,6 +591,11 @@ def main() -> int:
         help=f"Remote benchmark launcher. Default: {DEFAULT_LAUNCHER}"
     )
     parser.add_argument(
+        "--msprof",
+        default="",
+        help="Explicit remote msprof binary. Default: resolve from CANN environment."
+    )
+    parser.add_argument(
         "--cann-package-path",
         default=DEFAULT_CANN_PACKAGE_PATH,
         help=f"Remote CANN package path for ascendc CMake. Default: {DEFAULT_CANN_PACKAGE_PATH}"
@@ -598,6 +626,11 @@ def main() -> int:
         help="Sync and compile kernels, then exit before running msprof."
     )
     parser.add_argument(
+        "--skip-sync",
+        action="store_true",
+        help="Use sources already present in the remote workdir."
+    )
+    parser.add_argument(
         "--skip-direct-compile",
         action="store_true",
         help="Skip standalone ccec object compilation and rely on the CMake launcher build."
@@ -617,8 +650,15 @@ def main() -> int:
         action="store_true",
         help="Enable verbose output."
     )
+    parser.add_argument(
+        "--direct-ssh",
+        action="store_true",
+        help="Disable any ProxyCommand inherited from SSH config."
+    )
 
     args = parser.parse_args()
+    global DIRECT_SSH
+    DIRECT_SSH = args.direct_ssh
 
     # Resolve paths
     repo_root = repo_root_from(Path(args.local_repo).resolve())
@@ -647,12 +687,16 @@ def main() -> int:
     )
     if args.preflight_only:
         return 0
+    msprof = args.msprof or tools.get("msprof") or "msprof"
 
     # Step 1: Sync CCE files
     print("=" * 60)
     print("Step 1: Syncing CCE source files to remote...")
     print("=" * 60)
-    sync_cce_files(repo_root, args.host, args.remote_workdir, dry_run=args.dry_run)
+    if args.skip_sync:
+        print("Skipped source sync (--skip-sync).")
+    else:
+        sync_cce_files(repo_root, args.host, args.remote_workdir, dry_run=args.dry_run)
     print()
 
     # Step 2: Compile kernels
@@ -725,6 +769,7 @@ def main() -> int:
             cann_package_path=args.cann_package_path,
             kernel_timeout_sec=args.kernel_timeout_sec,
             launcher=args.launcher,
+            msprof=msprof,
             dry_run=args.dry_run
         )
         benchmark_results[output_name] = success
@@ -763,6 +808,8 @@ def main() -> int:
         print("\n[DRY-RUN] No actual execution performed. Remove --dry-run to run.")
 
     if failed_runs and not args.dry_run:
+        return 1
+    if len(csv_files) != len(benchmark_jobs) and not args.dry_run:
         return 1
 
     return 0

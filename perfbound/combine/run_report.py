@@ -26,7 +26,11 @@ from typing import Optional
 
 from ..extract.hivm_extractor import extract_hivm, HIVMExtract
 from ..extract.dsl_extractor import GridInfo
-from ..calibration.calib_loader import load_default_calib_db
+from ..calibration.calib_loader import (
+    DEFAULT_CALIB_PATH,
+    load_calibration,
+    load_default_calib_db,
+)
 from ..calibration.constants import CalibrationDB
 from ..model.bounds import compute_bounds
 from .bound_combiner import combine, BoundResult
@@ -73,6 +77,7 @@ def report_from_desgraph(
     t_measured_us: float | None = None,
     op_summary_csv: "str | Path | None" = None,
     op_name_filter: "str | None" = None,
+    calibration_source: "str | Path | None" = None,
 ) -> KernelReport:
     """Build a full A.5 report from an existing DES graph JSON.
 
@@ -90,6 +95,9 @@ def report_from_desgraph(
     """
     if calib_db is None:
         calib_db = load_default_calib_db()
+        calibration_source = calibration_source or DEFAULT_CALIB_PATH
+    elif calibration_source is None:
+        calibration_source = "provided CalibrationDB"
 
     extract = extract_hivm(des_json)
     grid_info = _build_grid_info(grid_dims, n_cores, occupancy, load_balance)
@@ -102,7 +110,7 @@ def report_from_desgraph(
     )
     result = combine(
         pieces.grid, pieces.component, pieces.serial,
-        kernel_name=kernel_name, extract=extract,
+        kernel_name=kernel_name, extract=extract, calibration=calib_db,
     )
 
     # Compute two-limit
@@ -118,6 +126,7 @@ def report_from_desgraph(
     )
 
     report = KernelReport.from_bound(result, two_limit=two_limit)
+    report.merge_calibration(calib_db, str(calibration_source))
 
     if op_summary_csv is not None:
         _apply_csv_analysis(
@@ -143,6 +152,7 @@ def report_from_npuir(
     t_measured_us: float | None = None,
     op_summary_csv: "str | Path | None" = None,
     op_name_filter: "str | None" = None,
+    calibration_source: "str | Path | None" = None,
 ) -> KernelReport:
     """Build a full A.5 report by first running tritonsim-hivm on an NPU IR file.
 
@@ -201,6 +211,7 @@ def report_from_npuir(
         t_measured_us=t_measured_us,
         op_summary_csv=op_summary_csv,
         op_name_filter=op_name_filter,
+        calibration_source=calibration_source,
     )
 
 
@@ -237,13 +248,18 @@ def _cli():
                         help="Path to msprof op_summary CSV (extracts timing + component match)")
     parser.add_argument("--measured-op-name", default=None,
                         help="Op name filter for measured CSV (default: --kernel-name)")
+    parser.add_argument(
+        "--calibration",
+        default=str(DEFAULT_CALIB_PATH),
+        help="Path to measured calibration JSON",
+    )
     parser.add_argument("--output-json",
                         help="Write report JSON to this path")
 
     args = parser.parse_args()
     grid_dims = _parse_grid(args.grid)
 
-    calib_db = load_default_calib_db()
+    calib_db = load_calibration(args.calibration)
 
     if args.desgraph:
         report = report_from_desgraph(
@@ -257,6 +273,7 @@ def _cli():
             t_measured_us=args.measured_us,
             op_summary_csv=args.measured_csv,
             op_name_filter=args.measured_op_name,
+            calibration_source=args.calibration,
         )
     else:
         report = report_from_npuir(
@@ -271,6 +288,9 @@ def _cli():
             tritonsim_hivm=args.tritonsim_hivm,
             python_path=args.python,
             t_measured_us=args.measured_us,
+            op_summary_csv=args.measured_csv,
+            op_name_filter=args.measured_op_name,
+            calibration_source=args.calibration,
         )
 
     print(report.to_text())
@@ -317,6 +337,7 @@ def _apply_csv_analysis(
             op_summary_path=csv_path,
             desgraph_path=des_json,
             calibration_path=None,
+            calibration_db=calib_db,
             kernel_name=op_name if op_name != report.kernel_name else None,
             t_bound_us=report.t_bound_dsl_us,
         )

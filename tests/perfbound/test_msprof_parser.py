@@ -64,6 +64,21 @@ def test_op_name_filter_exact():
     assert result_other.t_us == 900.0
 
 
+def test_overlapping_rows_are_one_invocation(tmp_path):
+    csv_path = tmp_path / "overlap.csv"
+    csv_path.write_text(
+        "Op Name,Task Type,Task Start Time(us),Task Duration(us)\n"
+        "kernel,MIX_AIC,1000,100\n"
+        "kernel,MIX_AIV,1002,95\n"
+        "kernel,MIX_AIC,1200,110\n"
+    )
+
+    result = parse_kernel_time_us(csv_path, "kernel", n_warmup=0)
+
+    assert result.n_invocations == 2
+    assert result.t_us == 105.0
+
+
 def test_no_rows_raises_valueerror():
     """ValueError when no matching rows."""
     with pytest.raises(ValueError, match="No AiCore rows"):

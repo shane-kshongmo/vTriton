@@ -112,6 +112,41 @@ class TestTritonsimHivmCLI:
         ops = load_hivm_desgraph(out_file)
         assert len(ops) > 0, "Parsed operations must be non-empty"
 
+    def test_remove_pipe_barrier_emits_edited_npuir(self, tmp_path):
+        """tritonsim-hivm can erase a pipe_barrier through MLIR parsing."""
+        edited_file = tmp_path / "hivm_add_no_barrier.npuir.mlir"
+        out_file = tmp_path / "hivm_add_no_barrier_des.json"
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(HIVM_ADD_KERNEL),
+            "--remove-pipe-barrier-index", "0",
+            "--edited-npuir-file", str(edited_file),
+            "--des-graph-file", str(out_file),
+        ]
+        if HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(HW_CONFIG)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (
+            f"tritonsim-hivm edit failed (returncode={result.returncode}): "
+            f"{result.stderr[:300]}"
+        )
+        assert edited_file.exists() and edited_file.stat().st_size > 0
+        assert "hivm.hir.pipe_barrier" not in edited_file.read_text()
+        assert out_file.exists() and out_file.stat().st_size > 0
+
+    def test_remove_pipe_barrier_requires_output_path(self):
+        """The destructive edit flag must name an edited NPUIR output."""
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(HIVM_ADD_KERNEL),
+            "--remove-pipe-barrier-index", "0",
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0
+        assert "must be provided together" in result.stderr
+
 
 @requires_tritonsim_opt
 @requires_fixtures

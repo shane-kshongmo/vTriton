@@ -6,7 +6,7 @@
 #   - bound_from_extract auto-loads calibration end-to-end
 #   - graceful I_c = 0 fallback when CalibrationDB is absent
 #   - memory.bw populated from CSV companion
-#   - validate_calibration passes for v1 DB
+#   - validation accepts the complete A.1 P0 measurement set
 
 import sys
 from pathlib import Path
@@ -48,7 +48,7 @@ def _matmul_extract() -> HIVMExtract:
 # ── CalibrationDB loading ──────────────────────────────────────────────────
 
 class TestCalibrationLoad:
-    """load_default_calib_db returns a fully-populated 910B3 DB."""
+    """load_default_calib_db returns the promoted 910B3 DB."""
 
     def test_load_default_returns_db(self):
         from perfbound.calibration.calib_loader import load_default_calib_db
@@ -71,8 +71,8 @@ class TestCalibrationLoad:
         from perfbound.calibration.calib_loader import load_default_calib_db
         db = load_default_calib_db()
         bw, _ = db.memory.lookup_bw("gm", "ub")
-        # Real measured value (task spec: BW GM→UB = 86.954 GB/s)
-        assert abs(bw - 86954) < 10, f"gm->ub BW {bw:.0f} B/us not ~86954"
+        # Chronological post-warmup sustained value.
+        assert abs(bw - 86487.9) < 10, f"gm->ub BW {bw:.0f} B/us not ~86488"
 
     def test_all_bw_paths_populated(self):
         from perfbound.calibration.calib_loader import load_default_calib_db
@@ -90,6 +90,19 @@ class TestCalibrationLoad:
         ]
         for name in required:
             assert name in db.constants, f"Missing constant: {name}"
+
+    def test_all_p0_measurements_validate(self):
+        from perfbound.calibration.calib_loader import (
+            load_default_calib_db,
+            validate_calibration,
+        )
+        db = load_default_calib_db()
+
+        warnings = validate_calibration(db)
+
+        assert db.validate_p0_constants() == []
+        assert not any("BW_l0c_to_gm_sustained" in w for w in warnings)
+        assert not any("BW_hbm_allcore_sustained" in w for w in warnings)
 
     def test_mandatory_handoff_cycles_nonzero(self):
         from perfbound.calibration.calib_loader import load_default_calib_db
@@ -118,14 +131,14 @@ class TestComputeFromDB:
             f"T_core_floor should be > 0 with real calibration, got {result.t_core_floor_us}"
 
     def test_t_core_floor_mte_binds(self):
-        """MTE_GM binds at 86.954 GB/s (T=4.52 us) over Cube at 5.159 TFLOPS (T=3.25 us)."""
+        """MTE_GM binds at 86.488 GB/s (T=4.55 us) over Cube at 5.159 TFLOPS."""
         from perfbound.calibration.calib_loader import load_default_calib_db
         db = load_default_calib_db()
         extract = _matmul_extract()
         result = compute_component_floor_from_db(extract, db)
-        # T_mte_gm = 393216 / 86953.8 = 4.522 us
-        assert abs(result.t_core_floor_us - 4.522) < 0.02, \
-            f"T_core_floor {result.t_core_floor_us:.3f} not ~4.522 us"
+        # T_mte_gm = 393216 / 86487.9 = 4.546 us
+        assert abs(result.t_core_floor_us - 4.546) < 0.02, \
+            f"T_core_floor {result.t_core_floor_us:.3f} not ~4.546 us"
         assert result.binding_component == Component.MTE_GM
 
     def test_matches_explicit_call(self):

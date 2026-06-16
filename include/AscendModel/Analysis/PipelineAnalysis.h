@@ -148,17 +148,6 @@ public:
   /// no scalar overhead applied).
   int64_t getTotalCycles() const { return totalCycles; }
 
-  /// Get estimated kernel wall-clock cycles accounting for:
-  ///   1. Scalar overhead (loop control, pipe_barrier sync) via
-  ///      HardwareConfig::getAIVScalarOverheadFactor().
-  ///   2. Wave serialisation: ceil(numPrograms / numParallelUnits) waves.
-  ///
-  /// numPrograms  – total programs launched (e.g. Z*H*ceil(N_CTX/BLOCK_M)).
-  /// numParallelUnits – hardware cores executing in parallel (e.g. N_AIV).
-  /// numInnerIters – inner-loop iterations per program (for pipe_barrier cost).
-  int64_t getKernelCycles(int64_t numPrograms, int64_t numParallelUnits,
-                          int64_t numInnerIters = 0) const;
-  
   /// Get all operations in scheduled order.
   const std::vector<PipelineOp>& getAllOps() const { return operations; }
   
@@ -194,88 +183,6 @@ private:
   
   /// Initialize hardware pipelines based on config.
   void initPipelines();
-};
-
-//===----------------------------------------------------------------------===//
-// Performance Report
-//===----------------------------------------------------------------------===//
-
-/// Holds the complete performance analysis results.
-struct PerformanceReport {
-  // Hardware info
-  std::string hardwareName;
-  double clockFreqGHz;
-  
-  // Timing information
-  int64_t totalCycles;      // Critical-path cycles (single program, no overhead)
-  double totalTimeUs;       // Corresponding wall time
-  int64_t kernelTotalCycles = 0;  // With scalar overhead + wave serialisation
-  int64_t numWaves = 0;           // ceil(numPrograms / numParallelUnits)
-  
-  // Per-unit utilization
-  std::map<HWUnit, double> unitUtilization;
-  std::map<HWUnit, int64_t> unitBusyCycles;
-  
-  // Bottleneck analysis
-  HWUnit bottleneckUnit;
-  double bottleneckUtilization;
-  
-  // Roofline metrics
-  double arithmeticIntensity;   // FLOP/Byte
-  double achievedTFLOPS;
-  double peakTFLOPS;
-  double achievedBandwidth;     // GB/s
-  double peakBandwidth;         // GB/s (from HardwareConfig)
-  bool isComputeBound;
-  
-  // Detailed operation breakdown
-  struct OpStat {
-    std::string opType;
-    int64_t count;
-    int64_t totalCycles;
-    double percentage;
-  };
-  std::vector<OpStat> opStats;
-  
-  /// Print the report.
-  void print(llvm::raw_ostream &os) const;
-  
-  /// Export as JSON.
-  std::string toJSON() const;
-};
-
-//===----------------------------------------------------------------------===//
-// Roofline Analyzer
-//===----------------------------------------------------------------------===//
-
-/// Performs roofline model analysis using HardwareConfig.
-class RooflineAnalyzer {
-public:
-  RooflineAnalyzer(const PipelineScheduler &scheduler);
-  
-  /// Analyze and generate performance report.
-  PerformanceReport analyze();
-  
-  /// Get arithmetic intensity.
-  double getArithmeticIntensity() const;
-  
-  /// Check if compute-bound or memory-bound.
-  bool isComputeBound() const;
-  
-  /// Get theoretical peak performance.
-  double getTheoreticalPeak() const;
-  
-  /// Get achieved performance.
-  double getAchievedPerformance() const;
-  
-private:
-  const PipelineScheduler &scheduler;
-  const HardwareConfig &config;
-
-  int64_t totalFLOPs;
-  int64_t totalBytes;
-  
-  void computeMetrics();
 };
 
 } // namespace ascend

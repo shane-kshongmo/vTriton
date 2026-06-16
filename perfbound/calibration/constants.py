@@ -567,5 +567,7 @@ def required_p0_constant_names() -> list[str]:
         "BW_ub_to_gm_sustained",
         "BW_gm_to_l1_sustained",
         "BW_l1_to_l0a_sustained",
+        "BW_l0c_to_gm_sustained",
+        "BW_hbm_allcore_sustained",
         "mandatory_handoff_cost_l0c_to_gm_to_ub",
     ]
