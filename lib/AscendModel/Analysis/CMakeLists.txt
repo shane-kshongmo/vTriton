@@ -2,6 +2,7 @@ add_mlir_library(AscendModelAnalysis
   PARTIAL_SOURCES_INTENDED
   HardwareConfig.cpp
   HIVMAnalysis.cpp
+  HIVMBottleneckDiagnosis.cpp
   PipelineAnalysis.cpp
   UnifiedTilingCostModel.cpp
   MemoryTilingOptimizer.cpp

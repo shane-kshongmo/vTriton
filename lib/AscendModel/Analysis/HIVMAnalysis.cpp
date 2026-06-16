@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "AscendModel/Analysis/HIVMBottleneckDiagnosis.h"
 #include "AscendModel/Analysis/HIVMAnalysis.h"
 
 #ifdef TRITONSIM_HAS_BISHENGIR_HIVM
@@ -565,43 +566,389 @@ static void eraseAttributeAssignment(std::string &line, llvm::StringRef name) {
   }
 }
 
+static std::string cleanMemrefTrailingComma(std::string l) {
+  // After stripping #hivm.address_space or memory-space numbers, memref
+  // types may contain dangling commas like "memref<?xf32, >" or
+  // "memref<1024xf32, strided<[1], offset: ?>, >".  Clean these up by
+  // removing the trailing ", " before the closing '>'.
+  for (;;) {
+    auto mrPos = l.find("memref<");
+    if (mrPos == std::string::npos) break;
+    int depth = 0;
+    size_t mrEnd = std::string::npos;
+    for (size_t i = mrPos + 7; i < l.size(); ++i) {
+      if (l[i] == '<') depth++;
+      else if (l[i] == '>') {
+        if (depth == 0) { mrEnd = i; break; }
+        depth--;
+      }
+    }
+    if (mrEnd == std::string::npos) break;
+    // Check content just before the closing >
+    // Pattern: ... ,  >  or ... , >  -> remove ", " 
+    size_t scanStart = mrPos + 7;
+    // Find ", " followed by ">" at depth 0 inside the memref
+    // We check if the char just before > is a space preceded by comma
+    if (mrEnd > scanStart && l[mrEnd - 1] == ' ') {
+      size_t commaCheck = mrEnd - 2;
+      while (commaCheck > scanStart && l[commaCheck] == ' ')
+        commaCheck--;
+      if (commaCheck > scanStart && l[commaCheck] == ',') {
+        // Remove from commaCheck to mrEnd (inclusive of the space but not >)
+        l.erase(commaCheck, mrEnd - commaCheck);
+        continue; // re-process since positions shifted
+      }
+    }
+    break;
+  }
+  return l;
+}
+
+static std::string replaceAddressSpaces(std::string l) {
+  // Replace #hivm.address_space<xxx> with empty string.
+  // LLVM 23 rejects integer memory spaces in memref with strided layout,
+  // and our generic ops carry src_space/dst_space attributes anyway.
+  size_t pos = 0;
+  while ((pos = l.find("#hivm.address_space<", pos)) != std::string::npos) {
+    auto end = l.find('>', pos);
+    if (end == std::string::npos) break;
+    l.replace(pos, end - pos + 1, "");
+  }
+  l = cleanMemrefTrailingComma(l);
+
+  // Also strip standalone integer memory spaces that appear after
+  // strided layouts or as the sole memory-space in memref types.
+  // e.g. "memref<1024xf32, 1>" -> "memref<1024xf32>"
+  //      "strided<[1], offset: ?>, 0>" -> "strided<[1], offset: ?>"
+  for (;;) {
+    auto mrPos = l.find("memref<");
+    if (mrPos == std::string::npos) break;
+    int depth = 0;
+    size_t mrEnd = std::string::npos;
+    for (size_t i = mrPos + 7; i < l.size(); ++i) {
+      if (l[i] == '<') depth++;
+      else if (l[i] == '>') {
+        if (depth == 0) { mrEnd = i; break; }
+        depth--;
+      }
+    }
+    if (mrEnd == std::string::npos) break;
+    auto content = llvm::StringRef(l).slice(mrPos + 7, mrEnd);
+    // Match trailing ", <digits>" before closing >
+    auto lastComma = content.rfind(',');
+    if (lastComma != llvm::StringRef::npos) {
+      auto afterComma = content.slice(lastComma + 1, content.size()).trim();
+      long val = 0;
+      if (!afterComma.getAsInteger(10, val) && afterComma.size() <= 2) {
+        auto fullCommaPos = mrPos + 7 + lastComma;
+        l.erase(fullCommaPos, mrEnd - fullCommaPos);
+        l = cleanMemrefTrailingComma(l);
+        continue;
+      }
+    }
+    break;
+  }
+  return l;
+}
+  static std::string spaceNumToName(int num) {
+  switch (num) {
+  case 0: return "gm";
+  case 1: return "ub";
+  case 2: return "l1";
+  case 3: return "l0a";
+  case 4: return "l0b";
+  case 5: return "l0c";
+  case 6: return "cbuf";
+  case 7: return "cc";
+  default: return "";
+  }
+}
+
+static int extractSpaceFromMemrefType(llvm::StringRef typeStr) {
+  // Match trailing integer after last comma before closing >
+  // e.g. "memref<1024xf32, 1>" -> 1
+  //      "memref<128x128xf16, strided<[128,1],offset:?>, 6>" -> 6
+  auto lastGt = typeStr.rfind('>');
+  if (lastGt == llvm::StringRef::npos) return -1;
+  auto prefix = typeStr.slice(0, lastGt);
+  auto lastComma = prefix.rfind(',');
+  if (lastComma == llvm::StringRef::npos) return -1;
+  auto numStr = prefix.slice(lastComma + 1, prefix.size()).trim();
+  // Skip "strided" or "offset" keywords
+  if (numStr.starts_with("strided") || numStr.starts_with("offset"))
+    return -1;
+  long val = 0;
+  if (!numStr.getAsInteger(10, val)) return static_cast<int>(val);
+  return -1;
+}
+
+static std::string sanitizeHivmCustomOp(llvm::StringRef line) {
+  // Match: [%result =] hivm.hir.<opname>...
+  // These custom-assembly ops cannot be parsed by unregistered dialect
+  // in LLVM 23+, so we convert them to generic "hivm.hir.<opname>" format.
+  auto trimmed = line.trim();
+
+  // Extract indent and optional result assignment
+  size_t contentStart = 0;
+  std::string indent;
+  for (size_t i = 0; i < line.size(); ++i) {
+    if (line[i] == ' ' || line[i] == '\t')
+      indent += line[i];
+    else {
+      contentStart = i;
+      break;
+    }
+  }
+  if (contentStart >= line.size()) return line.str();
+
+  auto rest = llvm::StringRef(line).drop_front(contentStart);
+  std::string resultAssign;
+  llvm::StringRef opBody;
+  if (rest.starts_with("%")) {
+    auto eqPos = rest.find('=');
+    if (eqPos == llvm::StringRef::npos) return line.str();
+    resultAssign = rest.slice(0, eqPos + 1).str() + " ";
+    opBody = rest.drop_front(eqPos + 1).trim();
+  } else {
+    opBody = rest;
+  }
+
+  if (!opBody.starts_with("hivm.hir.")) return line.str();
+
+  // Extract op name after hivm.hir.
+  auto dotAfterHir = opBody.drop_front(9); // skip "hivm.hir."
+  auto opNameEnd = dotAfterHir.find_first_of("([ \t");
+  if (opNameEnd == llvm::StringRef::npos) opNameEnd = dotAfterHir.size();
+  std::string opName = dotAfterHir.slice(0, opNameEnd).str();
+
+  // --- pointer_cast(%val) : result_type ---
+  if (opName == "pointer_cast") {
+    auto m = opBody.find('(');
+    auto mEnd = opBody.find(')', m);
+    if (m == llvm::StringRef::npos || mEnd == llvm::StringRef::npos)
+      return line.str();
+    std::string operand = opBody.slice(m + 1, mEnd).trim().str();
+    auto colonPos = opBody.find(':', mEnd);
+    if (colonPos == llvm::StringRef::npos) return line.str();
+    std::string resultType = opBody.slice(colonPos + 1, opBody.size()).trim().str();
+    int spNum = extractSpaceFromMemrefType(resultType);
+    std::string dstSpaceAttr = spNum >= 0 ? (" dst_space = \"" + spaceNumToName(spNum) + "\"") : "";
+    return indent + resultAssign + "\"hivm.hir.pointer_cast\"(" + operand + ") {" + dstSpaceAttr + "} : (i64) -> " + resultType;
+  }
+
+  // --- set_flag[<PIPE_X>, <PIPE_Y>, <EVENT_Z>] ---
+  // --- wait_flag[<PIPE_X>, <PIPE_Y>, <EVENT_Z>] ---
+  if (opName == "set_flag" || opName == "wait_flag") {
+    // Parse [<SET>, <WAIT>, <EVENT>]
+    auto bracketStart = opBody.find('[');
+    auto bracketEnd = opBody.find(']', bracketStart);
+    if (bracketStart == llvm::StringRef::npos || bracketEnd == llvm::StringRef::npos)
+      return line.str();
+    auto inside = opBody.slice(bracketStart + 1, bracketEnd).trim();
+    // Split by comma
+    llvm::SmallVector<llvm::StringRef, 4> parts;
+    inside.split(parts, ',');
+    if (parts.size() < 3) return line.str();
+    llvm::StringRef setPipeRef = parts[0].trim();
+    llvm::StringRef waitPipeRef = parts[1].trim();
+    llvm::StringRef eventIdRef = parts[2].trim();
+    std::string setPipe, waitPipe, eventId;
+    if (setPipeRef.starts_with("<") && setPipeRef.ends_with(">"))
+      setPipe = setPipeRef.slice(1, setPipeRef.size() - 1).str();
+    else setPipe = setPipeRef.str();
+    if (waitPipeRef.starts_with("<") && waitPipeRef.ends_with(">"))
+      waitPipe = waitPipeRef.slice(1, waitPipeRef.size() - 1).str();
+    else waitPipe = waitPipeRef.str();
+    if (eventIdRef.starts_with("<") && eventIdRef.ends_with(">"))
+      eventId = eventIdRef.slice(1, eventIdRef.size() - 1).str();
+    else eventId = eventIdRef.str();
+    return indent + resultAssign + "\"hivm.hir." + opName + "\"() {set_pipe = \"" + setPipe + "\", wait_pipe = \"" + waitPipe + "\", static_event_id = \"" + eventId + "\"} : () -> ()";
+  }
+
+  // --- pipe_barrier[<PIPE_ALL>] ---
+  if (opName == "pipe_barrier") {
+    auto bracketStart = opBody.find('[');
+    auto bracketEnd = opBody.find(']', bracketStart);
+    if (bracketStart == llvm::StringRef::npos || bracketEnd == llvm::StringRef::npos)
+      return line.str();
+    auto pipeTok = opBody.slice(bracketStart + 1, bracketEnd).trim();
+    if (pipeTok.starts_with("<") && pipeTok.ends_with(">"))
+      pipeTok = pipeTok.slice(1, pipeTok.size() - 1);
+    return indent + resultAssign + "\"hivm.hir.pipe_barrier\"() {pipe = \"" + pipeTok.str() + "\"} : () -> ()";
+  }
+
+  // --- load/store/vadd/... ins(...) outs(...) ---
+  // Generic ins/outs pattern: hivm.hir.<op> ins(%x : type, %y : type2) outs(%z : type3)
+  // We convert to: "hivm.hir.<op>"(%x, %y, %z) {src_space="...", dst_space="..."} : (type, type2, type3) -> ()
+  if (opBody.contains("ins(")) {
+    auto insStart = opBody.find("ins(");
+    auto insEnd = opBody.find(')', insStart);
+    if (insStart == llvm::StringRef::npos || insEnd == llvm::StringRef::npos)
+      return line.str();
+
+    auto outsStart = opBody.find("outs(", insEnd);
+    auto outsEnd = llvm::StringRef::npos;
+    std::string insContent = opBody.slice(insStart + 4, insEnd).trim().str();
+    std::string outsContent;
+    if (outsStart != llvm::StringRef::npos) {
+      outsEnd = opBody.find(')', outsStart);
+      outsContent = opBody.slice(outsStart + 5, outsEnd).trim().str();
+    }
+
+    // Parse operands: "%name : type1, %name2 : type2" or "%a, %b : type1, type2"
+    std::vector<std::string> operands;
+    std::vector<std::string> types;
+    auto parseInsOrOuts = [&](llvm::StringRef content) {
+      // Split by commas at depth 0 (respecting <...>)
+      llvm::SmallVector<llvm::StringRef, 8> pieces;
+      int depth = 0;
+      size_t last = 0;
+      for (size_t i = 0; i < content.size(); ++i) {
+        if (content[i] == '<') depth++;
+        else if (content[i] == '>') depth--;
+        else if (content[i] == ',' && depth == 0) {
+          pieces.push_back(content.slice(last, i).trim());
+          last = i + 1;
+        }
+      }
+      if (last < content.size())
+        pieces.push_back(content.slice(last, content.size()).trim());
+
+      // Now parse each piece: either "%name" or "%name : type"
+      // Collect all operands first, then types from colon-separated parts
+      std::vector<std::string> localOps;
+      std::vector<std::string> localTypes;
+      bool hasColonSep = false;
+      // Check if format is "%a, %b : type1, type2" (single colon)
+      auto colonPos = content.find(':');
+      if (colonPos != llvm::StringRef::npos) {
+        // Format: operands before colon, types after colon
+        auto opsPart = content.slice(0, colonPos).trim();
+        auto typesPart = content.slice(colonPos + 1, content.size()).trim();
+        // Parse operands
+        llvm::SmallVector<llvm::StringRef, 4> opList;
+        opsPart.split(opList, ',');
+        for (auto &o : opList) {
+          auto trimmedOp = o.trim();
+          if (trimmedOp.starts_with("%")) localOps.push_back(trimmedOp.str());
+        }
+        // Parse types (split by comma at depth 0)
+        int td = 0;
+        size_t tlast = 0;
+        for (size_t i = 0; i < typesPart.size(); ++i) {
+          if (typesPart[i] == '<') td++;
+          else if (typesPart[i] == '>') td--;
+          else if (typesPart[i] == ',' && td == 0) {
+            localTypes.push_back(typesPart.slice(tlast, i).trim().str());
+            tlast = i + 1;
+          }
+        }
+        if (tlast < typesPart.size())
+          localTypes.push_back(typesPart.slice(tlast, typesPart.size()).trim().str());
+      } else {
+        // No colon: just operand names
+        for (auto &p : pieces) {
+          auto tp = p.trim();
+          if (tp.starts_with("%")) localOps.push_back(tp.str());
+        }
+      }
+      for (auto &o : localOps) operands.push_back(o);
+      for (auto &t : localTypes) types.push_back(t);
+    };
+
+    parseInsOrOuts(insContent);
+    parseInsOrOuts(outsContent);
+
+    // Determine src_space and dst_space from types
+    std::string srcSpaceAttr;
+    std::string dstSpaceAttr;
+    if (!types.empty()) {
+      // src_space from first ins type, dst_space from first outs type
+      // But we already parsed ins types first, outs types second
+      // We need to know how many ins types there are
+      size_t insTypeCount = 0;
+      auto colonInIns = llvm::StringRef(insContent).find(':');
+      if (colonInIns != llvm::StringRef::npos) {
+        auto typesPart = llvm::StringRef(insContent).slice(colonInIns + 1, insContent.size()).trim();
+        int td = 0;
+        for (size_t i = 0; i < typesPart.size(); ++i) {
+          if (typesPart[i] == '<') td++;
+          else if (typesPart[i] == '>') td--;
+          else if (typesPart[i] == ',' && td == 0) insTypeCount++;
+        }
+        insTypeCount++; // last type after final comma
+      }
+      // src_space from first type (which is from ins)
+      if (!types.empty()) {
+        int sp = extractSpaceFromMemrefType(types[0]);
+        if (sp >= 0) srcSpaceAttr = " src_space = \"" + spaceNumToName(sp) + "\"";
+      }
+      // dst_space from first outs type
+      if (!outsContent.empty() && types.size() > insTypeCount) {
+        int sp = extractSpaceFromMemrefType(types[insTypeCount]);
+        if (sp >= 0) dstSpaceAttr = " dst_space = \"" + spaceNumToName(sp) + "\"";
+      }
+    }
+
+    // Build generic op string
+    std::string opsStr;
+    for (size_t i = 0; i < operands.size(); ++i) {
+      if (i > 0) opsStr += ", ";
+      opsStr += operands[i];
+    }
+    std::string typesStr;
+    for (size_t i = 0; i < types.size(); ++i) {
+      if (i > 0) typesStr += ", ";
+      typesStr += types[i];
+    }
+    std::string attrsStr = srcSpaceAttr + dstSpaceAttr;
+
+    return indent + resultAssign + "\"hivm.hir." + opName + "\"(" + opsStr + ") {" + attrsStr + "} : (" + typesStr + ") -> ()";
+  }
+
+  // Fallback: unknown custom format, keep as-is (will fail to parse but that's ok)
+  return line.str();
+}
+
 static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
   // Pre-process to remove custom dialect attributes/types that require
   // registered dialects.  When built without BiShengIR, the parser cannot
   // handle #hivm.address_space<...>, #hacc.arg_type<...>, etc.
+  // LLVM 23+ also rejects custom-assembly format for unregistered dialects,
+  // so we must convert all hivm.hir.* ops to generic "hivm.hir.*"(oprs){attrs}:(...)
+  // format.
   std::string preprocessed;
   {
     llvm::SmallVector<llvm::StringRef, 0> lines;
     buffer.split(lines, '\n');
     llvm::raw_string_ostream os(preprocessed);
-    for (llvm::StringRef line : lines) {
-      llvm::StringRef trimmed = line.trim();
+    for (llvm::StringRef lineRef : lines) {
+      llvm::StringRef trimmed = lineRef.trim();
       if (trimmed.starts_with("warning: ") || trimmed.ends_with("warning generated."))
         break;
       if (trimmed.starts_with("ld.lld:") || trimmed.starts_with("[ERROR]") ||
           trimmed.starts_with("[WARNING]") || trimmed.starts_with("[INFO]"))
         continue;
-      std::string l = line.str();
-      // Replace #hivm.address_space<xxx> with integer memory space
-      while (auto pos = l.find("#hivm.address_space<")) {
-        auto end = l.find('>', pos);
-        if (end == std::string::npos) break;
-        auto space = llvm::StringRef(l).slice(pos + 20, end);
-        int num = 0;
-        if (space == "gm") num = 0;
-        else if (space == "ub") num = 1;
-        else if (space == "l1") num = 2;
-        else if (space == "l0a") num = 3;
-        else if (space == "l0b") num = 4;
-        else if (space == "l0c") num = 5;
-        else if (space == "cbuf") num = 6;
-        l.replace(pos, end - pos + 1, std::to_string(num));
-      }
+
+      std::string l = replaceAddressSpaces(lineRef.str());
+
       // Strip whole custom attribute assignments whose values require
       // external dialect parsers.
       eraseAttributeAssignment(l, "hacc.arg_type");
       eraseAttributeAssignment(l, "hivm.func_core_type");
       eraseAttributeAssignment(l, "hacc.function_kind");
+
+      // Check if line contains a hivm.hir.* custom-format op
+      // (custom format: hivm.hir.xxx(...), not generic "hivm.hir.xxx"(...))
+      auto hivmPos = l.find("hivm.hir.");
+bool isGeneric = (hivmPos > 0 && l[hivmPos - 1] == '"') ||
+                        (hivmPos == 0 && llvm::StringRef(l).starts_with("\"hivm.hir."));
+      bool containsHivmOp = (hivmPos != std::string::npos);
+
+      if (containsHivmOp && !isGeneric) {
+        l = sanitizeHivmCustomOp(l);
+      }
+
       os << l << "\n";
     }
     os.flush();
@@ -1599,9 +1946,29 @@ static std::pair<std::string, std::string> parseLoadStoreSpaces(llvm::StringRef 
     spaces.push_back(canonicalizeAddressSpace(line.slice(pos, end)));
     pos = end + 1;
   }
-  if (spaces.size() < 2)
-    return {"", ""};
-  return {spaces[0], spaces[1]};
+  if (spaces.size() >= 2)
+    return {spaces[0], spaces[1]};
+
+  // Fallback: try reading src_space/dst_space from generic op attributes
+  std::string srcSpace, dstSpace;
+  auto srcPos = line.find("src_space = \"");
+  if (srcPos != llvm::StringRef::npos) {
+    auto valStart = srcPos + strlen("src_space = \"");
+    auto valEnd = line.find('"', valStart);
+    if (valEnd != llvm::StringRef::npos)
+      srcSpace = line.slice(valStart, valEnd).str();
+  }
+  auto dstPos = line.find("dst_space = \"");
+  if (dstPos != llvm::StringRef::npos) {
+    auto valStart = dstPos + strlen("dst_space = \"");
+    auto valEnd = line.find('"', valStart);
+    if (valEnd != llvm::StringRef::npos)
+      dstSpace = line.slice(valStart, valEnd).str();
+  }
+  if (!srcSpace.empty() || !dstSpace.empty())
+    return {srcSpace, dstSpace};
+
+  return {"", ""};
 }
 
 static std::map<std::string, int64_t> parseArgBindings(llvm::StringRef bindings) {
@@ -2924,6 +3291,10 @@ bool HIVMAnalyzer::analyzeModule(mlir::ModuleOp module,
     finalizeDiscreteEventReport(report, config);
   else
     finalizeScheduledReport(report, config);
+
+  HIVMBottleneckDiagnoser diagnoser(config);
+  diagnoser.diagnose(report, report.bottleneckReport);
+
   return true;
 }
 

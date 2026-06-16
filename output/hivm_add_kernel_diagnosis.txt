@@ -1,0 +1,96 @@
+=== HIVM Analysis ===
+Source mode: direct-hivm
+Source: /Users/bourne/vTriton/test/hivm_add_kernel.generic.mlir
+Scheduler: static
+Hardware: Ascend 910B @ 1.85 GHz
+
+Summary:
+  Operations: 19
+  Sync ops: 9
+  Barriers: 1
+  Scalar/unknown fallback ops: 3
+  One-iteration critical path: 372 cycles (0.201 us)
+  Weighted pipe max: 245 cycles (0.132 us)
+  Sync cycles: 76
+  Barrier cycles: 64
+  Max loop multiplier: 1
+
+Per-pipe utilization (one iteration):
+  PIPE_V: 48 cycles, 12.9%
+  PIPE_MTE2_V: 181 cycles, 48.7%
+  PIPE_MTE3: 80 cycles, 21.5%
+  PIPE_S: 3 cycles, 0.8%
+
+Per-pipe weighted cycles:
+  PIPE_V: 48
+  PIPE_MTE2_V: 181
+  PIPE_MTE3: 80
+  PIPE_S: 3
+
+Top operations by weighted cost:
+  line 18 load [PIPE_MTE2_V]: 88 weighted cycles, 4096 bytes, 1024 elems
+  line 21 load [PIPE_MTE2_V]: 88 weighted cycles, 4096 bytes, 1024 elems
+  line 27 store [PIPE_MTE3]: 78 weighted cycles, 4096 bytes, 1024 elems
+  line 28 pipe_barrier [PIPE_ALL]: 64 weighted cycles
+  line 24 vadd [PIPE_V]: 43 weighted cycles, 4096 bytes, 1024 elems
+  line 17 wait_flag [PIPE_MTE2_V]: 2 weighted cycles
+  line 20 wait_flag [PIPE_MTE2_V]: 2 weighted cycles
+  line 23 wait_flag [PIPE_V]: 2 weighted cycles
+  line 26 wait_flag [PIPE_MTE3]: 2 weighted cycles
+  line 7 reinterpret_cast [PIPE_S]: 1 weighted cycles
+
+=== Bottleneck Diagnosis ===
+Global root cause: SyncOverhead
+  Evidence: [syncCycles=76 cyc, barrierCycles=64 cyc, oneIterationCycles=372 cyc, syncCycles/oneIterationCycles=20.4%, barrierCycles/oneIterationCycles=17.2%]
+  syncCycles/oneIterationCycles=20.4%, barrierCycles/oneIterationCycles=17.2% (thresholds: sync>20% or barrier>15%)
+  -> Minimize global barriers; use set_flag/wait_flag for per-pipe sync [reason: barrierCycles=64 cyc at 17.2% of oneIterationCycles; per-pipe sync avoids blocking all pipes]
+  -> Enable multi-buffer pipelining to decouple producer/consumer [reason: syncCycles=76 cyc at 20.4% of oneIterationCycles; multi-buffer reduces sync frequency]
+
+Sync/barrier overhead (from syncCycles/barrierCycles/oneIterationCycles):
+  syncCycles/oneIterationCycles = 20.4%
+  barrierCycles/oneIterationCycles = 17.2%
+
+Pipeline diagnosis:
+  Evidence: [weightedPipeCycles[PIPE_MTE2_V=181, weightedPipeCycles[PIPE_S=3, ratio=60.3x]
+  Bottleneck pipe: PIPE_MTE2_V
+  Imbalance ratio (weightedPipeCycles max/min): 60.3x
+  PIPE_MTE2_V weightedPipeCycles=181 vs PIPE_S weightedPipeCycles=3 (ratio 60.3x > 3.0x threshold)
+  -> Overlap PIPE_MTE2_V work with PIPE_S prefetch via multi-buffer pipelining [reason: weightedPipeCycles imbalance ratio=60.3x; multi-buffer lets slow pipe prefetch while busy pipe computes]
+  -> Consider Cube-Vector split to exploit dual-core parallelism [reason: weightedPipeCycles shows single-core imbalance; AIC+AIV dual-core can distribute load]
+
+Per-op diagnosis (top 7 by duration, excluding sync ops):
+  line 18 load [PIPE_MTE2_V]: StartupOverhead
+    Evidence: [duration=88 cyc, startup_latency=50 cyc, bytes=4096, startup/duration=56.8%]
+    load on PIPE_MTE2_V: startup_latency (50 cyc) > transfer_work (38 cyc), bytes=4096 too small to amortize startup
+    duration=88 cyc, theoretical_min=16 cyc, overhead=81.8%
+    -> Increase tile size to amortize startup latency [reason: startup_latency=50 cyc > transfer_work; larger bytes makes startup占比 smaller]
+    -> Fuse adjacent transfers to reduce per-transfer overhead [reason: each transfer pays 50 cyc startup; fewer transfers = fewer startups]
+  line 21 load [PIPE_MTE2_V]: StartupOverhead
+    Evidence: [duration=88 cyc, startup_latency=50 cyc, bytes=4096, startup/duration=56.8%]
+    load on PIPE_MTE2_V: startup_latency (50 cyc) > transfer_work (38 cyc), bytes=4096 too small to amortize startup
+    duration=88 cyc, theoretical_min=16 cyc, overhead=81.8%
+    -> Increase tile size to amortize startup latency [reason: startup_latency=50 cyc > transfer_work; larger bytes makes startup占比 smaller]
+    -> Fuse adjacent transfers to reduce per-transfer overhead [reason: each transfer pays 50 cyc startup; fewer transfers = fewer startups]
+  line 27 store [PIPE_MTE3]: StartupOverhead
+    Evidence: [duration=78 cyc, startup_latency=40 cyc, bytes=4096, startup/duration=51.3%]
+    store on PIPE_MTE3: startup_latency (40 cyc) > transfer_work (38 cyc), bytes=4096 too small to amortize startup
+    duration=78 cyc, theoretical_min=16 cyc, overhead=79.5%
+    -> Increase tile size to amortize startup latency [reason: startup_latency=40 cyc > transfer_work; larger bytes makes startup占比 smaller]
+    -> Fuse adjacent transfers to reduce per-transfer overhead [reason: each transfer pays 40 cyc startup; fewer transfers = fewer startups]
+  line 24 vadd [PIPE_V]: StartupOverhead
+    Evidence: [duration=43 cyc, startup_latency=35 cyc, compute_work=8 cyc, elements=1024]
+    vadd on PIPE_V: startup_latency (35 cyc) > compute_work (8 cyc), elements=1024 too few to amortize startup
+    duration=43 cyc, theoretical_min=51 cyc, overhead=-18.6%
+    -> Increase tile size to amortize startup latency [reason: startup_latency=35 cyc > compute_work; more elements dilutes startup占比]
+  line 7 reinterpret_cast [PIPE_S]: LowParallelism
+    Evidence: [duration=1 cyc, pipe=PIPE_S]
+    reinterpret_cast on PIPE_S: unclassified, duration=1 cyc
+    duration=1 cyc, theoretical_min=0 cyc, overhead=100.0%
+  line 9 reinterpret_cast [PIPE_S]: LowParallelism
+    Evidence: [duration=1 cyc, pipe=PIPE_S]
+    reinterpret_cast on PIPE_S: unclassified, duration=1 cyc
+    duration=1 cyc, theoretical_min=0 cyc, overhead=100.0%
+  line 11 reinterpret_cast [PIPE_S]: LowParallelism
+    Evidence: [duration=1 cyc, pipe=PIPE_S]
+    reinterpret_cast on PIPE_S: unclassified, duration=1 cyc
+    duration=1 cyc, theoretical_min=0 cyc, overhead=100.0%

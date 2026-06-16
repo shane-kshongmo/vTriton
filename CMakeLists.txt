@@ -146,7 +146,7 @@ endif()
 message(STATUS "TRITONSIM_HAS_TRITON: ${TRITONSIM_HAS_TRITON}")
 
 #===----------------------------------------------------------------------===//
-# Optional BiShengIR HIVM integration
+# Optional BiShengIR HIVM integration (Pre-built from AscendNPU-IR)
 #===----------------------------------------------------------------------===//
 
 set(TRITONSIM_HAS_BISHENGIR_HIVM OFF)
@@ -159,8 +159,6 @@ if(EXISTS "${_default_npu_ir}/bishengir/include/bishengir/Dialect/HIVM/IR/HIVM.h
 endif()
 
 set(_default_bishengir_build "")
-# Prefer AscendNPU-IR/build (from build.sh --fast-build) over Python wheel build
-# fast-build puts all libs flat in build/lib/ (no Dialect/HIVM/IR/ subdirs)
 if(EXISTS "${_default_npu_ir}/build/lib/libBiShengIRHIVMDialect.a")
   set(_default_bishengir_build "${_default_npu_ir}/build")
 elseif(EXISTS "${_default_npu_ir}/python/build/cmake.linux-x86_64-cpython-3.12/third_party/ascend/AscendNPU-IR/bishengir/lib/Dialect/HIVM/IR/libBiShengIRHIVMDialect.a")
@@ -175,13 +173,10 @@ set(TRITONSIM_BISHENGIR_BUILD_DIR "${_default_bishengir_build}" CACHE PATH
 
 if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
   set(_bishengir_src_inc "${TRITONSIM_BISHENGIR_SRC_DIR}/include")
-  # Generated headers: build/tools/bishengir/bishengir/include/ (fast-build)
-  # or build/include/ (install-tree layout)
   set(_bishengir_gen_inc "${TRITONSIM_BISHENGIR_BUILD_DIR}/tools/bishengir/bishengir/include")
   if(NOT EXISTS "${_bishengir_gen_inc}/bishengir/Dialect/HIVM/IR/HIVMOps.h.inc")
     set(_bishengir_gen_inc "${TRITONSIM_BISHENGIR_BUILD_DIR}/include")
   endif()
-  # Lib may be flat in lib/ (fast-build) or in lib/Dialect/HIVM/IR/ (install)
   set(_bishengir_hivm_lib_flat
       "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/libBiShengIRHIVMDialect.a")
   set(_bishengir_hivm_lib_nested
@@ -199,7 +194,6 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
       "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/libBiShengIR*.a"
       "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/**/*.a")
     list(SORT _bishengir_all_libs)
-    # Preferred libs (flat layout from fast-build, fallback to nested)
     set(_bishengir_preferred_names
       libBiShengIRHIVMDialect.a
       libBiShengIRHIVMUtils.a
@@ -221,12 +215,6 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
         list(APPEND _bishengir_preferred_libs
              "${TRITONSIM_BISHENGIR_BUILD_DIR}/lib/${_name}")
       endif()
-      # Nested install-tree layout (lib/Dialect/<Sub>/IR/) is only relevant
-      # for libBiShengIRHIVMDialect.a; all other dialects have distinct
-      # subdirs (HACC/IR/, MemRef/IR/, etc.) and are picked up by the
-      # GLOB_RECURSE below.  With --start-group/--end-group wrapping the
-      # full set, link ordering from the preferred list is not required
-      # for correctness.
     endforeach()
     set(TRITONSIM_BISHENGIR_HIVM_LIBS "")
     foreach(_lib IN LISTS _bishengir_preferred_libs)
@@ -236,8 +224,6 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
       endif()
     endforeach()
     list(APPEND TRITONSIM_BISHENGIR_HIVM_LIBS ${_bishengir_all_libs})
-    # Wrap in --start-group/--end-group to resolve circular deps between
-    # bishengir dialect libraries (e.g. DialectUtils -> MemRefDialect)
     set(TRITONSIM_BISHENGIR_HIVM_LIBS
       -Wl,--start-group ${TRITONSIM_BISHENGIR_HIVM_LIBS} -Wl,--end-group)
     set(TRITONSIM_BISHENGIR_INCLUDE_DIRS
@@ -246,10 +232,10 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
     set(TRITONSIM_HAS_BISHENGIR_HIVM ON)
     include_directories(${TRITONSIM_BISHENGIR_INCLUDE_DIRS})
     add_definitions(-DTRITONSIM_HAS_BISHENGIR_HIVM=1)
-    message(STATUS "=== BiShengIR HIVM integration ENABLED ===")
-    message(STATUS "BiShengIR source: ${TRITONSIM_BISHENGIR_SRC_DIR}")
-    message(STATUS "BiShengIR build:  ${TRITONSIM_BISHENGIR_BUILD_DIR}")
-    message(STATUS "BiShengIR gen inc: ${_bishengir_gen_inc}")
+    message(STATUS "=== BiShengIR HIVM integration ENABLED (pre-built from AscendNPU-IR) ===")
+    message(STATUS "  BiShengIR source: ${TRITONSIM_BISHENGIR_SRC_DIR}")
+    message(STATUS "  BiShengIR build:  ${TRITONSIM_BISHENGIR_BUILD_DIR}")
+    message(STATUS "  BiShengIR gen inc: ${_bishengir_gen_inc}")
   else()
     message(STATUS
       "BiShengIR HIVM support requested but local headers/libs were not found.\n"
@@ -257,7 +243,7 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
       "  ${_bishengir_src_inc}/bishengir/Dialect/HIVM/IR/HIVM.h\n"
       "  ${_bishengir_gen_inc}/bishengir/Dialect/HIVM/IR/HIVMOps.h.inc\n"
       "  ${_bishengir_hivm_lib}\n"
-      "Continuing with generic/unregistered HIVM parsing.")
+      "Run bash scripts/build_bishengir.sh first, then reconfigure.")
   endif()
 endif()
 

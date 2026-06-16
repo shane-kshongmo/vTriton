@@ -733,6 +733,7 @@ int main(int argc, char **argv) {
   }
 
   report.print(llvm::outs(), getHardwareConfig());
+  report.bottleneckReport.print(llvm::outs(), getHardwareConfig());
 
   if (!perfettoTraceFile.empty()) {
     std::error_code ec;
