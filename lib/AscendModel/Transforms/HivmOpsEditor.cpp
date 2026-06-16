@@ -41,7 +41,7 @@ OwningOpRef<ModuleOp> HivmOpsEditor::loadFromFile(MLIRContext &ctx,
     llvm::errs() << "HivmOpsEditor: failed to parse " << path << "\n";
     return nullptr;
   }
-  return std::move(*parsed);
+  return parsed;
 }
 
 LogicalResult HivmOpsEditor::exportToFile(llvm::StringRef path) {
