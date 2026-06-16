@@ -64,11 +64,10 @@ def parse_kernel_time_us(
     3. If op_name_filter given: keep rows where op_name contains the filter
        (exact normalized match, not unrestricted substring).
     4. Raise ValueError if no rows remain.
-    5. Sort by start_time_us. Group sequential rows into invocations:
-       each invocation = one or more AiCore rows that started within a tight
-       time window (gap threshold: 10× median row duration). Wall-clock latency
-       per invocation = max duration_us across concurrent rows for that invocation
-       (parallel device tasks should not be summed).
+    5. Sort by start_time_us. Group overlapping or near-overlapping rows into
+       invocations. Wall-clock latency per invocation = max duration_us across
+       concurrent rows for that invocation (parallel device tasks should not
+       be summed).
     6. Discard the first n_warmup invocations explicitly.
     7. Raise ValueError if fewer than 1 valid invocation remains.
     8. Return statistics.median(per_invocation_durations).
@@ -119,33 +118,31 @@ def parse_kernel_time_us(
     # Sort by start_time_us
     aicore_rows.sort(key=lambda r: r.start_time_us)
 
-    # Group into invocations using gap detection.
-    # NOTE: gap_threshold = 10× median row duration is a heuristic.  Known
-    # failure mode: tightly-pipelined real traces where the inter-invocation
-    # gap is comparable to per-row duration will merge adjacent invocations
-    # into one, undercounting n_invocations and inflating per-invocation
-    # latency (max across merged rows).  Acceptable for A.6.1; a more robust
-    # detector (e.g. adaptive threshold from bimodal gap distribution) is
-    # future work.
+    # Rows from one mixed-core launch overlap in time. A new invocation starts
+    # after the active interval has ended, allowing a small timestamp jitter.
     durations = [r.duration_us for r in aicore_rows]
     median_duration = statistics.median(durations)
-    gap_threshold = 10.0 * median_duration
+    overlap_tolerance_us = max(1.0, 0.01 * median_duration)
 
     invocations = []
     current_invocation = [aicore_rows[0]]
+    current_end_us = (
+        aicore_rows[0].start_time_us + aicore_rows[0].duration_us
+    )
 
     for i in range(1, len(aicore_rows)):
         row = aicore_rows[i]
-        prev_row = aicore_rows[i - 1]
-        time_gap = row.start_time_us - prev_row.start_time_us
 
-        if time_gap > gap_threshold:
-            # New invocation
+        if row.start_time_us > current_end_us + overlap_tolerance_us:
             invocations.append(current_invocation)
             current_invocation = [row]
+            current_end_us = row.start_time_us + row.duration_us
         else:
-            # Same invocation
             current_invocation.append(row)
+            current_end_us = max(
+                current_end_us,
+                row.start_time_us + row.duration_us,
+            )
 
     invocations.append(current_invocation)
 

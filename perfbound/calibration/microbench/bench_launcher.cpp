@@ -9,6 +9,8 @@
 #include "aclrtlaunch_mandatory_handoff.h"
 #include "aclrtlaunch_mte_gm_to_l1.h"
 #include "aclrtlaunch_mte_gm_to_ub.h"
+#include "aclrtlaunch_mte_hbm_allcore.h"
+#include "aclrtlaunch_mte_l0c_to_gm.h"
 #include "aclrtlaunch_mte_l1_to_l0a.h"
 #include "aclrtlaunch_mte_ub_to_gm.h"
 #include "aclrtlaunch_scalar_peak.h"
@@ -66,7 +68,8 @@ bool LaunchKernel(
     DeviceBuffers &buffers,
     uint32_t kValue,
     uint32_t mteStart,
-    uint32_t mteIters)
+    uint32_t mteIters,
+    uint32_t blockDim)
 {
     if (kernel == "cube_peak_fp16") {
         ACLRT_LAUNCH_KERNEL(cube_peak_fp16)(kCubeBlockDim, stream, buffers.a, buffers.b, buffers.c);
@@ -94,6 +97,12 @@ bool LaunchKernel(
         ACLRT_LAUNCH_KERNEL(mte_gm_to_l1)(kCubeBlockDim, stream, buffers.a, buffers.c, mteStart, mteIters);
     } else if (kernel == "mte_l1_to_l0a") {
         ACLRT_LAUNCH_KERNEL(mte_l1_to_l0a)(kCubeBlockDim, stream, buffers.a, buffers.c, mteStart, mteIters);
+    } else if (kernel == "mte_l0c_to_gm") {
+        // FixPipe (L0C->GM) sustained bandwidth; single Cube core (core 0 only).
+        ACLRT_LAUNCH_KERNEL(mte_l0c_to_gm)(kCubeBlockDim, stream, buffers.a, buffers.b, buffers.c, mteStart, mteIters);
+    } else if (kernel == "mte_hbm_allcore") {
+        // All-core HBM: launch on all 20 AIC cores via --block-dim to contend for HBM.
+        ACLRT_LAUNCH_KERNEL(mte_hbm_allcore)(blockDim, stream, buffers.a, buffers.c, mteStart, mteIters);
     } else if (kernel == "mandatory_handoff") {
         ACLRT_LAUNCH_KERNEL(mandatory_handoff)(kCubeBlockDim, stream, buffers.a, buffers.b, buffers.c, kValue);
     } else {
@@ -121,6 +130,7 @@ int main(int argc, char **argv)
     const uint32_t kValue = static_cast<uint32_t>(std::stoul(ArgValue(argc, argv, "--k", "128")));
     const uint32_t mteStart = static_cast<uint32_t>(std::stoul(ArgValue(argc, argv, "--mte-start", "0")));
     const uint32_t mteIters = static_cast<uint32_t>(std::stoul(ArgValue(argc, argv, "--mte-iters", "2048")));
+    const uint32_t blockDim = static_cast<uint32_t>(std::stoul(ArgValue(argc, argv, "--block-dim", "1")));
 
     CHECK_ACL(aclInit(nullptr));
     CHECK_ACL(aclrtSetDevice(0));
@@ -132,7 +142,7 @@ int main(int argc, char **argv)
     AllocateBuffers(buffers);
 
     for (int i = 0; i < repeat; ++i) {
-        if (!LaunchKernel(kernel, stream, buffers, kValue, mteStart, mteIters)) {
+        if (!LaunchKernel(kernel, stream, buffers, kValue, mteStart, mteIters, blockDim)) {
             std::cerr << "Unknown kernel: " << kernel << std::endl;
             FreeBuffers(buffers);
             CHECK_ACL(aclrtDestroyStream(stream));

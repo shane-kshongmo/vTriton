@@ -182,6 +182,38 @@ class TestHarmonicMean:
         assert result.binding_component == Component.MTE_GM, \
             f"Expected MTE_GM, got {result.binding_component.value}"
 
+    def test_mte_ub_uses_operation_specific_paths(self, calibration):
+        calibration["memory"].bw[("l0c", "gm", -1)] = MemBandwidth(
+            "l0c", "gm", bw_gb_per_s=100.0
+        )
+        calibration["memory"].bw[("ub", "gm", -1)] = MemBandwidth(
+            "ub", "gm", bw_gb_per_s=200.0
+        )
+        ops = [
+            OpRecord(
+                op_id=1, op_name="cube_store", component=Component.MTE_UB,
+                precision=Precision.FP16, pipe="FixPipe",
+                bytes_transferred=100_000, src_space="l0c", dst_space="ub",
+            ),
+            OpRecord(
+                op_id=2, op_name="vector_store", component=Component.MTE_UB,
+                precision=Precision.FP16, pipe="MTE3",
+                bytes_transferred=100_000, src_space="ub", dst_space="gm",
+            ),
+        ]
+        extract = HIVMExtract(operations=ops, handoffs=[])
+
+        result = compute_component_floor(
+            extract,
+            calibration["cube"],
+            calibration["vector"],
+            calibration["memory"],
+            calibration["core"],
+        )
+
+        assert result.per_component_us["mte_ub"] == pytest.approx(1.5)
+        assert result.total_bytes["mte_ub"] == 200_000
+
 
 # ── Serialization Tests ────────────────────────────────────────────────────
 
@@ -338,16 +370,16 @@ class TestIntegration:
 
         Arithmetic (real 910B3 A.1 constants):
           MTE_GM bytes  = (128*32*2 + 32*64*2) * 32 = 12288 * 32 = 393216 B
-          BW_gm_to_ub   = 86.9538 GB/s = 86953.8 B/us
-          T_mte_gm      = 393216 / 86953.8 = 4.522 us  ← binds
+          BW_gm_to_ub   = 86.4879 GB/s = 86487.9 B/us
+          T_mte_gm      = 393216 / 86487.9 = 4.546 us  ← binds
 
           Cube FP16     = 5.1586 TFLOPS = 5,158,560 FLOP/us
           Cube ops      = 2*128*64*32 * 32 = 16,777,216 FLOP
           T_cube        = 16,777,216 / 5,158,560 = 3.252 us
 
-          T_core_floor  = max(4.522, 3.252) = 4.522 us
-          T_grid_floor  = 409600 / (20 * 86953.8) = 0.236 us
-          T_bound       = max(4.522, 0.236) + 0 = 4.522 us
+          T_core_floor  = max(4.546, 3.252) = 4.546 us
+          T_grid_floor  = 409600 / (20 * 86487.9) = 0.237 us
+          T_bound       = max(4.546, 0.237) + 0 = 4.546 us
         """
         from perfbound.model.component_model import compute_component_floor_from_db
         from perfbound.model.grid_model import GridBound
@@ -373,9 +405,9 @@ class TestIntegration:
 
         result = combine(grid, comp, serial, kernel_name="test_matmul")
 
-        # Golden: T_bound = max(0.236, 4.522) + 0 = 4.522 us
-        assert abs(result.t_bound_us - 4.522) < 0.02, \
-            f"T_bound {result.t_bound_us:.3f} not ~4.522 us"
+        # Golden: T_bound = max(0.237, 4.546) + 0 = 4.546 us
+        assert abs(result.t_bound_us - 4.546) < 0.02, \
+            f"T_bound {result.t_bound_us:.3f} not ~4.546 us"
         assert result.binding_tier.value == "component"
         assert result.binding_component == Component.MTE_GM
 

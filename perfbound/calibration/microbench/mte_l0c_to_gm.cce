@@ -1,0 +1,19 @@
+/*
+ * MTE L0C to GM (FixPipe) Bandwidth Microbenchmark
+ *
+ * Measures sustained FixPipe bandwidth: L0C→GM transfer rate.
+ * This is the Cube output path (Fixpipe) that drains matmul results
+ * from the L0C accumulator to Global Memory.
+ *
+ * P0 constant: BW_l0c_to_gm_sustained
+ */
+#include "vt_microbench_common.h"
+
+extern "C" __global__ __aicore__ void mte_l0c_to_gm(
+    GM_ADDR a, GM_ADDR b, GM_ADDR c, uint32_t startIter, uint32_t iterCount)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
+    VTCalib::MteFixpipeKernel op;
+    op.Init(a, b, c, startIter, iterCount);
+    op.Process();
+}

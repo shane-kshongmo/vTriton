@@ -140,11 +140,7 @@ class TestRealHardwareParse:
         # mis-parse (e.g. summing rows, or picking a build_inputs aclnn row)
         # would land well outside it.
         assert 1.0e5 < timing.t_us < 1.1e5, f"unexpected T_measured={timing.t_us} us"
-        # NOTE: the gap-detection heuristic merges these 6 well-separated
-        # single-row launches into one invocation (documented limitation), so
-        # n_invocations is 1 here — each row is itself a full ~104 ms launch,
-        # so the max() is still the true per-launch wall time.
-        assert timing.n_invocations >= 1
+        assert timing.n_invocations == 6
 
     def test_aicore_is_dominant_component(self):
         """The kernel's measured time is dominated by AI compute-core work."""

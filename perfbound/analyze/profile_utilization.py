@@ -500,6 +500,7 @@ def run_from_files(
     r_threshold: float = 0.50,
     work_tolerance: float = 0.10,
     t_bound_us: float | None = None,
+    calibration_db: CalibrationDB | None = None,
 ) -> OperatorBottleneckReport:
     """从 op_summary、DES graph 和 calibration 文件端到端运行分析。
 
@@ -539,7 +540,7 @@ def run_from_files(
     }
 
     extract = extract_hivm(desgraph_path)
-    db = load_calibration(calibration_path)
+    db = calibration_db if calibration_db is not None else load_calibration(calibration_path)
     component_bound = compute_component_floor_from_db(extract, db)
 
     work_done: dict[Component, float] = defaultdict(float)
@@ -688,10 +689,11 @@ def _read_op_summary_row(path: str | Path, kernel_name: str | None) -> dict[str,
     if kernel_name is None:
         candidates = rows
     else:
+        normalized = kernel_name.lower()
         candidates = [
             row
             for row in rows
-            if _cell(row, "Op Name", "op_name", "Name") == kernel_name
+            if normalized in _cell(row, "Op Name", "op_name", "Name").lower()
         ]
         if not candidates:
             raise ValueError(f"op_summary 中找不到 kernel: {kernel_name}")

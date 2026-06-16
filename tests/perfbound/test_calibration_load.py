@@ -100,21 +100,24 @@ def test_calib_db_loads_without_zero_p0():
     calib_path = _get_calib_path()
     db = CalibrationDB.load(str(calib_path))
 
-    # Check Cube constants
-    assert db.cube.throughput.get(DType.FP16, 0) > 0, "Cube FP16 is 0"
-    assert db.cube.throughput.get(DType.INT8, 0) > 0, "Cube INT8 is 0"
-
-    # Check mandatory handoff
-    assert db.mandatory_handoff_cycles > 0, "Mandatory handoff cost is 0"
+    assert db.validate_p0_constants() == []
+    for name in ("BW_l0c_to_gm_sustained", "BW_hbm_allcore_sustained"):
+        constant = db.constants[name]
+        assert constant.value > 0
+        assert constant.source == "cce_microbench"
+        assert constant.n_runs >= 30
+        assert constant.ci_95 / constant.value < 0.025
 
 
 def test_calib_db_uses_measured_cce_provenance():
-    """Measured calibration is promoted from CCE microbenchmarks, not stubs."""
+    """Calibration is promoted from measured CCE microbenchmarks, not stubs."""
     calib_path = _get_calib_path()
     db = CalibrationDB.load(str(calib_path))
 
     assert db.version == "v1"
     assert db.constants
+    assert all(v.source != "pending_measurement" for v in db.constants.values())
+    measured = db.constants
     assert all(const.source in ("cce_microbench", "derived_from_vector_microbench")
-               for const in db.constants.values())
-    assert all(const.ci_95 / const.value < 0.025 for const in db.constants.values() if const.value > 0)
+               for const in measured.values())
+    assert all(const.ci_95 / const.value < 0.025 for const in measured.values() if const.value > 0)

@@ -102,14 +102,26 @@ def compute_bounds(
 
     if binding in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB):
         # Memory-bound: i_binding = BW in B/us, total_work = bytes
-        try:
-            i_binding, _ = memory.lookup_bw("gm", "ub")
-        except KeyError:
-            i_binding = 1.0
-        per_program_work = sum(
-            float(op.bytes_transferred) * float(op.loop_multiplier)
-            for op in extract.operations
-        )
+        # Prefer BW_hbm_allcore_sustained (per-core rate under full load)
+        # for HBM ingress only, since the grid floor assumes all cores active.
+        hbm_allcore_const = calib_db.constants.get("BW_hbm_allcore_sustained")
+        if (
+            binding == Component.MTE_GM
+            and hbm_allcore_const is not None
+            and hbm_allcore_const.value > 0
+        ):
+            i_binding = hbm_allcore_const.value * 1000.0  # GB/s → B/us
+        else:
+            binding_time = comp.per_component_us.get(binding.value, 0.0)
+            if waves > 1:
+                binding_time /= waves
+            binding_bytes = comp.total_bytes.get(binding.value, 0.0)
+            i_binding = (
+                binding_bytes / binding_time
+                if binding_bytes > 0 and binding_time > 0
+                else 1.0
+            )
+        per_program_work = comp.total_bytes.get(binding.value, 0.0)
         # Scale by total_programs for chip-level grid floor
         total_work = per_program_work * _total_programs
     else:

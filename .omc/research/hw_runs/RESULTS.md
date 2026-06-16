@@ -28,7 +28,7 @@ The "dump-before-codegen" spike (`TestDumpBeforeCodegen`) is therefore moot:
 codegen completes, no crash to survive. `test_chunk_kda_milestone.py` xfail
 reasons updated to reflect this (local xfail now only because WSL has no NPU).
 
-## 2. Real T_measured + author_headroom — POPULATED (was always None)
+## 2. Real T_measured + initial naive-floor residual — POPULATED
 
 chunk_kda profiled under `msprof` (10 iters → 6 recorded MIX_AIC invocations).
 Raw CSV: `chunk_kda_op_summary.csv` (also fixtured at
@@ -42,12 +42,12 @@ Raw CSV: `chunk_kda_op_summary.csv` (also fixtured at
 | binding (predicted) | MTE_GM (memory) | max(floor) = HBM |
 | Soundness status | **PASS** (T_bound ≤ T_measured) | `validate_from_csv` |
 | Tightness | **75.3×** | T_measured / T_bound |
-| author_headroom | **102,940 µs** | T_measured − T_bound_DSL (`TwoLimitResult`) |
+| naive-floor residual | **102,940 µs** | T_measured − naive 1,386 µs HBM floor |
 | component_match | **False** | predicted `mte`, measured `aicore`-dominant |
 
 ### Findings
-- **author_headroom is now a real number** (102.9 ms), closing the A.7/M6
-  caveat that it was structurally present but never populated.
+- This was the initial naive-floor residual, not an attainable-headroom
+  estimate and not the current two-limit result.
 - **The naive HBM-floor bound is sound but very loose (75×)** for chunk_kda,
   and **mispredicts the binding component**: it predicts memory-bound, but the
   kernel measures as AI compute-core dominated. chunk_kda's dots use tiny
@@ -104,10 +104,11 @@ paper's AvgPool `repeat=1` case) issues many instructions, each paying the
 fixed startup latency. Bounded `inefficiency ∈ (0,1)` keeps the bound sound.
 
 **Result on chunk_kda:** real Tier-2 bound `t_bound = 46,110 µs ≤ t_measured =
-104,326 µs` (**2.26×** — vs the 75× HBM grid floor); Gap-4 is non-zero
+104,289 µs` (**2.26×** — vs the 75× HBM grid floor); Gap-4 is non-zero
 (~2.6% of measured) and now the dominant attributed gap. `mask` is left 0 (the
 per-instruction model does not use it; a lane-fill `mask` model is a future
-refinement).
+refinement). The v1 database has no measured vector/cube startup latency, so
+the current Gap-4 value uses explicitly reported diagnostic defaults.
 
 ## 6. HIVM IR optimization feasibility analysis (2026-06-11)
 
@@ -117,11 +118,15 @@ or hinted for performance optimization. The two-limit result for chunk_kda:
 ```
 T_bound_HIVM = 46,065 µs  (idealized — Gap-1/3 relaxed)
 T_bound_DSL  = 46,110 µs  (realized bishengir structure)
-T_measured   = 104,326 µs (actual on 910B3 NPU:1)
+T_measured   = 104,289 µs (post-warmup median of 5 launches on 910B3 NPU:1)
 
 Compiler headroom = T_bound_DSL − T_bound_HIVM = 44.99 µs  (0.04%)
-Author headroom   = T_measured  − T_bound_DSL  = 58,216 µs (55.8%)
+Author residual   = T_measured  − T_bound_DSL  = 58,179 µs (55.8%)
 ```
+
+The author residual is not a predicted attainable win. Without a
+correctness-verified counterfactual, the pipeline reports only a low-confidence
+diagnostic range from 0 to the residual.
 
 ### Intervention levels
 
@@ -129,7 +134,7 @@ Author headroom   = T_measured  − T_bound_DSL  = 58,216 µs (55.8%)
 |-------|-----------|-------------|---------|
 | HIVM IR (des.json) editing | Gap-1/3 | Model only — bishengir-compile cannot accept des.json | ~45 µs |
 | bishengir MLIR hints (ascend-tiling-opt) | Gap-4 (2.6%) | Actionable — modify MLIR, standard compile | ~2.7 ms |
-| Triton kernel rewrite (author level) | Author headroom (55.8%) | Highest impact — tiling, fusion, layout | ~58 ms |
+| Triton kernel rewrite (author level) | Author residual (55.8%) | Highest-impact search space — tiling, fusion, layout | ≤58 ms diagnostic cap |
 
 ### Gap attribution guide for hints
 
@@ -142,11 +147,13 @@ Author headroom   = T_measured  − T_bound_DSL  = 58,216 µs (55.8%)
 
 ### Conclusion
 
-The compiler is near-optimal for chunk_kda. The 55.8% performance opportunity
-is at the Triton kernel author level — tiling strategy, op fusion, and memory
-access pattern. `ascend-tiling-opt` is the tool to search this space using the
-white-box model. Direct HIVM IR editing provides marginal improvement (~0.04%)
-and lacks a back-compilation path to hardware.
+The compiler-side structural residual is small for chunk_kda. The remaining
+55.8% is an author-level residual, not a demonstrated performance opportunity.
+Tiling strategy, op fusion, and memory access pattern are the primary
+counterfactual search space. `ascend-tiling-opt` can rank candidates with the
+white-box model, but only correctness-verified hardware measurements can
+promote a diagnostic cap to attainable headroom. Direct HIVM IR editing has a
+small modeled effect (~0.04%) and lacks a back-compilation path to hardware.
 
 ## 7. Multi-kernel validation set — US-SB-005 (2026-06-11)
 
@@ -314,3 +321,43 @@ ssh 910B3 'source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # fetch op_summary_*.csv, then:
 pytest tests/perfbound/test_chunk_kda_hw_validation.py -q
 ```
+
+## 10. Stage A P0 calibration closure (2026-06-15)
+
+The final two P0 CCE microbenchmarks were reviewed, corrected, compiled, and
+profiled on 910B3:
+
+| Constant | Measured value | 95% CI | Steady samples | CV |
+|----------|----------------|--------|----------------|----|
+| `BW_l0c_to_gm_sustained` | **143.523 GB/s** | 1.141 GB/s | 30 | 2.2% |
+| `BW_hbm_allcore_sustained` | **77.043 GB/s/core** | 0.027 GB/s/core | 30 | 0.1% |
+
+The FixPipe benchmark initializes one valid L0C tile with MMAD, synchronizes
+the L0C producer/consumer through the CO1 queue, then profiles 1280 repeated
+FixPipe transfers using `aic_fixpipe_time(us)`. The all-core benchmark launches
+with block dim 20 and assigns each core a disjoint 16 MiB region; the aggregate
+320 MiB footprint exceeds the 192 MiB L2 capacity.
+
+The CANN 9.0 `msprof` selected by PATH still emitted no AscendC op summary.
+Using the explicit CANN 8.2 profiler binary produced 45 rows for each kernel.
+The fitter discards the first 15 rows chronologically as warmup and computes
+statistics over the final 30; it does not select fastest samples. Therefore the
+broad profiler caveat in sections 8 and 9 does not apply to these two
+measurements. The calibration database now reports 18 measured constants,
+maximum relative 95% CI 1.07%, and no P0 violations.
+
+Running the complete Stage A report with this promoted database gives:
+
+```text
+T_bound_HIVM = 46,064.92 us
+T_bound_DSL  = 46,109.91 us
+T_measured   = 104,288.94 us
+binding      = vector
+compiler headroom = 44.99 us
+author residual   = 58,179.04 us
+```
+
+Profile diagnosis is `Insufficient Parallelism`, with scalar residency as the
+measured dominant component. Until a correctness-verified counterfactual is
+measured, realistic performance headroom remains an explicitly low-confidence
+diagnostic range of **0..58,179.04 us**, not a point estimate.
