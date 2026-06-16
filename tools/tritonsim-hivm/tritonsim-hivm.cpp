@@ -8,11 +8,29 @@
 #include "AscendModel/Analysis/HIVMAnalysis.h"
 #include "AscendModel/Analysis/Utils.h"
 
+#ifdef TRITONSIM_HAS_BISHENGIR_HIVM
+#include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#include "bishengir/Dialect/HACC/IR/HACC.h"
+#include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#endif
+
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinDialect.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/Parser/Parser.h"
+
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
@@ -92,6 +110,16 @@ llvm::cl::opt<std::string> perfettoTraceFile(
 llvm::cl::opt<std::string> desGraphFile(
     "des-graph-file",
     llvm::cl::desc("Export the parsed operation graph as JSON for external DES simulation"),
+    llvm::cl::init(""), llvm::cl::value_desc("path"));
+
+llvm::cl::opt<int> removePipeBarrierIndex(
+    "remove-pipe-barrier-index",
+    llvm::cl::desc("Remove the Nth hivm.hir.pipe_barrier before analysis (0-based; requires --edited-npuir-file)"),
+    llvm::cl::init(-1), llvm::cl::value_desc("index"));
+
+llvm::cl::opt<std::string> editedNpuirFile(
+    "edited-npuir-file",
+    llvm::cl::desc("Write the NPUIR after --remove-pipe-barrier-index to this path and analyze the edited file"),
     llvm::cl::init(""), llvm::cl::value_desc("path"));
 
 constexpr llvm::StringLiteral tritonBindingsFileName =
@@ -540,6 +568,91 @@ bool runTritonScriptToDump(std::string &outNpuirPath, std::string &tempDir,
   return true;
 }
 
+void registerHivmParsingDialects(mlir::DialectRegistry &registry) {
+  registry.insert<mlir::BuiltinDialect, mlir::affine::AffineDialect,
+                  mlir::func::FuncDialect, mlir::arith::ArithDialect,
+                  mlir::memref::MemRefDialect, mlir::scf::SCFDialect>();
+#ifdef TRITONSIM_HAS_BISHENGIR_HIVM
+  registry.insert<mlir::annotation::AnnotationDialect,
+                  mlir::hacc::HACCDialect, mlir::hivm::HIVMDialect>();
+#endif
+}
+
+bool isPipeBarrierOp(mlir::Operation *op) {
+  return op->getName().getStringRef() == "hivm.hir.pipe_barrier";
+}
+
+bool removePipeBarrierFromNpuir(llvm::StringRef inputPath,
+                                llvm::StringRef outputPath, int barrierIndex,
+                                std::string &error) {
+  if (barrierIndex < 0) {
+    error = "--remove-pipe-barrier-index must be >= 0";
+    return false;
+  }
+
+  auto fileOrErr = llvm::MemoryBuffer::getFile(inputPath);
+  if (!fileOrErr) {
+    error = "failed to read NPUIR file for editing: " + inputPath.str();
+    return false;
+  }
+
+  mlir::DialectRegistry registry;
+  registerHivmParsingDialects(registry);
+  mlir::MLIRContext context(registry);
+  context.allowUnregisteredDialects();
+
+  std::string parseDiagnostics;
+  mlir::ScopedDiagnosticHandler diagHandler(
+      &context, [&](mlir::Diagnostic &diag) {
+        llvm::raw_string_ostream os(parseDiagnostics);
+        diag.print(os);
+        os << "\n";
+        return mlir::success();
+      });
+
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(
+      fileOrErr.get()->getBuffer(), &context);
+  if (!module) {
+    error = "failed to parse NPUIR MLIR module for editing";
+    if (!parseDiagnostics.empty())
+      error += ":\n" + parseDiagnostics;
+    return false;
+  }
+
+  mlir::Operation *target = nullptr;
+  int seen = 0;
+  module->walk([&](mlir::Operation *op) {
+    if (!isPipeBarrierOp(op))
+      return mlir::WalkResult::advance();
+    if (seen == barrierIndex) {
+      target = op;
+      return mlir::WalkResult::interrupt();
+    }
+    ++seen;
+    return mlir::WalkResult::advance();
+  });
+
+  if (!target) {
+    int total = seen;
+    error = "requested pipe_barrier index " + std::to_string(barrierIndex) +
+            " but only found " + std::to_string(total) + " barrier(s)";
+    return false;
+  }
+
+  target->erase();
+
+  std::error_code ec;
+  llvm::raw_fd_ostream os(outputPath, ec, llvm::sys::fs::OF_Text);
+  if (ec) {
+    error = "failed to open edited NPUIR output " + outputPath.str() + ": " +
+            ec.message();
+    return false;
+  }
+  module->print(os);
+  os << "\n";
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -548,6 +661,12 @@ int main(int argc, char **argv) {
 
   if (npuirFile.empty() == tritonScript.empty()) {
     llvm::errs() << "Exactly one of --npuir-file or --triton-script must be provided.\n";
+    return 1;
+  }
+
+  if ((removePipeBarrierIndex >= 0) != !editedNpuirFile.empty()) {
+    llvm::errs() << "--remove-pipe-barrier-index and --edited-npuir-file must "
+                    "be provided together.\n";
     return 1;
   }
 
@@ -569,6 +688,17 @@ int main(int argc, char **argv) {
       llvm::errs() << dumpError << "\n";
       return 1;
     }
+  }
+
+  if (removePipeBarrierIndex >= 0) {
+    std::string editError;
+    if (!removePipeBarrierFromNpuir(npuirPath, editedNpuirFile,
+                                   removePipeBarrierIndex, editError)) {
+      llvm::errs() << editError << "\n";
+      return 1;
+    }
+    llvm::outs() << "Edited NPUIR: " << editedNpuirFile << "\n";
+    npuirPath = editedNpuirFile;
   }
 
   auto parsedSchedulerMode = parseSchedulerMode(schedulerMode);

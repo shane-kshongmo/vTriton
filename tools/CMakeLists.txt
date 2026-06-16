@@ -60,9 +60,11 @@ add_llvm_executable(tritonsim-hivm
 target_link_libraries(tritonsim-hivm
   PRIVATE
   AscendModelAnalysis
+  MLIRAffineDialect
   MLIRArithDialect
   MLIRFuncDialect
   MLIRIR
+  MLIRMemRefDialect
   MLIRParser
   MLIRSCFDialect
   MLIRSupport

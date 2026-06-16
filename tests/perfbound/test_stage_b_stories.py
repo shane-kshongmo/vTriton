@@ -353,9 +353,21 @@ class TestAcceptedSeededGapCounterfactualAudit:
         data = self._load_results()
         attempts = data["attempted_results"]
         assert attempts, "expected attempted counterfactual records"
+        assert any(a["intervention_kind"] == "mlir_pipe_barrier_removal" for a in attempts)
         assert any(a["intervention_kind"] == "des_json_raise_repeat" for a in attempts)
         assert any(a["intervention_kind"] == "work_scaling_sanity_check" for a in attempts)
         assert all(a["satisfies_us_sb_006"] is False for a in attempts)
+
+    def test_chunk_kda_pipe_barrier_edit_is_vacuous(self):
+        data = self._load_results()
+        pipe_edit = next(
+            a for a in data["attempted_results"]
+            if a["intervention_kind"] == "mlir_pipe_barrier_removal"
+        )
+        assert pipe_edit["mlir_edit_available"] is True
+        assert pipe_edit["local_edit_verified"] is True
+        assert pipe_edit["barriers_before"] > pipe_edit["barriers_after"]
+        assert pipe_edit["local_bound_delta_us"] == pytest.approx(0.0)
 
     def test_two_limit_hardware_reachability_not_claimed(self):
         data = self._load_results()

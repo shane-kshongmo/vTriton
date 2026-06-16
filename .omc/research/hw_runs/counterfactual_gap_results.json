@@ -16,15 +16,21 @@
       "gap_name": "gap3_avoidable_serial",
       "intervention_kind": "mlir_pipe_barrier_removal",
       "compiler_reachable": false,
+      "mlir_edit_available": true,
+      "local_edit_verified": true,
+      "barriers_before": 128,
+      "barriers_after": 127,
       "output_verified": false,
       "predicted_gap_us": 0.0,
+      "local_bound_delta_us": 0.0,
       "measured_delta_us": null,
       "quantification_error": null,
       "satisfies_us_sb_006": false,
       "satisfies_us_sb_008": false,
       "blockers": [
-        "Current tritonsim-hivm --help exposes no --remove-pipe-barrier-index or --edited-npuir-file option, and the current source tree has no matching implementation.",
-        "chunk_kda Gap-3 attribution is effectively zero, so even a valid pipe-barrier edit would not move the binding bound by a measurable amount."
+        "tritonsim-hivm now emits edited MLIR via --remove-pipe-barrier-index/--edited-npuir-file, but the edited chunk_kda DES has delta_t_bound=0.0 us.",
+        "chunk_kda Gap-3 attribution is effectively zero, so the pipe-barrier edit does not move the binding bound by a measurable amount.",
+        "No hardware compile/profile/output-equivalence run has been completed for the edited NPUIR."
       ]
     },
     {
