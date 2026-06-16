@@ -418,7 +418,7 @@ class TestDefaultCompileAndProfileRemoteDispatch:
         with patch.dict(sys.modules, {"scripts.remote_bench": mock_rb}), \
              patch("perfbound.validate.msprof_parser.parse_kernel_time_us", mock_parse):
             t_us, output = _default_compile_and_profile(
-                edited_hivm_path=Path("/tmp/edited.json"),
+                edited_hivm_path=Path("/tmp/edited.npuir.mlir"),
                 remote_host="user@host",
                 remote_bench_script="scripts/remote_bench.py",
                 kernel_name="test_kernel",
