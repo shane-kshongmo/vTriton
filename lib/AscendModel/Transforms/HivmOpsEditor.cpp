@@ -71,7 +71,7 @@ SmallVector<HivmOpInfo> HivmOpsEditor::listOps() {
   SmallVector<HivmOpInfo> result;
   unsigned idx = 0;
   module.walk([&](Operation *op) {
-    if (op->getDialect() && op->getDialect()->getNamespace() == "hivm") {
+    if (op->getDialect() && op->getDialect()->getNamespace().contains("hivm")) {
       result.push_back(
           {idx++, op->getName().getStringRef().str(), op});
     }
@@ -82,7 +82,7 @@ SmallVector<HivmOpInfo> HivmOpsEditor::listOps() {
 std::map<std::string, unsigned> HivmOpsEditor::opCounts() {
   std::map<std::string, unsigned> counts;
   module.walk([&](Operation *op) {
-    if (op->getDialect() && op->getDialect()->getNamespace() == "hivm")
+    if (op->getDialect() && op->getDialect()->getNamespace().contains("hivm"))
       counts[op->getName().getStringRef().str()]++;
   });
   return counts;
