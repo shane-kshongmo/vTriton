@@ -228,26 +228,6 @@ bool PipelineScheduler::schedule() {
   return true;
 }
 
-int64_t PipelineScheduler::getKernelCycles(int64_t numPrograms,
-                                            int64_t numParallelUnits,
-                                            int64_t numInnerIters) const {
-  if (numPrograms <= 0 || numParallelUnits <= 0)
-    return totalCycles;
-
-  // Step 1: add pipe_barrier sync cost for the inner loop iterations.
-  int64_t barrierCycles = numInnerIters * hwConfig->getPipeBarrierCyclesPerIter();
-
-  // Step 2: apply scalar overhead factor (captures loop control, address
-  // arithmetic, and AIC↔AIV synchronisation bubbles).
-  double scalarFactor = hwConfig->getAIVScalarOverheadFactor();
-  int64_t perProgramCycles =
-      static_cast<int64_t>((totalCycles + barrierCycles) * (1.0 + scalarFactor));
-
-  // Step 3: multiply by number of waves (wave serialisation).
-  int64_t numWaves = (numPrograms + numParallelUnits - 1) / numParallelUnits;
-  return perProgramCycles * numWaves;
-}
-
 const HWUnitPipeline& PipelineScheduler::getPipeline(HWUnit unit) const {
   static HWUnitPipeline emptyPipeline(HWUnit::Scalar);
   auto it = pipelines.find(unit);
@@ -304,8 +284,6 @@ void PipelineScheduler::printTimeline(llvm::raw_ostream &os) const {
 }
 
 void PipelineScheduler::printUtilizationReport(llvm::raw_ostream &os) const {
-  double freqGHz = hwConfig->getClockFrequencyGHz();
-  
   os << "\n=== Hardware Unit Utilization ===\n";
   os << "All units can execute in parallel (fully pipelined)\n\n";
   
@@ -317,19 +295,17 @@ void PipelineScheduler::printUtilizationReport(llvm::raw_ostream &os) const {
     
     const auto &pipeline = it->second;
     int64_t busyCycles = pipeline.getTotalBusyCycles();
-    if (busyCycles > 0 || true) {  // Always show
-      double utilization = pipeline.getUtilization(totalCycles);
-      std::string unitStr = stringifyHWUnit(unit).str();
-      unitStr.resize(12, ' ');
-      
-      int barWidth = static_cast<int>(utilization / 5);
-      std::string bar(barWidth, '#');
-      bar.resize(20, '-');
- 
-      os << "  " << unitStr << " [" << bar << "] "
-         << llvm::format("%6.2f", utilization) << "% ("
-         << busyCycles << " cycles)\n";
-    }
+    double utilization = pipeline.getUtilization(totalCycles);
+    std::string unitStr = stringifyHWUnit(unit).str();
+    unitStr.resize(12, ' ');
+
+    int barWidth = static_cast<int>(utilization / 5);
+    std::string bar(barWidth, '#');
+    bar.resize(20, '-');
+
+    os << "  " << unitStr << " [" << bar << "] "
+       << llvm::format("%6.2f", utilization) << "% ("
+       << busyCycles << " cycles)\n";
   }
   
    os << "\nVector Path (HBM -> UB -> Vector -> UB -> HBM):\n";
@@ -408,191 +384,3 @@ void PipelineScheduler::emitDependencyGraphJSON(llvm::raw_ostream &os) const {
   os << "}\n";
 }
 
-//===----------------------------------------------------------------------===//
-// PerformanceReport Implementation
-//===----------------------------------------------------------------------===//
-
-void PerformanceReport::print(llvm::raw_ostream &os) const {
-  os << "\n";
-  os << "╔══════════════════════════════════════════════════════════════╗\n";
-  os << "║          " << hardwareName << " Performance Analysis Report";
-  // Pad to align
-  int padding = 50 - hardwareName.length();
-  for (int i = 0; i < padding; ++i) os << " ";
-  os << "║\n";
-  os << "╠══════════════════════════════════════════════════════════════╣\n";
-  
-  // Timing
-  os << "║  Timing Summary                                              ║\n";
-  os << llvm::format("║    Clock Frequency:       %8.2f GHz                       ║\n", clockFreqGHz);
-  os << llvm::format("║    Total Cycles (compute):%12ld                       ║\n", totalCycles);
-  os << llvm::format("║    Estimated Time:        %12.3f μs                    ║\n", totalTimeUs);
-  if (kernelTotalCycles > 0) {
-    double kernelTimeUs = kernelTotalCycles / (clockFreqGHz * 1000.0);
-    os << llvm::format("║    Kernel Cycles (+ovhd): %12ld                       ║\n",
-                       kernelTotalCycles);
-    os << llvm::format("║    Kernel Time (+ovhd):   %12.3f μs                    ║\n",
-                       kernelTimeUs);
-    os << llvm::format("║    Num Waves:             %12ld                       ║\n",
-                       numWaves);
-  }
-  
-  os << "║                                                              ║\n";
-  
-  // Roofline
-  os << "║  Roofline Analysis                                           ║\n";
-  os << llvm::format("║    Arithmetic Intensity:  %8.3f FLOP/Byte                ║\n", arithmeticIntensity);
-  os << llvm::format("║    Achieved TFLOPS:       %8.3f                          ║\n", achievedTFLOPS);
-  os << llvm::format("║    Peak TFLOPS:           %8.3f                          ║\n", peakTFLOPS);
-  os << llvm::format("║    Achieved Bandwidth:    %8.1f GB/s                     ║\n", achievedBandwidth);
-  os << llvm::format("║    Peak Bandwidth:        %8.1f GB/s                     ║\n", peakBandwidth);
-  os << "║    Bound:                 " << (isComputeBound ? "Compute-bound" : "Memory-bound ") 
-     << "                      ║\n";
-  
-  os << "║                                                              ║\n";
-  
-  // Utilization
-  os << "║  Hardware Unit Utilization                                   ║\n";
-  for (const auto &[unit, util] : unitUtilization) {
-    if (util > 0.01) {  // Only show if > 0.01%
-      std::string unitStr = stringifyHWUnit(unit).str();
-      unitStr.resize(12, ' ');
-      
-      int barWidth = static_cast<int>(util / 5);
-      std::string bar(barWidth, '#');
-      bar.resize(20, '-');
-      
-      os << "║    " << unitStr << " [" << bar << "] " 
-         << llvm::format("%5.1f%%", util) << "         ║\n";
-    }
-  }
-  
-  os << "╚══════════════════════════════════════════════════════════════╝\n";
-}
-
-std::string PerformanceReport::toJSON() const {
-  std::string json = "{\n";
-  json += "  \"hardware\": \"" + hardwareName + "\",\n";
-  json += "  \"clock_freq_ghz\": " + std::to_string(clockFreqGHz) + ",\n";
-  json += "  \"total_cycles\": " + std::to_string(totalCycles) + ",\n";
-  json += "  \"total_time_us\": " + std::to_string(totalTimeUs) + ",\n";
-  json += "  \"arithmetic_intensity\": " + std::to_string(arithmeticIntensity) + ",\n";
-  json += "  \"achieved_tflops\": " + std::to_string(achievedTFLOPS) + ",\n";
-  json += "  \"peak_tflops\": " + std::to_string(peakTFLOPS) + ",\n";
-  json += "  \"achieved_bandwidth_gbps\": " + std::to_string(achievedBandwidth) + ",\n";
-  json += "  \"peak_bandwidth_gbps\": " + std::to_string(peakBandwidth) + ",\n";
-  json += "  \"is_compute_bound\": " + std::string(isComputeBound ? "true" : "false") + ",\n";
-  json += "  \"bottleneck_unit\": \"" + stringifyHWUnit(bottleneckUnit).str() + "\",\n";
-  json += "  \"bottleneck_utilization\": " + std::to_string(bottleneckUtilization) + ",\n";
-  
-  json += "  \"unit_utilization\": {\n";
-  bool first = true;
-  for (const auto &[unit, util] : unitUtilization) {
-    if (!first) json += ",\n";
-    first = false;
-    json += "    \"" + stringifyHWUnit(unit).str() + "\": " + std::to_string(util);
-  }
-  json += "\n  }\n";
-  json += "}\n";
-  
-  return json;
-}
-
-//===----------------------------------------------------------------------===//
-// RooflineAnalyzer Implementation
-//===----------------------------------------------------------------------===//
-
-RooflineAnalyzer::RooflineAnalyzer(const PipelineScheduler &sched)
-    : scheduler(sched), config(sched.getConfig()),
-      totalFLOPs(0), totalBytes(0) {
-  computeMetrics();
-}
-
-void RooflineAnalyzer::computeMetrics() {
-  totalFLOPs = 0;
-  totalBytes = 0;
-  
-  for (const auto &op : scheduler.getAllOps()) {
-    totalFLOPs += op.flops;
-    totalBytes += op.bytes;
-  }
-}
-
-double RooflineAnalyzer::getArithmeticIntensity() const {
-  if (totalBytes == 0)
-    return 0.0;
-  return static_cast<double>(totalFLOPs) / totalBytes;
-}
-
-double RooflineAnalyzer::getTheoreticalPeak() const {
-  // Peak compute: Cube FP16 TFLOPS
-  return config.getCubeTFlopsFP16();
-}
-
-double RooflineAnalyzer::getAchievedPerformance() const {
-  int64_t cycles = scheduler.getTotalCycles();
-  if (cycles == 0)
-    return 0.0;
-  
-  double freqGHz = config.getClockFrequencyGHz();
-  double timeSeconds = cycles / (freqGHz * 1e9);
-  
-  return (totalFLOPs / 1e12) / timeSeconds;  // TFLOPS
-}
-
-bool RooflineAnalyzer::isComputeBound() const {
-  double ai = getArithmeticIntensity();
-  double peakTFLOPS = getTheoreticalPeak();
-  double peakBWTBps = config.getMemoryBandwidthTBps("hbm");
-  
-  // Ridge point: where compute ceiling meets memory ceiling
-  // ridge_ai = peak_compute / peak_bandwidth
-  double ridgePoint = peakTFLOPS / peakBWTBps;  // FLOP/Byte
-  
-  return ai >= ridgePoint;
-}
-
-PerformanceReport RooflineAnalyzer::analyze() {
-  PerformanceReport report;
-  
-  // Hardware info
-  report.hardwareName = config.getName().str();
-  report.clockFreqGHz = config.getClockFrequencyGHz();
-  
-  // Timing
-  report.totalCycles = scheduler.getTotalCycles();
-  report.totalTimeUs = config.cyclesToMicroseconds(report.totalCycles);
-  
-  // Roofline
-  report.arithmeticIntensity = getArithmeticIntensity();
-  report.achievedTFLOPS = getAchievedPerformance();
-  report.peakTFLOPS = getTheoreticalPeak();
-  report.isComputeBound = isComputeBound();
-  
-  // Bandwidth
-  report.peakBandwidth = config.getMemoryBandwidthTBps("hbm") * 1000.0;  // GB/s
-  if (report.totalCycles > 0) {
-    double timeSeconds = report.totalCycles / (report.clockFreqGHz * 1e9);
-    report.achievedBandwidth = (totalBytes / 1e9) / timeSeconds;  // GB/s
-  } else {
-    report.achievedBandwidth = 0;
-  }
-  
-  // Utilization
-  double maxUtil = 0;
-  for (HWUnit unit : {HWUnit::Cube, HWUnit::CubeMTE2, HWUnit::FixPipe,
-                       HWUnit::Vector, HWUnit::VecMTE2, HWUnit::MTE3}) {
-    const auto &pipeline = scheduler.getPipeline(unit);
-    double util = pipeline.getUtilization(report.totalCycles);
-    report.unitUtilization[unit] = util;
-    report.unitBusyCycles[unit] = pipeline.getTotalBusyCycles();
-    
-    if (util > maxUtil) {
-      maxUtil = util;
-      report.bottleneckUnit = unit;
-    }
-  }
-  report.bottleneckUtilization = maxUtil;
-  
-  return report;
-}
