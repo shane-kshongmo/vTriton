@@ -10,9 +10,12 @@
 
 #ifdef TRITONSIM_HAS_BISHENGIR_HIVM
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AsmState.h"
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#include "bishengir/Dialect/HACC/IR/HACC.h"
 #include "mlir/Support/FileUtilities.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -29,7 +32,10 @@ OwningOpRef<ModuleOp> HivmOpsEditor::loadFromFile(MLIRContext &ctx,
                                                    llvm::StringRef path) {
   ctx.loadDialect<HIVMDialect, arith::ArithDialect, func::FuncDialect,
                   memref::MemRefDialect, scf::SCFDialect,
-                  mlir::annotation::AnnotationDialect>();
+                  tensor::TensorDialect,
+                  mlir::bufferization::BufferizationDialect,
+                  mlir::annotation::AnnotationDialect,
+                  mlir::hacc::HACCDialect>();
   auto parsed = parseSourceFile<ModuleOp>(path, &ctx);
   if (!parsed) {
     llvm::errs() << "HivmOpsEditor: failed to parse " << path << "\n";

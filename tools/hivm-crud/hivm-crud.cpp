@@ -12,11 +12,14 @@
 
 #include "AscendModel/Transforms/HivmOpsEditor.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/MLIRContext.h"
 
 #ifdef TRITONSIM_HAS_BISHENGIR_HIVM
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#include "bishengir/Dialect/HACC/IR/HACC.h"
 #endif
 
 #include "llvm/Support/CommandLine.h"
@@ -56,8 +59,11 @@ int main(int argc, char **argv) {
   registry.insert<func::FuncDialect>();
   registry.insert<memref::MemRefDialect>();
   registry.insert<scf::SCFDialect>();
+  registry.insert<tensor::TensorDialect>();
+  registry.insert<mlir::bufferization::BufferizationDialect>();
 #ifdef TRITONSIM_HAS_BISHENGIR_HIVM
   registry.insert<mlir::annotation::AnnotationDialect>();
+  registry.insert<mlir::hacc::HACCDialect>();
 #endif
 
   MLIRContext ctx(registry);
