@@ -239,6 +239,7 @@ if(TRITONSIM_ENABLE_BISHENGIR_HIVM)
     endif()
     # Wrap in --start-group/--end-group to resolve circular deps between
     # bishengir dialect libraries (e.g. DialectUtils -> MemRefDialect)
+    list(APPEND TRITONSIM_BISHENGIR_HIVM_LIBS ${_bishengir_all_libs})
     set(TRITONSIM_BISHENGIR_HIVM_LIBS
       -Wl,--start-group ${TRITONSIM_BISHENGIR_HIVM_LIBS} -Wl,--end-group)
     set(TRITONSIM_BISHENGIR_INCLUDE_DIRS
