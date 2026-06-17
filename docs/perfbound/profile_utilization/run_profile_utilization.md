@@ -12,8 +12,7 @@ python -m perfbound.analyze.profile_utilization \
   --des-graph path/to/des.json \
   --calibration path/to/calib.json \
   --kernel-name kernel_name \
-  --output-file path/to/profile_utilization_report.json \
-  --perfetto-trace-file path/to/perfetto_trace.json
+  --output-file path/to/profile_utilization_report.json
 ```
 
 ## 必需参数
@@ -34,16 +33,14 @@ python -m perfbound.analyze.profile_utilization \
 | `--work-tolerance` | `0.10` | work mismatch warning 的相对误差阈值 |
 | `--t-bound-us` | 不指定 | 外部传入的 tight bound，单位 us |
 | `--output-file` | `data/profile_utilization_inputs/profile_utilization_report.json` | profile utilization JSON 报告输出路径 |
-| `--perfetto-trace-file` | 不指定 | Perfetto trace JSON 输出路径；不指定则不生成 |
 
 ## 输出文件
 
-执行后最多得到两个文件：
+执行后得到一个文件：
 
 | 文件 | 生成条件 |
 | --- | --- |
 | `profile_utilization_report.json` | 始终生成，路径由 `--output-file` 指定；如果不指定，则输出到 `data/profile_utilization_inputs/profile_utilization_report.json` |
-| `perfetto_trace.json` | 只有传入 `--perfetto-trace-file` 时生成，路径由该参数指定 |
 
 命令行也会打印一份文本摘要。
 
@@ -53,14 +50,11 @@ python -m perfbound.analyze.profile_utilization \
 python -m perfbound.analyze.profile_utilization \
   --op-summary data/profile_utilization_inputs/op_summary.csv \
   --des-graph data/profile_utilization_inputs/des.json \
-  --output-file data/profile_utilization_inputs/profile_utilization_report.json \
-  --perfetto-trace-file data/profile_utilization_inputs/perfetto_trace.json
+  --output-file data/profile_utilization_inputs/profile_utilization_report.json
 ```
 
 执行后会生成：
 
 ```text
 data/profile_utilization_inputs/profile_utilization_report.json
-data/profile_utilization_inputs/perfetto_trace.json
 ```
-
