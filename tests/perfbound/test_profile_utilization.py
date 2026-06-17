@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
-from perfbound.extract.op_classifier import Component
+from perfbound.calibration.constants import CalibrationDB
+from perfbound.extract.op_classifier import Component, Precision
 from perfbound.model.component_model import ComponentBound
+from perfbound.analyze.hivm_bottleneck_diagnosis import (
+    diagnose_hivm_bottleneck_from_des_ops,
+)
 from perfbound.analyze.profile_utilization import (
     KernelProfileStats,
     ProfileComponentStats,
@@ -542,6 +547,126 @@ def test_warning_when_u_or_e_is_unphysical():
     assert any("E > 1.05" in item for item in report.warnings)
 
 
+def test_hivm_bottleneck_diagnosis_flags_sync_overhead_from_des_ops():
+    """HIVM Bottleneck Diagnosis：sync/barrier 占比超过阈值时判定 SyncOverhead。"""
+    ops = [
+        SimpleNamespace(
+            op_id=0,
+            op_name="load",
+            pipe="PIPE_MTE2_V",
+            bytes_transferred=0,
+            elements=0,
+            flops=0,
+            duration_cycles=70,
+            loop_multiplier=1,
+            start_cycle=0,
+            end_cycle=70,
+            src_space="gm",
+            dst_space="ub",
+            precision=Precision.FP16,
+        ),
+        SimpleNamespace(
+            op_id=1,
+            op_name="pipe_barrier",
+            pipe="PIPE_ALL",
+            bytes_transferred=0,
+            elements=0,
+            flops=0,
+            duration_cycles=30,
+            loop_multiplier=1,
+            start_cycle=70,
+            end_cycle=100,
+            src_space="",
+            dst_space="",
+            precision=Precision.FP16,
+        ),
+    ]
+    des_metadata = {
+        0: {
+            "id": 0,
+            "name": "load",
+            "pipe": "PIPE_MTE2_V",
+            "duration": 70,
+            "start_cycle": 0,
+            "end_cycle": 70,
+            "depends_on": [],
+            "is_sync": False,
+            "is_barrier": False,
+            "bytes": 0,
+            "elements": 0,
+            "flops": 0,
+            "loop_multiplier": 1,
+            "src_space": "gm",
+            "dst_space": "ub",
+            "elem_type": "fp16",
+            "repeat": 1,
+            "mask": 128,
+            "line": 201,
+            "core_type": "aiv",
+            "event_id": 0,
+        },
+        1: {
+            "id": 1,
+            "name": "pipe_barrier",
+            "pipe": "PIPE_ALL",
+            "duration": 30,
+            "start_cycle": 70,
+            "end_cycle": 100,
+            "depends_on": [0],
+            "is_sync": True,
+            "is_barrier": True,
+            "bytes": 0,
+            "elements": 0,
+            "flops": 0,
+            "loop_multiplier": 1,
+            "src_space": "",
+            "dst_space": "",
+            "elem_type": "fp16",
+            "repeat": 1,
+            "mask": 0,
+            "line": 202,
+            "core_type": "aiv",
+            "event_id": 1,
+        },
+    }
+
+    report = diagnose_hivm_bottleneck_from_des_ops(
+        ops,
+        CalibrationDB(),
+        des_metadata=des_metadata,
+    )
+
+    assert report.global_root_cause == "SyncOverhead"
+    assert report.sync_overhead_ratio == 30.0
+    assert report.barrier_overhead_ratio == 30.0
+    assert not any("未提供原始 DES metadata" in warning for warning in report.warnings)
+
+
+def test_hivm_bottleneck_warns_when_raw_des_metadata_is_missing():
+    """直接消费完整 OpRecord 时，line/is_sync/is_barrier 来源仍不可见。"""
+    ops = [
+        SimpleNamespace(
+            op_id=0,
+            op_name="vadd",
+            pipe="PIPE_V",
+            bytes_transferred=0,
+            elements=128,
+            flops=0,
+            duration_cycles=40,
+            loop_multiplier=1,
+            start_cycle=0,
+            end_cycle=40,
+            src_space="ub",
+            dst_space="ub",
+            precision=Precision.FP16,
+        )
+    ]
+
+    report = diagnose_hivm_bottleneck_from_des_ops(ops, CalibrationDB())
+
+    assert any("未提供原始 DES metadata" in warning for warning in report.warnings)
+
+
 # ── Real-kernel coverage: chunk_kda end-to-end through run_from_files ──────────
 #
 # Synthetic tests above never exercise run_from_files on a real msprof export.
@@ -554,7 +679,9 @@ def test_warning_when_u_or_e_is_unphysical():
 
 import pytest
 
-from perfbound.analyze.profile_utilization import run_from_files
+from perfbound.analyze.profile_utilization import (
+    run_from_files,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CHUNK_KDA_CSV = _FIXTURES / "chunk_kda_op_summary_910b3.csv"

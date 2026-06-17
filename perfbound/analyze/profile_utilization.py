@@ -22,6 +22,12 @@ from ..calibration.constants import CalibrationDB, DType
 from ..extract.hivm_extractor import extract_hivm
 from ..extract.op_classifier import Component, Precision
 from ..model.component_model import ComponentBound, compute_component_floor_from_db
+from .hivm_bottleneck_diagnosis import (
+    HIVMBottleneckReport,
+    diagnose_hivm_bottleneck_from_des_ops,
+    hivm_bottleneck_report_to_dict,
+    read_des_graph_metadata,
+)
 
 
 _EPSILON = 1e-12
@@ -129,6 +135,7 @@ class OperatorBottleneckReport:
     exposed_control_deficit_pts: Optional[float] = None     # measured - model（百分点/小数）
     exposed_control_deficit_us: Optional[float] = None      # 估计 µs，封顶到 author headroom
     n_sync_ops: Optional[int] = None
+    hivm_bottleneck: Optional[HIVMBottleneckReport] = None
 
 
 def compute_realized_utilization(
@@ -490,6 +497,7 @@ def _exposed_control_overlap(operations) -> tuple[float, int, int]:
     return exposed / critical_path, n_sync, critical_path
 
 
+
 def run_from_files(
     op_summary_path: str | Path,
     desgraph_path: str | Path,
@@ -539,6 +547,7 @@ def run_from_files(
         ),
     }
 
+    des_metadata, des_input_warnings = read_des_graph_metadata(desgraph_path)
     extract = extract_hivm(desgraph_path)
     db = calibration_db if calibration_db is not None else load_calibration(calibration_path)
     component_bound = compute_component_floor_from_db(extract, db)
@@ -595,6 +604,16 @@ def run_from_files(
         r_threshold=r_threshold,
         work_tolerance=work_tolerance,
     )
+    report.hivm_bottleneck = diagnose_hivm_bottleneck_from_des_ops(
+        extract.operations,
+        db,
+        des_metadata=des_metadata,
+        input_warnings=des_input_warnings,
+    )
+    report.warnings.extend(
+        f"hivm_bottleneck: {warning}"
+        for warning in report.hivm_bottleneck.warnings
+    )
 
     # —— 对论文的补充：量化暴露控制/同步赤字 ——
     # 当判定为暴露的 Scalar 控制导致的 Insufficient Parallelism 时，用 DES 调度的
@@ -641,6 +660,7 @@ def report_to_dict(report: OperatorBottleneckReport) -> dict:
         "exposed_control_deficit_pts": report.exposed_control_deficit_pts,
         "exposed_control_deficit_us": report.exposed_control_deficit_us,
         "n_sync_ops": report.n_sync_ops,
+        "hivm_bottleneck": hivm_bottleneck_report_to_dict(report.hivm_bottleneck),
         "components": {
             key: {
                 "component": result.component.value,
@@ -661,6 +681,255 @@ def report_to_dict(report: OperatorBottleneckReport) -> dict:
         },
         "warnings": report.warnings,
     }
+
+
+def format_text_report(report: OperatorBottleneckReport) -> str:
+    """Format the complete report for stdout."""
+
+    parts = [_format_operator_bottleneck_report(report)]
+    if report.hivm_bottleneck is not None:
+        parts.append(_format_hivm_bottleneck_report(report.hivm_bottleneck))
+    return "\n".join(part.rstrip() for part in parts if part).rstrip() + "\n"
+
+
+def _format_operator_bottleneck_report(report: OperatorBottleneckReport) -> str:
+    dominant = (
+        report.component_results.get(report.dominant_component.value)
+        if report.dominant_component
+        else None
+    )
+    evidence_components = _operator_evidence_components(report, dominant)
+
+    lines = [
+        "=== Profile Utilization Diagnosis ===",
+        f"结论: {report.diagnosis}",
+        "证据:",
+        f"  - kernel={report.kernel_name}, elapsed={_fmt_us(report.elapsed_time_us)} us",
+    ]
+
+    if dominant is not None:
+        lines.append(
+            "  - 主导 component="
+            f"{dominant.component.value}, item={dominant.dominant_item or 'None'}, "
+            f"U={dominant.u_utilization * 100.0:.1f}%, "
+            f"R={dominant.r_residency * 100.0:.1f}%, "
+            f"E={dominant.e_efficiency * 100.0:.1f}%"
+        )
+    elif evidence_components:
+        max_r = max(item.r_residency for item in evidence_components)
+        lines.append(
+            "  - 没有 component 达到高驻留/高利用阈值；"
+            f"最高 R={max_r * 100.0:.1f}%"
+        )
+    else:
+        lines.append("  - 未找到可用于 A/I/U/R/E 分析的有效 component")
+
+    if report.exposed_control_frac_model is not None:
+        deficit_pts = (report.exposed_control_deficit_pts or 0.0) * 100.0
+        measured = (report.exposed_control_frac_measured or 0.0) * 100.0
+        model = report.exposed_control_frac_model * 100.0
+        lines.append(
+            "  - 暴露控制/同步: "
+            f"model={model:.1f}%, measured={measured:.1f}%, "
+            f"deficit={deficit_pts:.1f} pts, n_sync_ops={report.n_sync_ops}"
+        )
+        if report.exposed_control_deficit_us is not None:
+            lines.append(
+                f"  - 暴露控制/同步赤字约 {_fmt_us(report.exposed_control_deficit_us)} us"
+            )
+
+    lines.append("处理建议:")
+    for suggestion in _operator_suggestions(report):
+        lines.append(f"  -> {suggestion}")
+
+    if evidence_components:
+        lines.append("关键指标:")
+        for result in evidence_components[:3]:
+            lines.append(
+                "  - "
+                f"{result.component.value}: "
+                f"U={result.u_utilization * 100.0:.1f}%, "
+                f"R={result.r_residency * 100.0:.1f}%, "
+                f"E={result.e_efficiency * 100.0:.1f}%, "
+                f"active={_fmt_us(result.active_time_us)} us, "
+                f"work={_fmt_number(result.work_done)}"
+            )
+            if result.dominant_item:
+                lines[-1] += f", item={result.dominant_item}"
+
+    if report.warnings:
+        lines.append("Warnings:")
+        for warning in report.warnings:
+            lines.append(f"  - {warning}")
+
+    return "\n".join(lines)
+
+
+def _operator_evidence_components(
+    report: OperatorBottleneckReport,
+    dominant: ComponentUtilization | None,
+) -> list[ComponentUtilization]:
+    if dominant is not None:
+        return [dominant]
+    return sorted(
+        report.component_results.values(),
+        key=lambda item: (
+            item.r_residency,
+            item.u_utilization,
+            item.active_time_us,
+        ),
+        reverse=True,
+    )
+
+
+def _operator_suggestions(report: OperatorBottleneckReport) -> list[str]:
+    diagnosis = report.diagnosis
+    if diagnosis == "Compute Bound":
+        return [
+            "计算侧已接近理论 ceiling；优先减少计算量、调整精度或提升 arithmetic intensity",
+            "检查 tile/MN/K 形状和算子融合，避免额外启动和同步开销",
+        ]
+    if diagnosis == "MTE Bound":
+        return [
+            "数据搬运侧已接近理论 ceiling；优先减少 bytes 或增加片上复用",
+            "用 multi-buffer/software pipeline 让搬运与计算重叠",
+        ]
+    if diagnosis == "Inefficient Compute":
+        return [
+            "计算单元驻留较高但效率低；检查 vector/cube 指令形态、mask/repeat 和 tile 是否过小",
+            "对照 DES 中主导 compute op，优先处理高 R 低 E 的 component",
+        ]
+    if diagnosis == "Inefficient MTE":
+        return [
+            "MTE 驻留较高但有效带宽低；检查传输路径、对齐、burst/packet size 和 tile 粒度",
+            "合并小搬运或提高 reuse，减少单位有效 bytes 的启动成本",
+        ]
+    if diagnosis == "Insufficient Parallelism":
+        suggestions = [
+            "整体驻留不足；优先增加 pipeline depth、multi-buffer 或并行 tile 数",
+            "结合 HIVM Bottleneck Diagnosis 查看是 pipe 不均衡、同步等待还是全局 barrier 导致",
+        ]
+        if report.dominant_component == Component.SCALAR:
+            suggestions.insert(
+                0,
+                "高驻留但无 work 的 Scalar 指向暴露控制/同步；优先减少 barrier/wait 或让控制与计算/搬运重叠",
+            )
+        return suggestions
+    if diagnosis == "Insufficient Data":
+        return [
+            "补齐 op_summary、DES work 和 calibration 后再判断",
+            "检查 elapsed_time、active_time、bytes/flops/elements 的单位是否一致",
+        ]
+    return [
+        "检查主导 component 的 U/R/E，并结合 HIVM 结构诊断定位下一步优化方向",
+    ]
+
+
+def _format_hivm_bottleneck_report(report: HIVMBottleneckReport) -> str:
+    """Format PR17 diagnosis like HIVMBottleneckReport::print()."""
+
+    lines = [
+        "",
+        "=== Bottleneck Diagnosis ===",
+        f"Global root cause: {report.global_root_cause}",
+        f"  Evidence: {report.global_evidence}",
+        f"  {report.global_explanation}",
+    ]
+    for suggestion in report.global_suggestions:
+        lines.append(f"  -> {suggestion}")
+
+    lines.extend(
+        [
+            "",
+            "Sync/barrier overhead (from syncCycles/barrierCycles/oneIterationCycles):",
+            "  syncCycles/oneIterationCycles = "
+            f"{report.sync_overhead_ratio:.1f}%",
+            "  barrierCycles/oneIterationCycles = "
+            f"{report.barrier_overhead_ratio:.1f}%",
+            "",
+            "Pipeline diagnosis:",
+        ]
+    )
+
+    pipeline = report.pipeline_diagnosis
+    if pipeline is None:
+        lines.extend(
+            [
+                "  Evidence: ",
+                "  Bottleneck pipe: Unknown",
+                "  Imbalance ratio (weightedPipeCycles max/min): 0.0x",
+                "  Insufficient data to determine pipeline root cause",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"  Evidence: {pipeline.evidence}",
+                f"  Bottleneck pipe: {pipeline.bottleneck_pipe}",
+                "  Imbalance ratio (weightedPipeCycles max/min): "
+                f"{pipeline.imbalance_ratio:.1f}x",
+                f"  {pipeline.explanation}",
+            ]
+        )
+        for suggestion in pipeline.suggestions:
+            lines.append(f"  -> {suggestion}")
+
+    sorted_ops = sorted(
+        (
+            diag
+            for diag in report.op_diagnoses
+            if diag.root_cause != "SyncOverhead"
+        ),
+        key=lambda item: item.actual_cycles,
+        reverse=True,
+    )
+    limit = min(10, len(sorted_ops))
+    lines.append("")
+    lines.append(
+        f"Per-op diagnosis (top {limit} by duration, excluding sync ops):"
+    )
+    for diag in sorted_ops[:limit]:
+        lines.extend(
+            [
+                "  line "
+                f"{diag.line_number} {diag.op_name} [{diag.pipe}]: "
+                f"{diag.root_cause}",
+                f"    Evidence: {diag.evidence}",
+                f"    {diag.explanation}",
+                "    duration="
+                f"{_fmt_cycles(diag.actual_cycles)} cyc, theoretical_min="
+                f"{_fmt_cycles(diag.theoretical_min_cycles)} cyc, overhead="
+                f"{diag.overhead_ratio * 100.0:.1f}%",
+            ]
+        )
+        for suggestion in diag.suggestions:
+            lines.append(f"    -> {suggestion}")
+
+    if report.warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        for warning in report.warnings:
+            lines.append(f"  - {warning}")
+
+    return "\n".join(lines)
+
+
+def _fmt_number(value: float) -> str:
+    if abs(value) >= 1000.0:
+        return f"{value:.0f}"
+    return f"{value:.6g}"
+
+
+def _fmt_us(value: float) -> str:
+    if abs(value) >= 100.0:
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    return f"{value:.6g}"
+
+
+def _fmt_cycles(value: float) -> str:
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
 def _row_duration_us(row: dict[str, str]) -> float:
@@ -803,6 +1072,8 @@ def main(argv: list[str] | None = None) -> int:
 
     output = json.dumps(report_to_dict(report), ensure_ascii=False, indent=2)
     Path(args.output_file).write_text(output + "\n")
+    print(format_text_report(report), end="")
+    print(f"\nJSON report: {args.output_file}")
     return 0
 
 
