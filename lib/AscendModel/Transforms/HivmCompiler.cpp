@@ -26,7 +26,7 @@ using namespace mlir::ascend;
 // Options
 // ---------------------------------------------------------------------------
 
-std::vector<std::string> HivmCompiler::Options::toArgs() const {
+std::vector<std::string> HivmCompilerOptions::toArgs() const {
   std::vector<std::string> args;
   auto add = [&](const char *flag, bool value) {
     args.push_back((llvm::Twine("--") + flag + "=" + (value ? "true" : "false")).str());
@@ -65,7 +65,7 @@ static std::string findBishengirCompile() {
 
 LogicalResult HivmCompiler::compileFile(llvm::StringRef inputPath,
                                         llvm::StringRef outputPath,
-                                        const Options &opts) {
+                                        const HivmCompilerOptions &opts) {
   std::string binary = findBishengirCompile();
   if (binary.empty()) {
     llvm::errs() << "[HivmCompiler] Cannot find bishengir-compile in "
@@ -101,7 +101,7 @@ LogicalResult HivmCompiler::compileFile(llvm::StringRef inputPath,
 
 LogicalResult HivmCompiler::compileModule(ModuleOp module,
                                           llvm::StringRef outputPath,
-                                          const Options &opts) {
+                                          const HivmCompilerOptions &opts) {
   // Create a temporary file for the MLIR module.
   int fd;
   llvm::SmallString<128> tempPath;

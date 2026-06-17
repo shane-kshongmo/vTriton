@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    HivmCompiler::Options opts;
+    HivmCompilerOptions opts;
     opts.enableTritonKernelCompile = enableTritonKernel;
     opts.enableAutoMultiBuffer = enableAutoMultiBuffer;
     for (const auto &arg : hivmcArgs)

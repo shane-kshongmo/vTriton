@@ -21,27 +21,27 @@
 namespace mlir {
 namespace ascend {
 
+struct HivmCompilerOptions {
+  bool enableHIVMCompile = true;
+  bool enableTritonKernelCompile = true;
+  bool enableAutoMultiBuffer = true;
+  std::vector<std::string> extraArgs;
+
+  std::vector<std::string> toArgs() const;
+};
+
 class HivmCompiler {
 public:
-  struct Options {
-    bool enableHIVMCompile = true;
-    bool enableTritonKernelCompile = true;
-    bool enableAutoMultiBuffer = true;
-    std::vector<std::string> extraArgs;
-
-    std::vector<std::string> toArgs() const;
-  };
-
   /// Compile an HIVM MLIR file to a kernel object file.
   static LogicalResult compileFile(llvm::StringRef inputPath,
                                    llvm::StringRef outputPath,
-                                   const Options &opts = Options());
+                                   const HivmCompilerOptions &opts = HivmCompilerOptions());
 
   /// Compile an HIVM MLIR module to a kernel object file.
   /// The module is first serialised to a temporary file.
   static LogicalResult compileModule(ModuleOp module,
                                      llvm::StringRef outputPath,
-                                     const Options &opts = Options());
+                                     const HivmCompilerOptions &opts = HivmCompilerOptions());
 };
 
 } // namespace ascend
