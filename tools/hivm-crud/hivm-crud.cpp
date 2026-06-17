@@ -1,15 +1,16 @@
-//===- hivm-crud.cpp - CLI wrapper for HivmOpsEditor ---------------------===//
+//===- hivm-crud.cpp - CLI wrapper for HivmOpsEditor / HivmCompiler -------===//
 //
-// Thin CLI wrapper around the HivmOpsEditor C++ API.
-// Upper-level C++ code should call HivmOpsEditor directly instead of this
-// CLI tool.
+// Thin CLI wrapper around the HivmOpsEditor C++ API and HivmCompiler.
+// Upper-level C++ code should call the APIs directly instead of this CLI tool.
 //
 // Usage:
 //   hivm-crud --input kernel.hivm.mlir.bak --output kernel.hivm.mlir \
 //             --mode <read|add|delete|modify|roundtrip>
+//   hivm-crud --input kernel.hivm.mlir --output kernel.o --mode compile
 //
 //===----------------------------------------------------------------------===//
 
+#include "AscendModel/Transforms/HivmCompiler.h"
 #include "AscendModel/Transforms/HivmOpsEditor.h"
 
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -40,13 +41,29 @@ static llvm::cl::opt<std::string> outputFilename(
 
 static llvm::cl::opt<std::string> crudMode(
     "mode",
-    llvm::cl::desc("CRUD mode: read|add|delete|modify|roundtrip"),
+    llvm::cl::desc("Mode: read|add|delete|modify|roundtrip|compile"),
     llvm::cl::value_desc("mode"), llvm::cl::init("read"));
 
 static llvm::cl::opt<unsigned> removeGMTrips(
     "remove-gm-trips",
     llvm::cl::desc("Remove N redundant GM round-trips (load+sync pairs)"),
     llvm::cl::value_desc("N"), llvm::cl::init(0));
+
+// Compile-specific options
+static llvm::cl::opt<bool> enableTritonKernel(
+    "enable-triton-kernel",
+    llvm::cl::desc("Enable Triton kernel compile (default: true in compile mode)"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> enableAutoMultiBuffer(
+    "enable-auto-multi-buffer",
+    llvm::cl::desc("Enable auto multi-buffer (default: true in compile mode)"),
+    llvm::cl::init(true));
+
+static llvm::cl::list<std::string> hivmcArgs(
+    "hivmc-arg",
+    llvm::cl::desc("Extra argument forwarded to hivmc (can be repeated)"),
+    llvm::cl::ZeroOrMore, llvm::cl::value_desc("arg"));
 
 // Helper function to collect ops by name (supports both regular and HIR ops)
 void collectOpsByName(HivmOpsEditor &editor, const std::string &opName, 
@@ -77,13 +94,33 @@ int main(int argc, char **argv) {
   registry.insert<mlir::hacc::HACCDialect>();
 #endif
 
-  MLIRContext ctx(registry);
-  ctx.loadAllAvailableDialects();
-
   if (inputFilename.empty()) {
     llvm::errs() << "Error: --input is required\n";
     return 1;
   }
+
+  // compile mode: bypass MLIR parsing, delegate directly to bishengir-compile.
+  if (crudMode == "compile") {
+    if (outputFilename == "-" || outputFilename.empty()) {
+      llvm::errs() << "Error: --output is required in compile mode\n";
+      return 1;
+    }
+
+    HivmCompiler::Options opts;
+    opts.enableTritonKernelCompile = enableTritonKernel;
+    opts.enableAutoMultiBuffer = enableAutoMultiBuffer;
+    for (const auto &arg : hivmcArgs)
+      opts.extraArgs.push_back("--hivmc-args=" + arg);
+
+    if (failed(HivmCompiler::compileFile(inputFilename, outputFilename, opts)))
+      return 1;
+    llvm::outs() << "Compiled " << inputFilename << " -> " << outputFilename << "\n";
+    return 0;
+  }
+
+  // Other modes need MLIR parsing.
+  MLIRContext ctx(registry);
+  ctx.loadAllAvailableDialects();
 
   auto module = HivmOpsEditor::loadFromFile(ctx, inputFilename);
   if (!module) {
