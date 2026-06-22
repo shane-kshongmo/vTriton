@@ -399,3 +399,59 @@ auto shaped = llvm::dyn_cast<mlir::ShapedType>(type);
 **方案**：
 1. 移除 `wrapped_run` 中的 `_exit_success()`，让进程自然执行直到 prefill 测试结束
 2. 将 `_extract_mlir_module` 改为 `_extract_mlir_modules`（返回列表），用循环提取所有 `// IR Dump After` 区块
+
+### 7.7 BiShengIR 接口函数 Segfault —— `VBrcOp::getPipe()` 等
+
+**现象**：同一个 MLIR 在 `kernel_001.npuir.mlir` 上正常，换成 `new.mlir` 后 segfault：
+
+```
+#5  mlir::hivm::VBrcOp::getPipe() 
+#7  populateTypedHivmOp / HIVMAnalysis.cpp:689  ← pipeIface.getPipe()
+Segmentation fault (core dumped)
+```
+
+**同类案例**（编译期报 undefined reference 或运行时 segfault）：
+
+| 操作/接口 | 症状 | 触发位置 |
+|----------|------|---------|
+| `SyncBlockOp::inferCoreType()` | undefined reference → `--unresolved-symbols=ignore` 后 `_init` 阶段 Illegal instruction | `populateTypedHivmOp` line 705 |
+| `checkPipeInferredCoreType()` | undefined reference | `SyncBlockOp::verify()` 虚函数构建期 |
+| `VBrcOp::getPipe()` | runtime segfault | `populateTypedHivmOp` line 689 `pipeIface.getPipe()` |
+| `VAbsOp::getLimitedAxes()` 等 50+ 个 flatten/elementwise 接口 | undefined reference（但只出现于链接出错的 BiShengIR 编译产物） | `HIVMDialect.cpp.o` 内部互相引用 |
+
+**根因**：BiShengIR v1.1.0 是 LLVM 19 上编译的 IR dialect 库，它通过 TableGen 生成了大量接口（`OpPipeInterface`、`CoreTypeInterface`、`InferCoreTypeInterface`、`FlattenInterface` 等）。这些接口的默认实现在 BiShengIR 源码的 Transforms/Utils 目录中，但当前编译流程只产出了 Dialect/IR 目录的 `.o`（操作定义），没有编译 Transforms/Utils（接口实现）。
+
+当 `populateTypedHivmOp` 通过 `llvm::dyn_cast<OpPipeInterface>(op)` 获取接口并调用 `getPipe()` 时：
+- 如果 BiShengIR 库中该操作的接口实现 `.o` 存在 → 正常运行
+- 如果接口实现 `.o` 不存在，但虚函数表指向了合法的占位实现 → 返回默认值
+- **如果接口实现 `.o` 不存在且虚函数表指向无效地址** → segfault
+
+哪些操作会触发取决于 `libBiShengIRHIVMDialect.a` 中哪些 `.cpp.o` 被打包。本次 `ar` 打包了 59 个 `.o`，覆盖了大部分常见操作，但 `VBrcOp` 等操作的接口实现可能落在 HTML 构建生成的 `HIVMVectorOps.cpp.o` 的未编译部分。
+
+**方案**：
+
+1. **点状防御**（已采用）：在 `populateTypedHivmOp` 中对已知 crash 的操作跳过接口调用，改用字符串匹配分配 pipe：
+
+```cpp
+// Defensive: some op's interface methods crash at runtime due to
+// incomplete BiShengIR support.
+if (parsed.op.opName != "vbrc") {
+    if (pipeIface.isSinglePipeOp())
+        parsed.op.pipe = convertTypedPipe(pipeIface.getPipe());
+    ...
+}
+```
+
+然后显式分配：
+```cpp
+else if (parsed.op.opName == "vbrc")
+    parsed.op.pipe = HIVMPipe::Vector;
+```
+
+2. **系统性修复**（建议）：扩展 BiShengIR 编译范围，对 `tools/bishengir/bishengir/lib/Dialect/HIVM/` 下所有目录执行 `ar crs`，而非仅 `IR` 目录，确保 Transforms/Utils 的接口实现 `.o` 也被打包进 `.a`。但这需要完整的 CMake 编译链支持。
+
+**新增操作的应对策略**：如果其他 MLIR 文件触发新操作的 segfault，按以下步骤处理：
+1. 从 backtrace 帧 #5-#7 提取崩溃的操作类型名
+2. 在 `populateTypedHivmOp` 开头附近添加 `if (parsed.op.opName != "新op名")` 绕过崩溃接口
+3. 在 pipe 分配链中为该 op 添加显式的 `else if (parsed.op.opName == "新op名") parsed.op.pipe = HIVMPipe::Xxx`
+4. Pipe 的映射规则：`v*` 前缀 → VECTOR，`set_flag` → sender_pipe（上下文），其余查 MLIR 文件中该操作的地址空间属性推断
