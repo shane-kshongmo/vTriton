@@ -249,6 +249,14 @@ def seed_calibration_from_ascend_json(
         ub_size_kb=float(ub.get("size_kb", 256)),
     )
 
+    # Measured small-packet efficiency curve (transfer-size sweep on the card):
+    # packet_bytes → achieved-BW / large-packet-peak.  Drives the Gap-2
+    # coalescing penalty in lookup_bw.
+    amort = (mem_cfg.get("pkt_efficiency")
+             or cfg.get("memory", {}).get("pkt_efficiency"))
+    if amort:
+        db.memory.pkt_efficiency = {int(k): float(v) for k, v in amort.items()}
+
     # MTE bandwidths (datasheet seeds)
     movers = cfg.get("data_movers", {})
     _mte_paths = [

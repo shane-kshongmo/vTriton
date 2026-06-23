@@ -339,6 +339,29 @@ class MemHierarchy:
     pkt_param: dict[str, tuple[float, float]] = field(default_factory=dict)
     # e.g. {"64B": (a, b), "128B": (a, b), "256B": (a, b)}
 
+    # Measured small-packet efficiency curve: packet_bytes → η (achieved BW as a
+    # fraction of the large-packet peak), from a transfer-size sweep on the card.
+    # Preferred over pkt_param when present; lookup_bw multiplies the path BW by
+    # the log-log-interpolated η for the transfer's packet size.
+    pkt_efficiency: dict[int, float] = field(default_factory=dict)
+
+    def _packet_efficiency(self, pkt_size: int) -> float:
+        """Interpolate the measured packet-size efficiency curve (η ∈ (0, 1])."""
+        tbl = sorted(self.pkt_efficiency.items())
+        if not tbl or pkt_size <= 0:
+            return 1.0
+        if pkt_size <= tbl[0][0]:
+            return tbl[0][1]
+        if pkt_size >= tbl[-1][0]:
+            return 1.0  # at/above the largest measured packet → full bandwidth
+        import math
+        for (p0, e0), (p1, e1) in zip(tbl, tbl[1:]):
+            if p0 <= pkt_size <= p1:
+                # log-log linear interpolation (curve is ~power-law)
+                t = (math.log(pkt_size) - math.log(p0)) / (math.log(p1) - math.log(p0))
+                return math.exp(math.log(e0) + t * (math.log(e1) - math.log(e0)))
+        return 1.0
+
     def lookup_bw(self, src: str, dst: str, core_num: int = -1,
                   pkt_size: int = -1) -> tuple[float, bool]:
         """Look up sustained bandwidth in B/us for a transfer path.
@@ -359,6 +382,13 @@ class MemHierarchy:
 
         # Small-packet amortization
         is_small = False
+        # Measured efficiency curve takes precedence (faithful to the card).
+        if self.pkt_efficiency and pkt_size > 0:
+            eta = self._packet_efficiency(pkt_size)
+            if eta < 1.0:
+                bw *= eta
+                is_small = True
+            return bw, is_small
         if self.pkt_param and pkt_size > 0:
             thresholds = sorted(
                 [(int(k.rstrip("B")), v) for k, v in self.pkt_param.items()],
@@ -506,6 +536,12 @@ class CalibrationDB:
             l0c_size_kb=mem_d.get("l0c_size_kb", 256.0),
             ub_size_kb=mem_d.get("ub_size_kb", 256.0),
         )
+
+        # Measured small-packet efficiency curve (transfer-size sweep): drives
+        # the Gap-2 coalescing penalty in lookup_bw.
+        amort = mem_d.get("pkt_efficiency")
+        if amort:
+            memory.pkt_efficiency = {int(k): float(v) for k, v in amort.items()}
 
         # Load bandwidth entries if present
         bw_d = mem_d.get("bw", {})

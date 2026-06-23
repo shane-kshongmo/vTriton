@@ -46,7 +46,20 @@
     "l0a_size_kb": 64.0,
     "l0b_size_kb": 64.0,
     "l0c_size_kb": 256.0,
-    "ub_size_kb": 256.0
+    "ub_size_kb": 256.0,
+    "pkt_efficiency": {
+      "4": 0.007421,
+      "8": 0.014776,
+      "16": 0.028713,
+      "32": 0.055966,
+      "64": 0.109595,
+      "128": 0.206529,
+      "256": 0.363134,
+      "1024": 0.817406,
+      "4096": 0.995758,
+      "16384": 1.0
+    },
+    "pkt_efficiency_provenance": "transfer-size sweep on 910B3 (test/amort_sweep_bench.py, fixed grid=2048, interleaved runs); packet_bytes->achieved_bw/peak; peak=325166.7 B/us; 2026-06-23"
   },
   "constants": {
     "P_cube_fp16_sustained": {
@@ -154,8 +167,7 @@
       "unit": "GB/s",
       "ci_95": 0.32012495777921557,
       "source": "cce_microbench",
-      "n_runs": 30,
-      "notes": "transfer=256.0KiB, N_iter=1280, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.010"
+      "n_runs": 30
     },
     "BW_ub_to_gm_sustained": {
       "name": "BW_ub_to_gm_sustained",
@@ -163,8 +175,7 @@
       "unit": "GB/s",
       "ci_95": 0.29616400764863415,
       "source": "cce_microbench",
-      "n_runs": 30,
-      "notes": "transfer=256.0KiB, N_iter=1280, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.010"
+      "n_runs": 30
     },
     "BW_gm_to_l1_sustained": {
       "name": "BW_gm_to_l1_sustained",
@@ -199,8 +210,7 @@
       "unit": "GB/s",
       "ci_95": 0.0270803872866082,
       "source": "cce_microbench",
-      "n_runs": 30,
-      "notes": "transfer=256.0KiB, N_iter=1280, n_active_cores=20, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.001, per_core_rate_under_contention"
+      "n_runs": 30
     },
     "mandatory_handoff_cost_l0c_to_gm_to_ub": {
       "name": "mandatory_handoff_cost_l0c_to_gm_to_ub",
@@ -224,5 +234,6 @@
   "startup_latency": {},
   "mandatory_handoff_cycles": 7620.865612052728,
   "pipe_barrier_cycles_per_iter": 0.0,
-  "scalar_overhead_factor": 1.0
+  "scalar_overhead_factor": 1.0,
+  "memory_spaces": {}
 }

@@ -125,25 +125,28 @@ def compute_bounds(
         # Scale by total_programs for chip-level grid floor
         total_work = per_program_work * _total_programs
     else:
-        # Compute-bound (Cube, Vector): i_binding = throughput in FLOP/us
-        if binding == Component.CUBE:
+        # Compute-bound (Cube, Vector): derive i_binding from the component
+        # floor's binding rate so the grid tier and component tier use the SAME
+        # achievable rate.  Recomputing it from an aggregate (peak) constant
+        # here desynchronised the two tiers and made the grid floor unsound
+        # (it could exceed measured time) for near-peak compute kernels.
+        binding_work_1prog = comp.total_ops.get(binding.value, 0.0)
+        binding_time_1prog = comp.per_component_us.get(binding.value, 0.0)
+        if waves > 1:
+            binding_time_1prog /= waves
+        if binding_work_1prog > 0 and binding_time_1prog > 0:
+            i_binding = binding_work_1prog / binding_time_1prog  # work/us
+        elif binding == Component.CUBE:
             from .component_model import _get_cube_throughput_ops_per_us, _prec_to_dtype
             from ..extract.op_classifier import Precision
             i_binding = _get_cube_throughput_ops_per_us(
                 _prec_to_dtype(Precision.FP16), cube
-            )
+            ) or 1.0
         else:
-            # Vector: use aggregate TFLOPS
-            i_binding = vector.throughput_fp16_tflops * 1e6  # FLOP/us
-        per_program_work = sum(
-            float(op.flops if op.flops > 0 else op.elements)
-            * float(op.loop_multiplier)
-                for op in extract.operations
-                if op.component not in (
-                    Component.MTE_GM, Component.MTE_L1, Component.MTE_UB,
-                )
-            )
-        # Scale by total_programs for chip-level grid floor
+            i_binding = (vector.throughput_fp16_tflops * 1e6) or 1.0  # FLOP/us
+        # Grid floor work is the binding component's work (matches i_binding's
+        # unit), scaled across all programs.
+        per_program_work = binding_work_1prog
         total_work = per_program_work * _total_programs
 
     total_work = max(total_work, 1.0)  # avoid division by zero

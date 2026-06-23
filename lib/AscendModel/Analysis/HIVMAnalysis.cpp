@@ -1082,6 +1082,35 @@ static bool resolveAffineApply(mlir::affine::AffineApplyOp affineApply,
   return true;
 }
 
+// Resolve an affine.min / affine.max: evaluate every result expr of the map
+// over the resolved operands and fold by min/max.  Needed because masked tile
+// sizes lower to affine.min(BLOCK, remaining) and offsets to affine.max(0, …),
+// which gate the dynamic transfer extents.
+static bool resolveAffineMinMax(mlir::AffineMap map, mlir::ValueRange operands,
+                                bool isMin, const AnalysisState &state,
+                                int64_t &resolved,
+                                llvm::SmallDenseSet<mlir::Value, 8> &visited) {
+  llvm::SmallVector<int64_t, 8> inputs;
+  inputs.reserve(operands.size());
+  for (mlir::Value operand : operands) {
+    int64_t v = 0;
+    if (!resolveMLIRValueImpl(operand, state, v, visited))
+      return false;
+    inputs.push_back(v);
+  }
+  std::optional<int64_t> acc;
+  for (mlir::AffineExpr expr : map.getResults()) {
+    auto r = evaluateAffineExpr(expr, map, inputs);
+    if (!r)
+      return false;
+    acc = acc ? (isMin ? std::min(*acc, *r) : std::max(*acc, *r)) : *r;
+  }
+  if (!acc)
+    return false;
+  resolved = *acc;
+  return true;
+}
+
 static bool resolveMLIRValueImpl(mlir::Value value, const AnalysisState &state,
                                  int64_t &resolved,
                                  llvm::SmallDenseSet<mlir::Value, 8> &visited) {
@@ -1240,6 +1269,14 @@ static bool resolveMLIRValueImpl(mlir::Value value, const AnalysisState &state,
   }
   if (auto affineApply = llvm::dyn_cast<mlir::affine::AffineApplyOp>(defOp))
     return finish(resolveAffineApply(affineApply, state, resolved, visited));
+  if (auto affineMin = llvm::dyn_cast<mlir::affine::AffineMinOp>(defOp))
+    return finish(resolveAffineMinMax(affineMin.getMap(),
+                                      affineMin.getOperands(), /*isMin=*/true,
+                                      state, resolved, visited));
+  if (auto affineMax = llvm::dyn_cast<mlir::affine::AffineMaxOp>(defOp))
+    return finish(resolveAffineMinMax(affineMax.getMap(),
+                                      affineMax.getOperands(), /*isMin=*/false,
+                                      state, resolved, visited));
 
   return finish(false);
 }
@@ -1248,6 +1285,154 @@ static bool resolveMLIRValue(mlir::Value value, const AnalysisState &state,
                              int64_t &resolved) {
   llvm::SmallDenseSet<mlir::Value, 8> visited;
   return resolveMLIRValueImpl(value, state, resolved, visited);
+}
+
+// Resolve an OpFoldResult (static attribute or dynamic SSA value) to a concrete
+// integer, using arg bindings for the dynamic case.
+static bool resolveOpFoldResult(mlir::OpFoldResult ofr,
+                                const AnalysisState &state, int64_t &out) {
+  if (auto val = llvm::dyn_cast_if_present<mlir::Value>(ofr))
+    return resolveMLIRValue(val, state, out);
+  if (auto attr =
+          llvm::dyn_cast_if_present<mlir::IntegerAttr>(
+              llvm::dyn_cast_if_present<mlir::Attribute>(ofr))) {
+    out = attr.getInt();
+    return true;
+  }
+  return false;
+}
+
+// Product of a static-dims array (with kDynamic entries) where each kDynamic is
+// filled, in order, by the next dynamic operand resolved through arg bindings.
+// Uses raw ODS accessors only (getStaticSizes/getSizes), deliberately avoiding
+// the OffsetSizeAndStrideOpInterface mixed-helpers — those pull MemRef's tiling
+// interface impl (→ linalg::makeTiledShapes) into the link.
+static int64_t resolveDimsProduct(llvm::ArrayRef<int64_t> staticDims,
+                                  mlir::OperandRange dynamicDims,
+                                  const AnalysisState &state) {
+  int64_t count = 1;
+  unsigned dynIdx = 0;
+  for (int64_t d : staticDims) {
+    int64_t v = d;
+    if (d == mlir::ShapedType::kDynamic) {
+      if (dynIdx >= dynamicDims.size() ||
+          !resolveMLIRValue(dynamicDims[dynIdx++], state, v))
+        return 0;
+    }
+    if (v <= 0)
+      return 0;
+    count *= v;
+  }
+  return count;
+}
+
+// Element count of a (possibly dynamic-shaped) value: resolves dynamic
+// subview / reinterpret_cast sizes from arg bindings.  Falls back to the
+// static element count when no view op produces the value.
+static int64_t inferValueElementsWithBindings(mlir::Value value,
+                                              const AnalysisState &state) {
+  if (!value)
+    return 0;
+  int64_t staticCount = inferValueElements(value);
+  if (staticCount > 0)
+    return staticCount;
+
+  mlir::Operation *defOp = value.getDefiningOp();
+  if (auto sv = llvm::dyn_cast_or_null<mlir::memref::SubViewOp>(defOp))
+    return resolveDimsProduct(sv.getStaticSizes(), sv.getSizes(), state);
+  if (auto rc = llvm::dyn_cast_or_null<mlir::memref::ReinterpretCastOp>(defOp))
+    return resolveDimsProduct(rc.getStaticSizes(), rc.getSizes(), state);
+  return 0;
+}
+
+static int64_t inferValueBytesWithBindings(mlir::Value value,
+                                           const AnalysisState &state) {
+  int64_t staticBytes = inferValueBytes(value);
+  if (staticBytes > 0)
+    return staticBytes;
+  auto shaped = llvm::dyn_cast<mlir::ShapedType>(value.getType());
+  if (!shaped)
+    return 0;
+  int64_t width = getTypeByteWidth(shaped.getElementType());
+  if (width <= 0)
+    return 0;
+  int64_t count = inferValueElementsWithBindings(value, state);
+  return count > 0 ? count * width : 0;
+}
+
+// Resolve the innermost ABSOLUTE stride (in elements) of a memref value.
+// 1 => fully contiguous innermost dimension.  Resolves dynamic strides from
+// the producing reinterpret_cast / subview using arg bindings.
+static bool resolveInnermostStride(mlir::Value value,
+                                   const AnalysisState &state, int64_t &stride) {
+  auto memref = llvm::dyn_cast<mlir::MemRefType>(value.getType());
+  if (!memref)
+    return false;
+  // Read the innermost stride straight from the strided layout attribute
+  // (pure MLIRIR — avoids pulling the Linalg tiling interface).  An identity /
+  // absent layout is contiguous (stride 1).
+  auto strided =
+      llvm::dyn_cast_or_null<mlir::StridedLayoutAttr>(memref.getLayout());
+  if (!strided) {
+    stride = 1;  // identity layout → contiguous
+    return true;
+  }
+  llvm::ArrayRef<int64_t> strides = strided.getStrides();
+  if (strides.empty())
+    return false;
+  int64_t inner = strides.back();
+  if (inner != mlir::ShapedType::kDynamic) {
+    stride = inner;
+    return true;
+  }
+  // Dynamic innermost stride: resolve from the producing view op using raw
+  // accessors (getStaticStrides/getStrides) — see resolveDimsProduct on why the
+  // mixed-helpers are avoided.  The innermost dim is the last; if its static
+  // stride is dynamic it is filled by the last dynamic stride operand.
+  auto resolveLast = [&](llvm::ArrayRef<int64_t> staticArr,
+                         mlir::OperandRange dynVals, int64_t &out) -> bool {
+    if (staticArr.empty())
+      return false;
+    if (staticArr.back() != mlir::ShapedType::kDynamic) {
+      out = staticArr.back();
+      return true;
+    }
+    return !dynVals.empty() && resolveMLIRValue(dynVals.back(), state, out);
+  };
+  mlir::Operation *defOp = value.getDefiningOp();
+  if (auto rc =
+          llvm::dyn_cast_or_null<mlir::memref::ReinterpretCastOp>(defOp))
+    return resolveLast(rc.getStaticStrides(), rc.getStrides(), stride);
+  if (auto sv = llvm::dyn_cast_or_null<mlir::memref::SubViewOp>(defOp)) {
+    int64_t srcStride = 1, svStride = 1;
+    if (resolveLast(sv.getStaticStrides(), sv.getStrides(), svStride) &&
+        resolveInnermostStride(sv.getSource(), state, srcStride)) {
+      stride = srcStride * svStride;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Contiguous packet size (bytes) the hardware moves in one shot for an MTE
+// transfer of `value`.  Contiguous innermost dim => the whole run; strided =>
+// a single element.  Returns `totalBytes` when contiguity can't be determined
+// (conservative: assume coalesced, no Gap-2 penalty invented).
+static int64_t inferTransferPacketBytes(mlir::Value value,
+                                        const AnalysisState &state,
+                                        int64_t totalBytes) {
+  auto memref = llvm::dyn_cast<mlir::MemRefType>(value.getType());
+  if (!memref)
+    return totalBytes;
+  int64_t width = getTypeByteWidth(memref.getElementType());
+  if (width <= 0)
+    return totalBytes;
+  int64_t innermost = 1;
+  if (!resolveInnermostStride(value, state, innermost))
+    return totalBytes;  // unknown stride → assume contiguous
+  if (innermost == 1)
+    return totalBytes;  // contiguous run
+  return width;         // strided/gather → one element per packet
 }
 
 static std::string canonicalizeSyncId(mlir::Value value,
@@ -2235,20 +2420,40 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
     }
 
     if (op->getNumResults() > 0) {
-      parsed.op.bytes = inferValueBytes(op->getResult(0));
-      parsed.op.elements = inferValueElements(op->getResult(0));
+      parsed.op.bytes = inferValueBytesWithBindings(op->getResult(0), state);
+      parsed.op.elements =
+          inferValueElementsWithBindings(op->getResult(0), state);
     }
     if (parsed.op.bytes == 0 || parsed.op.elements == 0) {
       for (mlir::Value operand : op->getOperands()) {
-        parsed.op.bytes = std::max(parsed.op.bytes, inferValueBytes(operand));
-        parsed.op.elements =
-            std::max(parsed.op.elements, inferValueElements(operand));
+        parsed.op.bytes =
+            std::max(parsed.op.bytes, inferValueBytesWithBindings(operand, state));
+        parsed.op.elements = std::max(
+            parsed.op.elements, inferValueElementsWithBindings(operand, state));
       }
     }
     if (parsed.op.bytes == 0)
       parsed.op.bytes = parseMemRefBytes(parsed.op.text);
     if (parsed.op.elements == 0)
       parsed.op.elements = parseMemRefElementCount(parsed.op.text);
+
+    // Gap-2 packet size: for MTE transfers, the contiguous run the hardware
+    // moves per shot.  Strided/gather transfers keep a small packet even when
+    // the total volume is large — that gap is what the coalescing model reads.
+    if (parsed.op.bytes > 0 &&
+        (parsed.op.opName == "load" || parsed.op.opName == "store")) {
+      int64_t packet = parsed.op.bytes;  // default: fully contiguous
+      for (mlir::Value operand : op->getOperands()) {
+        if (!llvm::isa<mlir::MemRefType>(operand.getType()))
+          continue;
+        int64_t opTotal = inferValueBytesWithBindings(operand, state);
+        if (opTotal <= 0)
+          opTotal = parsed.op.bytes;
+        packet = std::min(packet,
+                          inferTransferPacketBytes(operand, state, opTotal));
+      }
+      parsed.op.packetBytes = packet;
+    }
     // Gap 4: derive the CCE repeat count (SIMD iteration count) analytically
     // from the op's element count and per-element width.  Per-op repeat/mask
     // are NOT present in the hivm.hir IR — they only materialize in later CCE
@@ -3168,6 +3373,7 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
        << ",\"cycles\":" << op.duration
        << ",\"loop_multiplier\":" << op.loopMultiplier
        << ",\"bytes\":" << op.bytes
+       << ",\"packet_bytes\":" << op.packetBytes
        << ",\"elements\":" << op.elements
        << ",\"event_id\":\"" << op.eventId << "\""
        << ",\"event_generation\":" << op.eventGeneration
@@ -3310,6 +3516,7 @@ void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
        << "\""
        << ",\"core_type\":\"" << op.coreType << "\""
        << ",\"bytes\":" << op.bytes
+       << ",\"packet_bytes\":" << op.packetBytes
        << ",\"elements\":" << op.elements
        << ",\"flops\":" << op.flops
        << ",\"loop_multiplier\":" << op.loopMultiplier

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from .op_classifier import classify_op, Component, Precision
+from .op_classifier import classify_op, Component, Precision, _ADDRESS_OP_PATTERNS
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +60,11 @@ class OpRecord:
     precision: Optional[Precision]
     pipe: str                  # HIVM pipe name (e.g., "Cube", "Vector", "MTE2")
     bytes_transferred: int = 0
+    # Contiguous transfer packet size (bytes) for MTE ops — the run moved per
+    # shot.  Equals bytes_transferred for contiguous transfers, smaller for
+    # strided/gather.  Drives the Gap-2 coalescing bandwidth lookup.  0 =
+    # unknown (consumers fall back to bytes_transferred).
+    packet_bytes: int = 0
     elements: int = 0
     flops: int = 0
     duration_cycles: int = 0
@@ -175,20 +180,30 @@ def load_hivm_desgraph(path: Path | str) -> List[OpRecord]:
                 f"DES graph operation at index {idx} missing required fields: "
                 f"{missing}. Got keys: {list(node.keys())}"
             )
+        op_name = node.get("name", "")
         comp, prec = classify_op(
-            op_name=node.get("name", ""),
+            op_name=op_name,
             pipe=node.get("pipe", ""),
             elem_type=node.get("elem_type", ""),
         )
+        # Address-generation ops (pointer_cast, reinterpret_cast) carry a
+        # buffer-size `elements`/`bytes` count but perform no element-wise
+        # compute — charging that buffer size as compute work inflated the
+        # vector/scalar floor and made the bound unsound.  Zero their compute
+        # work; they remain in the graph for dependency/sync structure.
+        is_address_op = any(a in op_name.lower() for a in _ADDRESS_OP_PATTERNS)
+        elements = 0 if is_address_op else node.get("elements", 0)
+        flops = 0 if is_address_op else node.get("flops", 0)
         ops.append(OpRecord(
             op_id=node.get("id", 0),
-            op_name=node.get("name", ""),
+            op_name=op_name,
             component=comp,
             precision=prec,
             pipe=node.get("pipe", ""),
             bytes_transferred=node.get("bytes", 0),
-            elements=node.get("elements", 0),
-            flops=node.get("flops", 0),  # C++ emitDESGraph emits flops for compute ops
+            packet_bytes=node.get("packet_bytes", 0),
+            elements=elements,
+            flops=flops,  # C++ emitDESGraph emits flops for compute ops
             duration_cycles=node.get("duration", 0),
             loop_multiplier=node.get("loop_multiplier", 1),
             depends_on=node.get("depends_on", []),
