@@ -72,6 +72,8 @@ class MSProfRow:
     start_time_us: float = 0.0   # Task Start Time(us)
     fixpipe_time_us: float = 0.0
     aiv_scalar_time_us: float = 0.0
+    aicore_time_us: float = 0.0   # from aicore_time(us) column (MIX tasks)
+    aiv_time_us: float = 0.0      # from aiv_time(us) column (MIX tasks)
     block_dim: int = 0
 
 
@@ -122,6 +124,16 @@ def read_msprof_csv(csv_path: Path) -> List[MSProfRow]:
                     aiv_scalar_time_us=float(_first_present(
                         line,
                         ["aiv_scalar_time(us)", "AIV Scalar Time(us)"],
+                        "0",
+                    )),
+                    aicore_time_us=float(_first_present(
+                        line,
+                        ["aicore_time(us)", "aicore_time (us)"],
+                        "0",
+                    )),
+                    aiv_time_us=float(_first_present(
+                        line,
+                        ["aiv_time(us)", "aiv_time (us)"],
                         "0",
                     )),
                     block_dim=int(float(_first_present(

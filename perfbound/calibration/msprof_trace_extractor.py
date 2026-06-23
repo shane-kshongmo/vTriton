@@ -55,6 +55,10 @@ class RealTrace:
     overlap_ratio: float = 0.0
     aic_aiv_concurrent_us: float = 0.0
 
+    # Kernel-level fields (from msprof CSV, for CoreMapper)
+    kernel_wall_time_us: float = 0.0    # Task Duration(us) — full launch wall clock
+    task_type_raw: str = ""             # Task Type column value (e.g. "MIX_AIC")
+
     # Raw durations
     aic_durations_us: List[float] = field(default_factory=list)
     aiv_durations_us: List[float] = field(default_factory=list)
@@ -116,13 +120,35 @@ def extract_real_trace(csv_path: str | Path) -> RealTrace:
             tt = core_rows[0].task_type.strip().upper()
             tl.task_type = tt
 
-            if tt in AIC_ONLY_TYPES or tt in ("MIX_AIC",):
+            # For MIX task types, use the per-core time columns directly
+            # from the CSV (aicore_time(us) and aiv_time(us)) which give
+            # the actual busy time on each core within the mixed kernel.
+            if tt in ("MIX_AIC", "MIX_AIV"):
+                aicore_sum = sum(r.aicore_time_us for r in core_rows)
+                aiv_sum = sum(r.aiv_time_us for r in core_rows)
+                if aicore_sum > 0 or aiv_sum > 0:
+                    # Use explicit per-core breakdown from CSV
+                    trace.aic_total_time_us += aicore_sum
+                    trace.aiv_total_time_us += aiv_sum
+                    trace.aic_durations_us.extend(
+                        r.aicore_time_us for r in core_rows if r.aicore_time_us > 0
+                    )
+                    trace.aiv_durations_us.extend(
+                        r.aiv_time_us for r in core_rows if r.aiv_time_us > 0
+                    )
+                else:
+                    # Fallback: no per-core breakdown available
+                    trace.aic_total_time_us += tl.total_active_us
+                    trace.aic_durations_us.extend(
+                        r.duration_us for r in core_rows if r.duration_us > 0
+                    )
+            elif tt in AIC_ONLY_TYPES:
                 trace.aic_total_time_us += tl.total_active_us
                 trace.aic_fixpipe_time_us += tl.fixpipe_active_us
                 trace.aic_durations_us.extend(
                     r.duration_us for r in core_rows if r.duration_us > 0
                 )
-            elif tt in AIV_ONLY_TYPES or tt in ("MIX_AIV",):
+            elif tt in AIV_ONLY_TYPES:
                 trace.aiv_total_time_us += tl.total_active_us
                 trace.aiv_scalar_time_us += tl.scalar_active_us
                 trace.aiv_durations_us.extend(
@@ -132,44 +158,81 @@ def extract_real_trace(csv_path: str | Path) -> RealTrace:
         trace.core_timelines[core_id] = tl
 
     # Compute pipeline overlap ratio
-    aic_core_ids = [cid for cid, tl in trace.core_timelines.items()
-                    if tl.task_type in AIC_ONLY_TYPES
-                    or tl.task_type in ("MIX_AIC",)]
-    aiv_core_ids = [cid for cid, tl in trace.core_timelines.items()
-                    if tl.task_type in AIV_ONLY_TYPES
-                    or tl.task_type in ("MIX_AIV",)]
+    # For MIX task types, build synthetic AIC/AIV timelines from the
+    # per-core time columns, then compute concurrency.
+    if rows and rows[0].task_type.strip().upper() in ("MIX_AIC", "MIX_AIV"):
+        # MIX kernel: create AIC and AIV intervals from per-core time columns
+        aic_intervals = [(r.start_time_us, r.start_time_us + r.aicore_time_us)
+                         for r in rows if r.aicore_time_us > 0]
+        aiv_intervals = [(r.start_time_us, r.start_time_us + r.aiv_time_us)
+                         for r in rows if r.aiv_time_us > 0]
+        if aic_intervals and aiv_intervals:
+            trace.aic_aiv_concurrent_us, trace.overlap_ratio = _compute_concurrency(
+                trace.core_timelines, [], [], aic_intervals=aic_intervals, aiv_intervals=aiv_intervals
+            )
+    else:
+        aic_core_ids = [cid for cid, tl in trace.core_timelines.items()
+                        if tl.task_type in AIC_ONLY_TYPES]
+        aiv_core_ids = [cid for cid, tl in trace.core_timelines.items()
+                        if tl.task_type in AIV_ONLY_TYPES]
+        if aic_core_ids and aiv_core_ids:
+            trace.aic_aiv_concurrent_us, trace.overlap_ratio = _compute_concurrency(
+                trace.core_timelines, aic_core_ids, aiv_core_ids
+            )
 
-    if aic_core_ids and aiv_core_ids:
-        trace.aic_aiv_concurrent_us, trace.overlap_ratio = _compute_concurrency(
-            trace.core_timelines, aic_core_ids, aiv_core_ids
-        )
+    # Capture kernel-level fields for CoreMapper (Layer 0)
+    _capture_kernel_fields(trace, rows)
 
     return trace
+
+
+def _capture_kernel_fields(trace: RealTrace, rows: list) -> None:
+    """Extract kernel wall clock and task type from msprof rows."""
+    candidate_rows = [r for r in rows if r.task_type.strip().upper()
+                      in AICORE_TASK_TYPES]
+    if not candidate_rows:
+        candidate_rows = rows
+    longest = max(candidate_rows, key=lambda r: r.duration_us)
+    trace.kernel_wall_time_us = longest.duration_us
+    trace.task_type_raw = longest.task_type.strip()
 
 
 def _compute_concurrency(
     timelines: Dict[int, CoreTimeline],
     aic_ids: List[int],
     aiv_ids: List[int],
+    aic_intervals: Optional[List[Tuple[float, float]]] = None,
+    aiv_intervals: Optional[List[Tuple[float, float]]] = None,
 ) -> Tuple[float, float]:
     """Compute AIC↔AIV concurrency from per-core interval data.
+
+    Args:
+        timelines: Per-core timelines (used when aic/aiv_ids are given).
+        aic_ids: Core IDs classified as AIC.
+        aiv_ids: Core IDs classified as AIV.
+        aic_intervals: Pre-built AIC intervals (for MIX tasks).
+        aiv_intervals: Pre-built AIV intervals (for MIX tasks).
 
     Returns (concurrent_time_us, overlap_ratio).
     """
     # Collect all intervals from AIC and AIV cores
-    aic_intervals = []
-    for cid in aic_ids:
-        aic_intervals.extend(timelines[cid].intervals)
-    aiv_intervals = []
-    for cid in aiv_ids:
-        aiv_intervals.extend(timelines[cid].intervals)
+    if aic_intervals is not None and aiv_intervals is not None:
+        aic_list = aic_intervals
+        aiv_list = aiv_intervals
+    else:
+        aic_list = []
+        for cid in aic_ids:
+            aic_list.extend(timelines[cid].intervals)
+        aiv_list = []
+        for cid in aiv_ids:
+            aiv_list.extend(timelines[cid].intervals)
 
-    if not aic_intervals or not aiv_intervals:
+    if not aic_list or not aiv_list:
         return 0.0, 0.0
 
     # Merge intervals from each group
-    aic_merged = _merge_intervals(aic_intervals)
-    aiv_merged = _merge_intervals(aiv_intervals)
+    aic_merged = _merge_intervals(aic_list)
+    aiv_merged = _merge_intervals(aiv_list)
 
     aic_total = sum(e - s for s, e in aic_merged)
     aiv_total = sum(e - s for s, e in aiv_merged)

@@ -1,6 +1,8 @@
 # vTriton 校准系统设计与使用指南
 
-> 涵盖 M1 微基准校准 + Layer 1/2/3 工作负载校准的完整体系
+> 涵盖 M1 微基准校准 + Layer 0/1/2/3 工作负载校准的完整体系
+>
+> 更新 2026-06-23：新增 Layer 0 核心分配（CoreMapper）
 
 ---
 
@@ -100,14 +102,67 @@ python perfbound/calibration/scripts/validate_vs_tilesim.py \
   perfbound/calibration/data/calib_910b3_v1.json
 ```
 
+
+
 ---
 
-## 三、Layer 1 — 每核时间校准（新增）
+## 三、Layer 0 — 核心分布映射 (新增)
 
 ### 3.1 目的
-用真实 Triton 算子运行 msprof 数据，对比模型预测的 AIC/AIV 总时间和硬实测时间的差异，校准 `startup_latency` 和 `scalar_overhead_factor` 参数。
+DES 模型模拟 **一个 program block** 的管线调度。真机 msprof 上报的是
+**整个 kernel launch** (如 4096 个 block) 的端到端结果。
+Layer 0 按 NPU 固件的 block→核心 round-robin 分配逻辑
+将 model per-block 时间缩放到 E2E, 从而使 model 和 real 的输入尺度对齐。
 
 ### 3.2 原理
+
+```
+真机 rtKernelLaunch:
+  Grid = 4096 blocks,  AIC=20 cores,  AIV=40 cores
+  MIX_AIC: 每 block 占用 1 AIC + 1 AIV
+  bottleneck_cores = min(20, 40) = 20
+  waves = ceil(4096 / 20) = 205
+  E2E_wall = 205 x max(per_block_AIC, per_block_AIV)
+
+DES 模型:
+  输入: 1 block 的 HIVM MLIR (pid_x=0, pid_y=0)
+  输出: AIC span (us), AIV span (us)  — from Perfetto trace
+
+CoreMapper:
+  e2e = mapper.map(grid=4096, per_block_aic, per_block_aiv, task_type="MIX_AIC")
+  e2e.e2e_wall_us → 与 msprof Task Duration(us) 对比
+```
+
+### 3.3 模块
+
+| 模块 | 文件 | 功能 |
+|------|------|------|
+| CoreMapper | `perfbound/distribution/core_mapper.py` | grid→core 映射 + E2E 缩放 |
+
+### 3.4 CLI 参数
+
+```bash
+python -m perfbound.calibration.trace_calibrator \
+    --aic-cores 20 --aiv-cores 40 \   # 物理核心数 (默认 20/40)
+    --grid 128 32 \                    # 重写 grid (默认从 Block Num 推断)
+    --real-csv ... --model-trace ...
+```
+
+### 3.5 约束与普适性
+
+- `IS_VARLEN=False` 的 kernel: 所有 block 具有相同的 loop bounds 和操作数,
+  per-block span 恒定——直接适用。
+- `IS_VARLEN=True`: 不同 block 处理不同长度序列, 需多 block 采样后加权平均。
+- `program_id` 只影响数据偏移量(内存地址), 不影响 DES 计算图或 op 数量。
+- 对 `AI_CORE` / `AI_VECTOR_CORE` 单核模式同样适用 (CoreMapper 按 task_type 选择有效核心数)。
+---
+
+## 四、Layer 1 — 每核时间校准（新增）
+
+### 4.1 目的
+用真实 Triton 算子运行 msprof 数据，对比模型预测的 AIC/AIV 总时间和硬实测时间的差异，校准 `startup_latency` 和 `scalar_overhead_factor` 参数。
+
+### 4.2 原理
 
 ```
 真实侧:                             模型侧:
@@ -133,7 +188,7 @@ msprof_trace_extractor.py          model_trace_extractor.py
   efficiency < 1.0 → 模型过慢 → 减少 startup_latency (不低于 1 cycle)
 ```
 
-### 3.3 模块
+### 4.3 模块
 
 | 模块 | 文件 | 功能 |
 |------|------|------|
@@ -143,12 +198,12 @@ msprof_trace_extractor.py          model_trace_extractor.py
 
 ---
 
-## 四、Layer 2 — 管道流水线校准（新增）
+## 五、Layer 2 — 管道流水线校准（新增）
 
-### 4.1 目的
+### 5.1 目的
 对比真实硬件上 AIC 和 AIV 的实际并行执行程度和模型假设的完全并行执行，校准 `mandatory_handoff_cycles` 和 `pipe_barrier_cycles_per_iter`。
 
-### 4.2 原理
+### 5.2 原理
 
 ```
 从 msprof Start Time 重建时间线:
@@ -167,7 +222,7 @@ pipeline_efficiency = real_overlap / model_overlap
   → 增加 handoff / barrier 周期以匹配真实行为
 ```
 
-### 4.3 模块
+### 5.3 模块
 
 | 模块 | 文件 | 功能 |
 |------|------|------|
@@ -175,12 +230,12 @@ pipeline_efficiency = real_overlap / model_overlap
 
 ---
 
-## 五、Layer 3 — 多算子收敛（新增）
+## 六、Layer 3 — 多算子收敛（新增）
 
-### 5.1 目的
+### 6.1 目的
 用多个不同负载的 Triton kernel 分别校准，检查所有内核的效率是否收敛在 [0.95, 1.05] 范围内。如果收敛，校准参数具有泛化性。
 
-### 5.2 模块
+### 6.2 模块
 
 | 模块 | 文件 | 功能 |
 |------|------|------|
@@ -189,9 +244,9 @@ pipeline_efficiency = real_overlap / model_overlap
 
 ---
 
-## 五、v1 → v2 验收矩阵
+## 七、v1 → v2 验收矩阵
 
-### 5.1 永远不变的 P0 组件峰值（M1 微基准产出）
+### 7.1 永远不变的 P0 组件峰值（M1 微基准产出）
 
 这些值的 source = `"cce_microbench"`、n_runs ≥ 30、CI < 5%。校准Layer 1/2 **不改变**它们，保证 bound 的保守下界性质：
 
@@ -213,7 +268,7 @@ pipeline_efficiency = real_overlap / model_overlap
 | `BW_l0c_to_gm_sustained` | ~143.5 GB/s | **不变** | 硬件上限固定 |
 | `BW_hbm_allcore_sustained` | 实测值 | **不变** | 硬件上限固定 |
 
-### 5.2 会被改变的跨组件交互参数
+### 7.2 会被改变的跨组件交互参数
 
 这些值的 source = `"datasheet_seed"`（n_runs=0，未实测）。校准 Layer 1/2 将它们从"种子猜测值"升级为"基于真实负载反馈的计算值"：
 
@@ -227,7 +282,7 @@ pipeline_efficiency = real_overlap / model_overlap
 | `mandatory_handoff_cycles` | 7621 (已有M1测量) | × (1 + gap×0.6) | Layer 2 | pipeline效率 < 0.98 |
 | `pipe_barrier_cycles_per_iter` | 7500 (datasheet_seed) | × (1 + gap×0.4) | Layer 2 | pipeline效率 < 0.98 |
 
-### 5.3 无校准数据因此不变的参数
+### 7.3 无校准数据因此不变的参数
 
 | 参数 | v1 值 | 是否变化 | 原因 |
 |------|-------|---------|------|
@@ -236,7 +291,7 @@ pipeline_efficiency = real_overlap / model_overlap
 | `cube.fractal_sizes` | M16,K16,N16 等 | **不变** | 硬件特征不变 |
 | `memory` 容量字段 | gm=32GB, l1=1024KB 等 | **不变** | 硬件容量不变 |
 
-### 5.4 v2 新增的 provenance 标记
+### 7.4 v2 新增的 provenance 标记
 
 v2 的 `constants` 字段中，所有被校准的参数新增来源记录：
 
@@ -270,7 +325,7 @@ v2 还会更新顶层字段：
 | `version` | `"v1"` | `"v2"` |
 | `description` | `"Calibration database from CCE microbenchmarks"` | `"Calibrated from N kernel(s); avg AIC eff=X, avg AIV eff=Y"` |
 
-### 5.5 效率因子计算方式
+### 7.5 效率因子计算方式
 
 ```
 效率因子 = T_model / T_real        （模型效率, 由 Perfetto trace 和 msprof CSV 对比得出）
@@ -289,7 +344,7 @@ AIV 效率影响: startup_latency.vector, startup_latency.mte3, scalar_overhead_
   pipe_barrier_cycles_per_iter ← 当前值 × (1 + gap × 0.4) # barrier 是辅助同步
 ```
 
-### 5.6 对比示例（假设校准）
+### 7.6 对比示例（假设校准）
 
 ```
 假设 chunk_kda_bwd 校准结果: AIC eff=0.97, AIV eff=0.94, pipeline eff=0.86
@@ -312,16 +367,16 @@ BW_gm_to_ub: 86.5           →  86.5   (不变, M1 P0)
 
 ---
 
-## 六、完整使用流程
+## 八、完整使用流程
 
-### 6.1 环境要求
+### 8.1 环境要求
 
 - Linux x86_64 可 SSH 到 910B3 真机
 - CANN 8.5.0+ 安装在 `/home/shane/Ascend` 或 `/usr/local/Ascend`
 - triton-ascend Python 包已安装
 - vTriton 项目已编译（`tritonsim-opt` 可用）
 
-### 6.2 Step 1: 真机跑 chunk kernel + msprof
+### 8.2 Step 1: 真机跑 chunk kernel + msprof
 
 ```bash
 cd /home/triton_sim/vTriton
@@ -342,7 +397,7 @@ python scripts/remote_bench.py \
 # 此时 temp/real_op_summary.csv 包含 msprof 输出
 ```
 
-### 6.3 Step 2: 生成模型 Perfetto trace
+### 8.3 Step 2: 生成模型 Perfetto trace
 
 ```bash
 # 先用 clean_npuir.py 清洗 HIVM MLIR
@@ -357,7 +412,7 @@ python scripts/clean_npuir.py temp/kernel.npuir.mlir temp/kernel_clean.npuir.mli
     perfetto-trace-file=$(pwd)/temp/model_trace.json"
 ```
 
-### 6.4 Step 3: 运行校准
+### 8.4 Step 3: 运行校准
 
 ```bash
 # 单 kernel 校准
@@ -369,7 +424,7 @@ python perfbound/calibration/trace_calibrator.py \
   --report temp/calibration_report.json
 ```
 
-### 6.5 Step 4: 用新校准重跑验证
+### 8.5 Step 4: 用新校准重跑验证
 
 ```bash
 # 用 v2 校准重新运行分析
@@ -388,7 +443,7 @@ python perfbound/calibration/trace_calibrator.py \
   --report temp/calibration_report_v2.json
 ```
 
-### 6.6 多 kernel 校准
+### 8.6 多 kernel 校准
 
 ```bash
 # 对多个不同的 Triton kernel 分别跑 msprof 和模型 trace，然后一起校准
@@ -404,7 +459,7 @@ python perfbound/calibration/trace_calibrator.py \
 
 ---
 
-## 七、校准报告格式
+## 九、校准报告格式
 
 `calibration_report.json` 示例：
 
@@ -444,7 +499,7 @@ python perfbound/calibration/trace_calibrator.py \
 
 ---
 
-## 八、校准参数对照表
+## 十、校准参数对照表
 
 | 参数 | 类别 | 原始来源 | 单位 | Layer 1 校准 | Layer 2 校准 |
 |------|------|----------|------|-------------|-------------|

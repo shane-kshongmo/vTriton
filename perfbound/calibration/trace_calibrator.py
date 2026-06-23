@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # trace_calibrator.py — Main entry point for workload-based calibration.
 #
-# Orchestrates the three-layer calibration pipeline:
+# Orchestrates the four-layer calibration pipeline:
+#   Layer 0: Core distribution (grid → core mapping, per-block → E2E scaling)
 #   Layer 1: Per-core time calibration (startup latency, scalar overhead)
 #   Layer 2: Pipeline overlap calibration (handoff, barrier cycles)
 #   Layer 3: Multi-kernel convergence check and report generation
@@ -39,6 +40,7 @@ from perfbound.calibration.pipeline_calibrator import (
 from perfbound.calibration.calib_reporter import (
     generate_report, save_report, print_report, CalibrationReport,
 )
+from perfbound.distribution.core_mapper import CoreMapper, DistributionResult
 
 
 DEFAULT_CALIB_IN = "perfbound/calibration/data/calib_910b3_v1.json"
@@ -52,6 +54,10 @@ def run_calibration(
     calib_out: Optional[str | Path] = None,
     report_out: Optional[str | Path] = None,
     convergence_threshold: float = 0.05,
+    *,
+    aic_cores: int = 20,
+    aiv_cores: int = 40,
+    grid: Optional[List[int]] = None,
 ) -> CalibrationReport:
     """Run the full calibration pipeline.
 
@@ -62,6 +68,10 @@ def run_calibration(
         calib_out: Path to output calibrated JSON (v2).
         report_out: Path for calibration report JSON.
         convergence_threshold: Max allowed efficiency deviation.
+        aic_cores: Number of AIC (Cube) physical cores (default 20).
+        aiv_cores: Number of AIV (Vector) physical cores (default 40).
+        grid: Override grid dimensions, e.g. ``(128, 32)``.
+              When ``None``, inferred from msprof ``Block Num``.
 
     Returns:
         CalibrationReport with all results.
@@ -80,8 +90,12 @@ def run_calibration(
         print(f"Calibration DB not found at {calib_in}, using defaults")
         calib_db = None
 
+    # ── Build core mapper ────────────────────────────────────────────────
+    mapper = CoreMapper(aic_cores=aic_cores, aiv_cores=aiv_cores)
+
     per_core_results: List[PerCoreResult] = []
     pipeline_results: List[PipelineResult] = []
+    distribution_results: List[DistributionResult] = []
     kernel_names: List[str] = []
 
     for real_csv, model_trace in zip(real_csvs, model_traces):
@@ -92,21 +106,67 @@ def run_calibration(
         model = extract_model_trace(model_trace)
         kernel_names.append(real.kernel_name)
 
-        print(f"  Real:  AIC={real.aic_total_time_us:.1f}us  "
-              f"AIV={real.aiv_total_time_us:.1f}us  "
-              f"overlap={real.overlap_ratio:.3f}")
-        print(f"  Model: AIC={model.aic_total_time_us:.1f}us  "
-              f"AIV={model.aiv_total_time_us:.1f}us  "
-              f"overlap={model.overlap_ratio:.3f}")
+        # ── Layer 0: Core distribution ─────────────────────────────────
+        total_blocks = grid if grid else real.block_dim
+        if isinstance(total_blocks, (list, tuple)):
+            total_blocks = total_blocks  # pass as grid tuple
+        else:
+            total_blocks = int(total_blocks)  # pass as scalar block count
 
-        # Layer 1: Per-core calibration
-        per_core = calibrate_per_core(real, model, calib_db)
+        distribution = mapper.map(
+            grid=total_blocks,
+            per_block_span_aic_us=model.aic_total_time_us,
+            per_block_span_aiv_us=model.aiv_total_time_us,
+            task_type=real.task_type_raw or "MIX_AIC",
+        )
+        distribution_results.append(distribution)
+
+        print(f"  Layer 0 (Core Dist): {real.block_dim} blocks × "
+              f"{aic_cores}AIC+{aiv_cores}AIV")
+        print(f"    Waves: AIC={distribution.waves_aic}, AIV={distribution.waves_aiv}")
+        print(f"    Model E2E: AIC={distribution.e2e_aic_us:.1f}us  "
+              f"AIV={distribution.e2e_aiv_us:.1f}us  "
+              f"wall={distribution.e2e_wall_us:.1f}us")
+        print(f"    Real  E2E: wall={real.kernel_wall_time_us:.1f}us")
+
+        # Print per-block spans for diagnostics
+        print(f"    Model per-block: AIC={model.aic_total_time_us:.1f}us  "
+              f"AIV={model.aiv_total_time_us:.1f}us")
+        print(f"    Real  per-core:  AIC={real.aic_total_time_us:.1f}us  "
+              f"AIV={real.aiv_total_time_us:.1f}us")
+
+        # ── Layer 1: Per-core calibration (use E2E model + real E2E)  ──
+        # Build synthetic RealTrace / ModelTrace with E2E values so
+        # existing calibrators work unchanged.
+        real_e2e = RealTrace(
+            kernel_name=real.kernel_name,
+            csv_path=real.csv_path,
+            n_cores=real.n_cores,
+            block_dim=real.block_dim,
+            # Align: real wall clock vs model E2E wall clock
+            aic_total_time_us=real.kernel_wall_time_us,
+            aiv_total_time_us=real.kernel_wall_time_us,
+            kernel_wall_time_us=real.kernel_wall_time_us,
+            task_type_raw=real.task_type_raw,
+        )
+        model_e2e = ModelTrace(
+            kernel_name=model.kernel_name,
+            trace_path=model.trace_path,
+            aic_total_time_us=distribution.e2e_aic_us,
+            aiv_total_time_us=distribution.e2e_aiv_us,
+        )
+
+        print(f"  Aligned: model_AIC={model_e2e.aic_total_time_us:.1f}us, "
+              f"model_AIV={model_e2e.aiv_total_time_us:.1f}us, "
+              f"real_wall={real_e2e.aic_total_time_us:.1f}us")
+
+        per_core = calibrate_per_core(real_e2e, model_e2e, calib_db)
         per_core_results.append(per_core)
         print(f"  Per-core: AIC eff={per_core.aic_efficiency:.3f}  "
               f"AIV eff={per_core.aiv_efficiency:.3f}")
 
         # Layer 2: Pipeline calibration
-        pipeline = calibrate_pipeline(real, model, calib_db)
+        pipeline = calibrate_pipeline(real_e2e, model_e2e, calib_db)
         pipeline_results.append(pipeline)
         print(f"  Pipeline: eff={pipeline.pipeline_efficiency:.3f}")
 
@@ -116,6 +176,21 @@ def run_calibration(
         description=f"Calibration vs {len(kernel_names)} kernel(s)",
         convergence_threshold=convergence_threshold,
     )
+
+    # Inject core distribution metadata into report
+    report.adjustments["_layer0_core_distribution"] = {
+        "aic_cores": aic_cores,
+        "aiv_cores": aiv_cores,
+    }
+    if distribution_results:
+        dr = distribution_results[0]
+        report.adjustments["_layer0_detail"] = {
+            "waves_aic": dr.waves_aic,
+            "waves_aiv": dr.waves_aiv,
+            "bottleneck": dr.bottleneck,
+            "per_block_span_aic_us": dr.per_block_span_aic_us,
+            "per_block_span_aiv_us": dr.per_block_span_aiv_us,
+        }
 
     print_report(report)
 
@@ -176,6 +251,18 @@ def _cli():
         "--threshold", type=float, default=0.05,
         help="Convergence threshold (default: 0.05)",
     )
+    parser.add_argument(
+        "--aic-cores", type=int, default=20,
+        help="Number of AIC (Cube) physical cores (default: 20)",
+    )
+    parser.add_argument(
+        "--aiv-cores", type=int, default=40,
+        help="Number of AIV (Vector) physical cores (default: 40)",
+    )
+    parser.add_argument(
+        "--grid", type=int, nargs="+", default=None,
+        help="Grid dimensions (e.g. '128 32'). Omit to infer from Block Num in CSV.",
+    )
 
     args = parser.parse_args()
 
@@ -197,6 +284,9 @@ def _cli():
         calib_out=args.calib_out,
         report_out=args.report,
         convergence_threshold=args.threshold,
+        aic_cores=args.aic_cores,
+        aiv_cores=args.aiv_cores,
+        grid=args.grid,
     )
 
 

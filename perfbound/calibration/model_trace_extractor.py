@@ -92,26 +92,39 @@ def extract_model_trace(trace_path: str | Path) -> ModelTrace:
         )
         model.operations.append(op)
 
-        # Classify by component name prefix
+        # Classify by pid (process ID) as set by tritonsim-opt:
+        # pid=1 → AIC (Cube+MTE1+MTE2_C+FixPipe+Scalar_AIC)
+        # pid=2 → AIV (Vector+MTE2_V+MTE3+Scalar_AIV)
+        pid = ev.get("pid", 0)
         name_lower = name.lower()
-        if any(k in name_lower for k in ("cube", "matmul", "aic", "fixpipe", "mte2", "l0a", "l0b", "l1")):
+
+        if pid == 1:
             aic_ops.append(op)
             model.aic_total_time_us += dur_us
-            if "cube" in name_lower or "matmul" in name_lower:
+            if "cube" in name_lower or "matmul" in name_lower or "pipe_m" in name_lower:
                 model.cube_time_us += dur_us
             elif "mte" in name_lower or "fixpipe" in name_lower or "l1" in name_lower:
                 model.mte_time_us += dur_us
-        elif any(k in name_lower for k in ("vector", "aiv", "mte3", "ub", "scalar")):
+        elif pid == 2:
             aiv_ops.append(op)
             model.aiv_total_time_us += dur_us
-            if "vector" in name_lower or "scalar" in name_lower:
+            if "vector" in name_lower or "pipe_v" in name_lower:
+                model.vector_time_us += dur_us
+            elif "scalar" in name_lower:
                 model.vector_time_us += dur_us
             elif "mte" in name_lower:
                 model.mte_time_us += dur_us
         else:
-            # Default: assign to AIC
-            aic_ops.append(op)
-            model.aic_total_time_us += dur_us
+            # Fallback: classify by name for unknown pids
+            if any(k in name_lower for k in ("cube", "matmul", "aic", "fixpipe", "mte2", "l0a", "l0b", "l1")):
+                aic_ops.append(op)
+                model.aic_total_time_us += dur_us
+            elif any(k in name_lower for k in ("vector", "aiv", "mte3", "ub", "scalar")):
+                aiv_ops.append(op)
+                model.aiv_total_time_us += dur_us
+            else:
+                aic_ops.append(op)
+                model.aic_total_time_us += dur_us
 
     # Compute model overlap ratio from interleaved ops
     model.overlap_ratio = _compute_model_overlap(aic_ops, aiv_ops, model)
