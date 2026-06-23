@@ -345,6 +345,32 @@ class MemHierarchy:
     # the log-log-interpolated η for the transfer's packet size.
     pkt_efficiency: dict[int, float] = field(default_factory=dict)
 
+    # True peak aggregate HBM bandwidth (R+W) in B/us, measured with an optimal
+    # contiguous copy saturating all AIV cores (M-1).  The per-core MTE rate is
+    # the *unsaturated* ceiling; once enough cores contend, the shared HBM
+    # controller caps the aggregate here.  See mte_effective_bw.  0 ⇒ disabled
+    # (falls back to the flat per-core rate, the pre-occupancy behaviour).
+    hbm_peak_aggregate_bw: float = 0.0
+
+    def mte_effective_bw(self, single_core_bw: float, active_cores: int) -> float:
+        """Occupancy-aware per-core MTE bandwidth for an HBM-touching path.
+
+        The per-core rate cannot exceed the unsaturated ``single_core_bw``, and
+        the *aggregate* across ``active_cores`` cannot exceed the measured HBM
+        peak.  So the achievable per-core rate is::
+
+            min(single_core_bw, hbm_peak_aggregate_bw / active_cores)
+
+        Both terms are peak-achievable ceilings, so the resulting floor stays a
+        sound lower bound.  M-2 confirmed this closed form: per-core BW is flat
+        until the controller saturates (~40 cores on 910B3), so no interpolated
+        contention table is needed.
+        """
+        if self.hbm_peak_aggregate_bw <= 0 or active_cores <= 0:
+            return single_core_bw
+        per_core_cap = self.hbm_peak_aggregate_bw / active_cores
+        return min(single_core_bw, per_core_cap)
+
     def _packet_efficiency(self, pkt_size: int) -> float:
         """Interpolate the measured packet-size efficiency curve (η ∈ (0, 1])."""
         tbl = sorted(self.pkt_efficiency.items())
@@ -542,6 +568,12 @@ class CalibrationDB:
         amort = mem_d.get("pkt_efficiency")
         if amort:
             memory.pkt_efficiency = {int(k): float(v) for k, v in amort.items()}
+
+        # True peak aggregate HBM bandwidth (M-1).  Stored as GB/s in the JSON;
+        # converted to B/us (×1000) for the occupancy-aware MTE floor.
+        hbm_peak_gbps = mem_d.get("hbm_peak_aggregate_bw_gbps")
+        if hbm_peak_gbps:
+            memory.hbm_peak_aggregate_bw = float(hbm_peak_gbps) * 1000.0
 
         # Load bandwidth entries if present
         bw_d = mem_d.get("bw", {})

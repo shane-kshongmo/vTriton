@@ -134,14 +134,35 @@ def _get_vector_throughput_ops_per_us(
     return tflops * 1e6  # FLOP/us
 
 
+def _maybe_throttle_hbm(
+    bw: float, path: tuple[str, str], memory: MemHierarchy, active_cores: int,
+) -> float:
+    """Apply the occupancy-aware HBM cap to a per-core rate on a gm path.
+
+    Paths that touch global memory share the HBM controller, so the per-core
+    rate is throttled to ``min(bw, hbm_peak_aggregate / active_cores)`` once
+    enough cores contend.  Intra-chip paths (e.g. l1→l0a) are not HBM-limited
+    and pass through unchanged.
+    """
+    if active_cores <= 0:
+        return bw
+    if "gm" not in path:
+        return bw
+    return memory.mte_effective_bw(bw, active_cores)
+
+
 def _get_mte_throughput_bytes_per_us(
     component: Component, memory: MemHierarchy, op: Optional[OpRecord] = None,
+    active_cores: int = 0,
 ) -> float:
     """Sustained MTE bandwidth in bytes per microsecond.
 
     Uses the operation's concrete transfer path when available.  FixPipe is
     identified by pipe/source because some DES emitters report its destination
     as UB even though the hardware drain being calibrated is L0C→GM.
+
+    When ``active_cores`` is given, HBM-touching paths are throttled by the
+    occupancy-aware aggregate cap (see MemHierarchy.mte_effective_bw).
     """
     path: tuple[str, str] | None = None
     if op is not None:
@@ -161,14 +182,14 @@ def _get_mte_throughput_bytes_per_us(
 
     try:
         bw, _ = memory.lookup_bw(src, dst, pkt_size=pkt_size)
-        return bw  # already in B/us
+        return _maybe_throttle_hbm(bw, (src, dst), memory, active_cores)  # B/us
     except KeyError:
         fallback = _COMPONENT_MTE_PATHS.get(component)
         if fallback is None or fallback == path:
             return 0.0
         try:
             bw, _ = memory.lookup_bw(*fallback, pkt_size=pkt_size)
-            return bw
+            return _maybe_throttle_hbm(bw, fallback, memory, active_cores)
         except KeyError:
             return 0.0
 
@@ -228,6 +249,7 @@ def compute_component_floor(
     vector: VectorConfig,
     memory: MemHierarchy,
     core: Optional[CoreConfig] = None,
+    active_cores: int = 0,
 ) -> ComponentBound:
     """Compute T_core_floor from Tier 2 HIVM extraction.
 
@@ -385,7 +407,7 @@ def compute_component_floor(
             t_c = 0.0
             path_work: dict[tuple[Optional[Precision], float], float] = {}
             for op, work in mte_operations.get(comp, []):
-                bw = _get_mte_throughput_bytes_per_us(comp, memory, op)
+                bw = _get_mte_throughput_bytes_per_us(comp, memory, op, active_cores)
                 if bw <= 0:
                     t_c = float("inf")
                     break

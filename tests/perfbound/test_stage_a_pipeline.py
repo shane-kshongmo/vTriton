@@ -59,13 +59,23 @@ def test_a1_calibration_changes_chunk_kda_bound():
     }
     slower = _report(slower_vector_db)
 
-    assert baseline.binding_component == "vector"
-    # A 2x vector-rate cut raises the bound ~1.79x (not 2x): mapped arithmetic
-    # ops bind on the achievable per-op peak (get_op_cycles default), so only
-    # the aggregate-rate fraction of the work scales with the perturbed knobs.
-    # The bound still moves strongly with calibration — that is the claim.
-    assert slower.t_core_floor_us > baseline.t_core_floor_us * 1.7
-    assert slower.t_bound_us > baseline.t_bound_us * 1.7
+    # Post-2026-06-23 occupancy-aware HBM throttle: at chunk_kda's 20-core
+    # occupancy the per-core gm↔ub rate is throttled (86.5→58 GB/s), so the
+    # mte_ub floor (26.7 us/prog) now binds over vector (20.6 us/prog).  The
+    # vector floor is still live and calibration-sensitive — halving the vector
+    # rate flips the binding back to vector and raises the bound.
+    assert baseline.binding_component == "mte_ub"
+    assert slower.binding_component == "vector"
+    assert slower.t_core_floor_us > baseline.t_core_floor_us
+    assert slower.t_bound_us > baseline.t_bound_us
+
+    # The binding component (HBM bandwidth) is itself calibration-sensitive:
+    # halving the measured HBM peak ~doubles the mte floor and the bound.
+    slower_hbm_db = copy.deepcopy(baseline_db)
+    slower_hbm_db.memory.hbm_peak_aggregate_bw *= 0.5
+    slower_hbm = _report(slower_hbm_db)
+    assert slower_hbm.t_core_floor_us > baseline.t_core_floor_us * 1.7
+    assert slower_hbm.t_bound_us > baseline.t_bound_us * 1.7
 
 
 @requires_chunk_kda_evidence
@@ -83,9 +93,14 @@ def test_one_a1_database_reaches_bound_gaps_two_limit_and_headroom():
     changed_db.startup_latency["vector"] = 3500.0
     changed = _report(changed_db, with_profile=True)
 
-    # ~1.79x, not 2x — see test_a1_calibration_changes_chunk_kda_bound.
-    assert changed.t_bound_us > baseline.t_bound_us * 1.7
-    assert changed.t_bound_hivm_us > baseline.t_bound_hivm_us * 1.7
+    # Baseline binds mte_ub (HBM occupancy throttle); halving the vector rate
+    # flips the binding to vector and raises the bound (the vector floor is live
+    # and calibration-sensitive, just no longer the baseline binder — see
+    # test_a1_calibration_changes_chunk_kda_bound).
+    assert baseline.binding_component == "mte_ub"
+    assert changed.binding_component == "vector"
+    assert changed.t_bound_us > baseline.t_bound_us
+    assert changed.t_bound_hivm_us > baseline.t_bound_hivm_us
     assert (
         changed.attribution_us["gap4_intra_unit_exec"]
         > baseline.attribution_us["gap4_intra_unit_exec"]

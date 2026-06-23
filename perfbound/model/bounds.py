@@ -79,8 +79,13 @@ def compute_bounds(
     _total_programs = total_programs if total_programs is not None else grid_info.total_programs
     waves = math.ceil(_total_programs / _n_cores) if _n_cores > 0 else 1
 
+    # Active cores contending for HBM = programs running concurrently, capped by
+    # the physical core count.  Drives the occupancy-aware MTE bandwidth cap so
+    # both tiers (component + grid) agree on the achievable aggregate.
+    active_cores = min(_total_programs, _n_cores) if _n_cores > 0 else _total_programs
+
     # Compute component floor first to discover which component binds
-    comp = compute_component_floor(extract, cube, vector, memory, core)
+    comp = compute_component_floor(extract, cube, vector, memory, core, active_cores)
 
     # Apply wave scaling to component floor:
     # busiest core runs `waves` programs, so per-core time is waves × single-program time.
@@ -101,26 +106,23 @@ def compute_bounds(
     from ..extract.op_classifier import Component
 
     if binding in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB):
-        # Memory-bound: i_binding = BW in B/us, total_work = bytes
-        # Prefer BW_hbm_allcore_sustained (per-core rate under full load)
-        # for HBM ingress only, since the grid floor assumes all cores active.
-        hbm_allcore_const = calib_db.constants.get("BW_hbm_allcore_sustained")
-        if (
-            binding == Component.MTE_GM
-            and hbm_allcore_const is not None
-            and hbm_allcore_const.value > 0
-        ):
-            i_binding = hbm_allcore_const.value * 1000.0  # GB/s → B/us
-        else:
-            binding_time = comp.per_component_us.get(binding.value, 0.0)
-            if waves > 1:
-                binding_time /= waves
-            binding_bytes = comp.total_bytes.get(binding.value, 0.0)
-            i_binding = (
-                binding_bytes / binding_time
-                if binding_bytes > 0 and binding_time > 0
-                else 1.0
-            )
+        # Memory-bound: i_binding = per-core BW in B/us, total_work = bytes.
+        # Derive the per-core rate from the component floor, which already
+        # applies the occupancy-aware HBM cap (min(single_core, hbm_peak/active)).
+        # The grid floor multiplies by n_cores·occupancy = active_cores, so the
+        # effective aggregate becomes the measured HBM peak at full occupancy —
+        # and both tiers use the SAME achievable rate (no desync, stays sound).
+        # (Supersedes the flat BW_hbm_allcore_sustained constant, which assumed a
+        # fixed all-core rate independent of how many programs actually run.)
+        binding_time = comp.per_component_us.get(binding.value, 0.0)
+        if waves > 1:
+            binding_time /= waves
+        binding_bytes = comp.total_bytes.get(binding.value, 0.0)
+        i_binding = (
+            binding_bytes / binding_time
+            if binding_bytes > 0 and binding_time > 0
+            else 1.0
+        )
         per_program_work = comp.total_bytes.get(binding.value, 0.0)
         # Scale by total_programs for chip-level grid floor
         total_work = per_program_work * _total_programs

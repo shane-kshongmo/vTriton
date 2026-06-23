@@ -1,5 +1,12 @@
 # Plan — Peak-HBM Bandwidth + Contention Calibration (pursue the absolute Gap-2 gate)
 
+> **STATUS: EXECUTED 2026-06-23.** M-1/M-2/M-3 measured on 910B3; occupancy-aware
+> MTE model landed; absolute Gap-2 gate met (held-out quantification_error 5.4%
+> < 0.20); US-SB-006 flipped passes:true. Results: `.omc/research/hw_runs/hbm_calib/RESULTS.md`.
+> Deviation from §3.1: M-2 showed a flat per-core curve, so the occupancy model is
+> the closed form `min(single_core, hbm_peak/active)` — no interpolated contention
+> table was needed. Full suite 421 passed.
+
 **Goal.** Make perfbound's *absolute* memory-time predictions correct so a Gap-2
 counterfactual passes the `quantification_error < 0.20` gate (US-SB-006) **without**
 mis-attributing compute kernels as memory-bound. The Gap-2 *mechanism* and the

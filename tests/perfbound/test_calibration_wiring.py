@@ -131,14 +131,16 @@ class TestComputeFromDB:
             f"T_core_floor should be > 0 with real calibration, got {result.t_core_floor_us}"
 
     def test_t_core_floor_mte_binds(self):
-        """MTE_GM binds at 86.488 GB/s (T=4.55 us) over Cube at 5.159 TFLOPS."""
+        """MTE_GM binds over Cube (5.159 TFLOPS); T=5.265 us post-recalibration."""
         from perfbound.calibration.calib_loader import load_default_calib_db
         db = load_default_calib_db()
         extract = _matmul_extract()
         result = compute_component_floor_from_db(extract, db)
-        # T_mte_gm = 393216 / 86487.9 = 4.546 us
-        assert abs(result.t_core_floor_us - 4.546) < 0.02, \
-            f"T_core_floor {result.t_core_floor_us:.3f} not ~4.546 us"
+        # Nominal T_mte_gm = 393216 / 86487.9 = 4.546 us; the 2026-06-23
+        # bandwidth-bound packet-efficiency recalibration (η normalised to the
+        # true HBM peak 1167 GB/s) penalises the 4–8 KB packets → 5.265 us.
+        assert abs(result.t_core_floor_us - 5.265) < 0.02, \
+            f"T_core_floor {result.t_core_floor_us:.3f} not ~5.265 us"
         assert result.binding_component == Component.MTE_GM
 
     def test_matches_explicit_call(self):
@@ -167,12 +169,16 @@ class TestBoundFromExtract:
             f"T_core_floor should be > 0 with auto-loaded calibration"
 
     def test_auto_load_golden_t_bound(self):
-        """T_bound with auto-load = T_mte_gm = 4.522 us (no serial, MTE binds)."""
+        """T_bound with auto-load = T_mte_gm = 5.265 us (no serial, MTE binds).
+
+        Was 4.522 us; the 2026-06-23 true-peak packet-efficiency recalibration
+        raises the mid-size-packet MTE floor (see test_t_core_floor_mte_binds).
+        """
         from perfbound.combine.bound_combiner import bound_from_extract
         extract = _matmul_extract()
         result = bound_from_extract(extract, kernel_name="matmul_autoload")
-        assert abs(result.t_bound_us - 4.522) < 0.05, \
-            f"T_bound {result.t_bound_us:.3f} not ~4.522 us"
+        assert abs(result.t_bound_us - 5.265) < 0.05, \
+            f"T_bound {result.t_bound_us:.3f} not ~5.265 us"
 
     def test_explicit_db_used_over_autoload(self):
         """Passing explicit calib_db overrides auto-load path."""
