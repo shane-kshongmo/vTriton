@@ -46,7 +46,22 @@
     "l0a_size_kb": 64.0,
     "l0b_size_kb": 64.0,
     "l0c_size_kb": 256.0,
-    "ub_size_kb": 256.0
+    "ub_size_kb": 256.0,
+    "pkt_efficiency": {
+      "128": 0.0389,
+      "256": 0.0742,
+      "512": 0.1376,
+      "1024": 0.2411,
+      "2048": 0.3895,
+      "4096": 0.5834,
+      "8192": 0.7610,
+      "16384": 0.9447,
+      "32768": 0.9894,
+      "65536": 1.0
+    },
+    "pkt_efficiency_provenance": "bandwidth-bound transfer-size sweep on 910B3 (test/stream_copy_bench.py, optimal contiguous copy grid=48 block=524288, tile sweep); packet_bytes->achieved_agg_bw/peak; peak=1167.25 GB/s; 2026-06-23. Supersedes the overhead-bound amort_sweep curve (peak 325 GB/s): the amort kernel (grid=2048, tiny per-program work) is launch/overhead-bound, conflating overhead with packet size; the stream copy is bandwidth-bound so eta isolates the small-packet penalty against the true HBM peak. packets <128B clamp to eta(128); the single-element strided-gather case is a separate DMA-descriptor mechanism, out of this curve's scope.",
+    "hbm_peak_aggregate_bw_gbps": 1167.25,
+    "hbm_peak_aggregate_provenance": "M-1 peak HBM aggregate bandwidth (R+W) on 910B3 (test/stream_copy_bench.py optimal contiguous copy, 40 AIV cores saturated); max over tile/block sweep; M-2 contention sweep confirms per-core BW is flat (~29 GB/s) and aggregate scales linearly to ~1148-1167 GB/s at 40 active cores then saturates, so the occupancy model is the closed form min(single_core_peak, hbm_peak/active_cores) -- no contention table needed. 2026-06-23"
   },
   "constants": {
     "P_cube_fp16_sustained": {
@@ -154,8 +169,7 @@
       "unit": "GB/s",
       "ci_95": 0.32012495777921557,
       "source": "cce_microbench",
-      "n_runs": 30,
-      "notes": "transfer=256.0KiB, N_iter=1280, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.010"
+      "n_runs": 30
     },
     "BW_ub_to_gm_sustained": {
       "name": "BW_ub_to_gm_sustained",
@@ -163,8 +177,7 @@
       "unit": "GB/s",
       "ci_95": 0.29616400764863415,
       "source": "cce_microbench",
-      "n_runs": 30,
-      "notes": "transfer=256.0KiB, N_iter=1280, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.010"
+      "n_runs": 30
     },
     "BW_gm_to_l1_sustained": {
       "name": "BW_gm_to_l1_sustained",
@@ -199,8 +212,7 @@
       "unit": "GB/s",
       "ci_95": 0.0270803872866082,
       "source": "cce_microbench",
-      "n_runs": 30,
-      "notes": "transfer=256.0KiB, N_iter=1280, n_active_cores=20, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.001, per_core_rate_under_contention"
+      "n_runs": 30
     },
     "mandatory_handoff_cost_l0c_to_gm_to_ub": {
       "name": "mandatory_handoff_cost_l0c_to_gm_to_ub",
@@ -224,5 +236,6 @@
   "startup_latency": {},
   "mandatory_handoff_cycles": 7620.865612052728,
   "pipe_barrier_cycles_per_iter": 0.0,
-  "scalar_overhead_factor": 1.0
+  "scalar_overhead_factor": 1.0,
+  "memory_spaces": {}
 }

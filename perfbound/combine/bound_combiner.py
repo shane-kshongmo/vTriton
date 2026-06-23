@@ -421,11 +421,18 @@ def _compute_gap2(
         else:
             continue
 
+        # The coalescing penalty is set by the contiguous PACKET size (the run
+        # the hardware moves per shot), not the total volume.  A strided/gather
+        # transfer moves the same total bytes in many tiny packets → low BW.
+        # packet_bytes carries that (emitter, stride-aware); fall back to the
+        # total when unknown (assume coalesced → no penalty invented).
+        packet = op.packet_bytes if op.packet_bytes > 0 else op.bytes_transferred
+
         try:
             # Ideal: large-packet BW (pkt_size=-1)
             bw_ideal, _ = memory.lookup_bw(src, dst, pkt_size=-1)
-            # Actual: with per-transfer size
-            bw_actual, _ = memory.lookup_bw(src, dst, pkt_size=op.bytes_transferred)
+            # Actual: BW at the realized packet size
+            bw_actual, _ = memory.lookup_bw(src, dst, pkt_size=packet)
         except KeyError:
             continue
 

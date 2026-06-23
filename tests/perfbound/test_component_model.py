@@ -405,9 +405,14 @@ class TestIntegration:
 
         result = combine(grid, comp, serial, kernel_name="test_matmul")
 
-        # Golden: T_bound = max(0.237, 4.546) + 0 = 4.546 us
-        assert abs(result.t_bound_us - 4.546) < 0.02, \
-            f"T_bound {result.t_bound_us:.3f} not ~4.546 us"
+        # Golden: MTE_GM binds.  T_mte_gm = 5.265 us after the 2026-06-23
+        # bandwidth-bound packet-efficiency recalibration: η is now normalised to
+        # the true HBM peak (1167 GB/s) instead of the overhead-bound amort
+        # kernel's 325 GB/s, so mid-size (4–8 KB) packets carry a real
+        # small-packet penalty (η(4096)=0.58, was ~1.0) → the floor rises from
+        # the nominal 393216/86487.9 = 4.546 us to 5.265 us.
+        assert abs(result.t_bound_us - 5.265) < 0.02, \
+            f"T_bound {result.t_bound_us:.3f} not ~5.265 us"
         assert result.binding_tier.value == "component"
         assert result.binding_component == Component.MTE_GM
 

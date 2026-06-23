@@ -56,6 +56,13 @@ struct HIVMOp {
   int64_t eventGeneration = 0;
   int64_t duration = 0;
   int64_t bytes = 0;
+  // Contiguous transfer packet size in bytes for MTE ops: the largest run the
+  // hardware moves in one shot.  Equals `bytes` for a contiguous transfer, but
+  // is small for a strided/gather transfer (e.g. one element).  Drives the
+  // coalescing (Gap-2) bandwidth lookup, separately from `bytes` (total volume,
+  // which drives transfer time).  0 = unknown/non-MTE (consumers fall back to
+  // `bytes`).
+  int64_t packetBytes = 0;
   int64_t elements = 0;
   int64_t flops = 0;
   int64_t multiBufferSlots = 1;

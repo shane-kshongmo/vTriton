@@ -48,12 +48,34 @@ def test_a1_calibration_changes_chunk_kda_bound():
     baseline = _report(baseline_db)
 
     slower_vector_db = copy.deepcopy(baseline_db)
+    # Halve the vector rate via BOTH levers: the aggregate fallback (used by
+    # ops without a per-op model) and the per-op cycle counts (used by mapped
+    # arithmetic ops like vmul/vadd — the dominant vector work).  Perturbing
+    # only the aggregate understates sensitivity now that arithmetic ops bind
+    # on the per-op cycle calibration.
     slower_vector_db.vector.throughput_fp16_tflops *= 0.5
+    slower_vector_db.vector.op_cycles = {
+        k: v * 2.0 for k, v in slower_vector_db.vector.op_cycles.items()
+    }
     slower = _report(slower_vector_db)
 
-    assert baseline.binding_component == "vector"
-    assert slower.t_core_floor_us > baseline.t_core_floor_us * 1.9
-    assert slower.t_bound_us > baseline.t_bound_us * 1.9
+    # Post-2026-06-23 occupancy-aware HBM throttle: at chunk_kda's 20-core
+    # occupancy the per-core gm↔ub rate is throttled (86.5→58 GB/s), so the
+    # mte_ub floor (26.7 us/prog) now binds over vector (20.6 us/prog).  The
+    # vector floor is still live and calibration-sensitive — halving the vector
+    # rate flips the binding back to vector and raises the bound.
+    assert baseline.binding_component == "mte_ub"
+    assert slower.binding_component == "vector"
+    assert slower.t_core_floor_us > baseline.t_core_floor_us
+    assert slower.t_bound_us > baseline.t_bound_us
+
+    # The binding component (HBM bandwidth) is itself calibration-sensitive:
+    # halving the measured HBM peak ~doubles the mte floor and the bound.
+    slower_hbm_db = copy.deepcopy(baseline_db)
+    slower_hbm_db.memory.hbm_peak_aggregate_bw *= 0.5
+    slower_hbm = _report(slower_hbm_db)
+    assert slower_hbm.t_core_floor_us > baseline.t_core_floor_us * 1.7
+    assert slower_hbm.t_bound_us > baseline.t_bound_us * 1.7
 
 
 @requires_chunk_kda_evidence
@@ -62,19 +84,35 @@ def test_one_a1_database_reaches_bound_gaps_two_limit_and_headroom():
     baseline = _report(baseline_db, with_profile=True)
 
     changed_db = copy.deepcopy(baseline_db)
+    # Halve the vector rate via both levers (aggregate + per-op cycles); see
+    # test_a1_calibration_changes_chunk_kda_bound.
     changed_db.vector.throughput_fp16_tflops *= 0.5
+    changed_db.vector.op_cycles = {
+        k: v * 2.0 for k, v in changed_db.vector.op_cycles.items()
+    }
     changed_db.startup_latency["vector"] = 3500.0
     changed = _report(changed_db, with_profile=True)
 
-    assert changed.t_bound_us > baseline.t_bound_us * 1.9
-    assert changed.t_bound_hivm_us > baseline.t_bound_hivm_us * 1.9
+    # Baseline binds mte_ub (HBM occupancy throttle); halving the vector rate
+    # flips the binding to vector and raises the bound (the vector floor is live
+    # and calibration-sensitive, just no longer the baseline binder — see
+    # test_a1_calibration_changes_chunk_kda_bound).
+    assert baseline.binding_component == "mte_ub"
+    assert changed.binding_component == "vector"
+    assert changed.t_bound_us > baseline.t_bound_us
+    assert changed.t_bound_hivm_us > baseline.t_bound_hivm_us
     assert (
         changed.attribution_us["gap4_intra_unit_exec"]
         > baseline.attribution_us["gap4_intra_unit_exec"]
     )
+    # A worse vector calibration must not INCREASE recoverable headroom.  The
+    # upper estimate is capped by the measured exposed-control deficit, which is
+    # independent of the compute-rate calibration, so the two can be equal when
+    # that cap binds (raising t_bound shrinks the author residual but not below
+    # the deficit cap).  The sound invariant is therefore non-strict.
     assert (
         changed.recoverable_headroom_upper_us
-        < baseline.recoverable_headroom_upper_us
+        <= baseline.recoverable_headroom_upper_us
     )
 
 

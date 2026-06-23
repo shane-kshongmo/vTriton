@@ -63,49 +63,106 @@ def _get_cube_throughput_ops_per_us(dtype: DType, cube: CubeConfig) -> float:
     return tflops * 1e6  # FLOP/us
 
 
+# HIVM vector op names → calibration VecOpType names.  Most HIVM ops are
+# "v" + VecOpType.value (vmul→mul); the irregular ones are mapped explicitly.
+# Ops with no analytical-rate equivalent (vcmp/vnot/vand/varange) are absent
+# and fall through to the aggregate rate.
+_HIVM_VEC_NAME_MAP: dict[str, str] = {
+    "vbrc": "broadcast",
+    "vsel": "select",
+    "vreduce": "reduce_sum",
+    "vexp": "exp",
+    "vcast": "cast",
+}
+
+
+def _hivm_to_vecop(op_name: str) -> "VecOpType | None":
+    """Resolve a HIVM vector op name to a calibration VecOpType, or None."""
+    if not op_name:
+        return None
+    name = op_name.lower()
+    candidate = _HIVM_VEC_NAME_MAP.get(name)
+    if candidate is None and name.startswith("v"):
+        candidate = name[1:]  # strip leading 'v' (vmul→mul, vadd→add, …)
+    for cand in (candidate, name):
+        if not cand:
+            continue
+        try:
+            return VecOpType.from_str(cand)
+        except (KeyError, ValueError):
+            continue
+    return None
+
+
 def _get_vector_throughput_ops_per_us(
     prec: Precision, vector: VectorConfig, op_name: str = "",
 ) -> float:
-    """Sustained Vector throughput in operations per microsecond.
+    """Achievable Vector throughput in operations per microsecond.
 
-    Uses per-op cycle count if available, falls back to aggregate throughput.
+    A conservative *lower bound on time* needs the fastest *achievable* rate
+    (so the bound never exceeds measured).  The per-op cycle calibration is
+    that achievable rate; the aggregate-TFLOPS path is only a fallback for ops
+    without a per-op model, and FP32 falls back to the FP16 aggregate when its
+    own rate is uncalibrated (rather than collapsing the floor to infinity).
+
     Vector width = 128 elements per instruction.
     """
-    # Try per-op cycle lookup first
-    if op_name:
-        try:
-            vt = VecOpType.from_str(op_name)
-            dtype = _prec_to_dtype(prec)
-            cycles_per_128 = vector.get_op_cycles(vt, dtype)
-            if cycles_per_128 > 0:
-                # 128 elements per instruction / cycles_per_128 cycles
-                # At 1.85 GHz: 1.85e9 cycles/s = 1850 cycles/us
-                # ops/us = (128 / cycles_per_128) * (1850 / 1) = 236800 / cycles_per_128
-                # But we need to return a rate usable in harmonic mean.
-                # For now, return elements/us: 128 * 1850 / cycles_per_128
-                return 128.0 * 1850.0 / cycles_per_128
-        except (KeyError, ValueError):
-            pass
+    # Try per-op cycle lookup first (the achievable per-instruction rate)
+    vt = _hivm_to_vecop(op_name)
+    if vt is not None and prec is not None:
+        dtype = _prec_to_dtype(prec)
+        cycles_per_128 = vector.get_op_cycles(vt, dtype)
+        if cycles_per_128 > 0:
+            # 128 elements/instruction at 1.85 GHz (1850 cycles/us):
+            # elements/us = 128 * 1850 / cycles_per_128
+            return 128.0 * 1850.0 / cycles_per_128
 
     # Fallback: aggregate TFLOPS
     if prec in (Precision.FP16, Precision.BF16):
         tflops = vector.throughput_fp16_tflops
     else:
         tflops = vector.throughput_fp32_tflops
+        # FP32 rate is often uncalibrated (0).  Fall back to the FP16 aggregate
+        # rather than returning 0 (which makes the component floor infinite and
+        # the bound unsound).  FP16 ≥ FP32 throughput, so this keeps the time
+        # floor a valid lower bound.
+        if tflops <= 0:
+            tflops = vector.throughput_fp16_tflops
 
     if tflops <= 0:
         return 0.0
     return tflops * 1e6  # FLOP/us
 
 
+def _maybe_throttle_hbm(
+    bw: float, path: tuple[str, str], memory: MemHierarchy, active_cores: int,
+) -> float:
+    """Apply the occupancy-aware HBM cap to a per-core rate on a gm path.
+
+    Paths that touch global memory share the HBM controller, so the per-core
+    rate is throttled to ``min(bw, hbm_peak_aggregate / active_cores)`` once
+    enough cores contend.  Intra-chip paths (e.g. l1→l0a) are not HBM-limited
+    and pass through unchanged.
+    """
+    if active_cores <= 0:
+        return bw
+    if "gm" not in path:
+        return bw
+    return memory.mte_effective_bw(bw, active_cores)
+
+
 def _get_mte_throughput_bytes_per_us(
     component: Component, memory: MemHierarchy, op: Optional[OpRecord] = None,
+    active_cores: int = 0,
 ) -> float:
     """Sustained MTE bandwidth in bytes per microsecond.
 
     Uses the operation's concrete transfer path when available.  FixPipe is
     identified by pipe/source because some DES emitters report its destination
     as UB even though the hardware drain being calibrated is L0C→GM.
+
+    When ``active_cores`` is given, HBM-touching paths are throttled by the
+    occupancy-aware aggregate cap (see MemHierarchy.mte_effective_bw).
     """
     path: tuple[str, str] | None = None
     if op is not None:
@@ -125,14 +182,14 @@ def _get_mte_throughput_bytes_per_us(
 
     try:
         bw, _ = memory.lookup_bw(src, dst, pkt_size=pkt_size)
-        return bw  # already in B/us
+        return _maybe_throttle_hbm(bw, (src, dst), memory, active_cores)  # B/us
     except KeyError:
         fallback = _COMPONENT_MTE_PATHS.get(component)
         if fallback is None or fallback == path:
             return 0.0
         try:
             bw, _ = memory.lookup_bw(*fallback, pkt_size=pkt_size)
-            return bw
+            return _maybe_throttle_hbm(bw, fallback, memory, active_cores)
         except KeyError:
             return 0.0
 
@@ -192,6 +249,7 @@ def compute_component_floor(
     vector: VectorConfig,
     memory: MemHierarchy,
     core: Optional[CoreConfig] = None,
+    active_cores: int = 0,
 ) -> ComponentBound:
     """Compute T_core_floor from Tier 2 HIVM extraction.
 
@@ -291,19 +349,31 @@ def compute_component_floor(
             total_ops[comp_str] = total_work
 
         elif comp == Component.VECTOR:
-            # Harmonic mean over Vector precisions and op types
+            # Harmonic mean over individual Vector ops, using each op's name so
+            # the achievable per-op cycle rate is used (the aggregate-only path
+            # both ignored op identity and collapsed to inf on uncalibrated
+            # FP32).  Aggregate per-(op,prec) work so identical ops share a rate.
+            op_work: dict[tuple[str, Optional[Precision]], float] = {}
+            for op in extract.operations:
+                if op.component != Component.VECTOR:
+                    continue
+                w = float(op.flops if op.flops > 0 else op.elements) * float(op.loop_multiplier)
+                if w <= 0:
+                    continue
+                op_work[(op.op_name, op.precision)] = (
+                    op_work.get((op.op_name, op.precision), 0.0) + w
+                )
+
             numerator = 0.0
             denominator = 0.0
-            for prec, w in precision_work:
-                if prec is None:
-                    continue
-                # Find the specific op for this precision (best-effort)
-                p_rate = _get_vector_throughput_ops_per_us(prec, vector)
+            for (op_name, prec), w in op_work.items():
+                p_rate = _get_vector_throughput_ops_per_us(prec, vector, op_name)
                 if p_rate <= 0:
                     continue
                 numerator += w
                 denominator += w / p_rate
-                key = f"{comp_str}/{prec.value}"
+                prec_str = prec.value if prec else "bytes"
+                key = f"{comp_str}/{op_name}/{prec_str}"
                 rates[key] = ComponentRate(
                     component=comp, precision=prec,
                     i_c=p_rate, o_c=w, t_c_us=w / p_rate,
@@ -337,7 +407,7 @@ def compute_component_floor(
             t_c = 0.0
             path_work: dict[tuple[Optional[Precision], float], float] = {}
             for op, work in mte_operations.get(comp, []):
-                bw = _get_mte_throughput_bytes_per_us(comp, memory, op)
+                bw = _get_mte_throughput_bytes_per_us(comp, memory, op, active_cores)
                 if bw <= 0:
                     t_c = float("inf")
                     break

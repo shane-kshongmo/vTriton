@@ -107,6 +107,16 @@ _OP_PATTERNS = {
     "dma": Component.MTE_GM,
 }
 
+# Address-generation / pointer ops carry a buffer-size `elements`/`bytes` count
+# but perform no element-wise compute.  The extractor uses this to zero their
+# compute work (so the generic "cast" substring does not charge a 2048-element
+# buffer as Vector arithmetic), while leaving their component/handoff structure
+# intact for the serialization model.
+_ADDRESS_OP_PATTERNS = (
+    "pointer_cast",
+    "reinterpret_cast",
+)
+
 
 def classify_op(
     op_name: str,

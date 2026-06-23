@@ -79,8 +79,13 @@ def compute_bounds(
     _total_programs = total_programs if total_programs is not None else grid_info.total_programs
     waves = math.ceil(_total_programs / _n_cores) if _n_cores > 0 else 1
 
+    # Active cores contending for HBM = programs running concurrently, capped by
+    # the physical core count.  Drives the occupancy-aware MTE bandwidth cap so
+    # both tiers (component + grid) agree on the achievable aggregate.
+    active_cores = min(_total_programs, _n_cores) if _n_cores > 0 else _total_programs
+
     # Compute component floor first to discover which component binds
-    comp = compute_component_floor(extract, cube, vector, memory, core)
+    comp = compute_component_floor(extract, cube, vector, memory, core, active_cores)
 
     # Apply wave scaling to component floor:
     # busiest core runs `waves` programs, so per-core time is waves × single-program time.
@@ -101,49 +106,49 @@ def compute_bounds(
     from ..extract.op_classifier import Component
 
     if binding in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB):
-        # Memory-bound: i_binding = BW in B/us, total_work = bytes
-        # Prefer BW_hbm_allcore_sustained (per-core rate under full load)
-        # for HBM ingress only, since the grid floor assumes all cores active.
-        hbm_allcore_const = calib_db.constants.get("BW_hbm_allcore_sustained")
-        if (
-            binding == Component.MTE_GM
-            and hbm_allcore_const is not None
-            and hbm_allcore_const.value > 0
-        ):
-            i_binding = hbm_allcore_const.value * 1000.0  # GB/s → B/us
-        else:
-            binding_time = comp.per_component_us.get(binding.value, 0.0)
-            if waves > 1:
-                binding_time /= waves
-            binding_bytes = comp.total_bytes.get(binding.value, 0.0)
-            i_binding = (
-                binding_bytes / binding_time
-                if binding_bytes > 0 and binding_time > 0
-                else 1.0
-            )
+        # Memory-bound: i_binding = per-core BW in B/us, total_work = bytes.
+        # Derive the per-core rate from the component floor, which already
+        # applies the occupancy-aware HBM cap (min(single_core, hbm_peak/active)).
+        # The grid floor multiplies by n_cores·occupancy = active_cores, so the
+        # effective aggregate becomes the measured HBM peak at full occupancy —
+        # and both tiers use the SAME achievable rate (no desync, stays sound).
+        # (Supersedes the flat BW_hbm_allcore_sustained constant, which assumed a
+        # fixed all-core rate independent of how many programs actually run.)
+        binding_time = comp.per_component_us.get(binding.value, 0.0)
+        if waves > 1:
+            binding_time /= waves
+        binding_bytes = comp.total_bytes.get(binding.value, 0.0)
+        i_binding = (
+            binding_bytes / binding_time
+            if binding_bytes > 0 and binding_time > 0
+            else 1.0
+        )
         per_program_work = comp.total_bytes.get(binding.value, 0.0)
         # Scale by total_programs for chip-level grid floor
         total_work = per_program_work * _total_programs
     else:
-        # Compute-bound (Cube, Vector): i_binding = throughput in FLOP/us
-        if binding == Component.CUBE:
+        # Compute-bound (Cube, Vector): derive i_binding from the component
+        # floor's binding rate so the grid tier and component tier use the SAME
+        # achievable rate.  Recomputing it from an aggregate (peak) constant
+        # here desynchronised the two tiers and made the grid floor unsound
+        # (it could exceed measured time) for near-peak compute kernels.
+        binding_work_1prog = comp.total_ops.get(binding.value, 0.0)
+        binding_time_1prog = comp.per_component_us.get(binding.value, 0.0)
+        if waves > 1:
+            binding_time_1prog /= waves
+        if binding_work_1prog > 0 and binding_time_1prog > 0:
+            i_binding = binding_work_1prog / binding_time_1prog  # work/us
+        elif binding == Component.CUBE:
             from .component_model import _get_cube_throughput_ops_per_us, _prec_to_dtype
             from ..extract.op_classifier import Precision
             i_binding = _get_cube_throughput_ops_per_us(
                 _prec_to_dtype(Precision.FP16), cube
-            )
+            ) or 1.0
         else:
-            # Vector: use aggregate TFLOPS
-            i_binding = vector.throughput_fp16_tflops * 1e6  # FLOP/us
-        per_program_work = sum(
-            float(op.flops if op.flops > 0 else op.elements)
-            * float(op.loop_multiplier)
-                for op in extract.operations
-                if op.component not in (
-                    Component.MTE_GM, Component.MTE_L1, Component.MTE_UB,
-                )
-            )
-        # Scale by total_programs for chip-level grid floor
+            i_binding = (vector.throughput_fp16_tflops * 1e6) or 1.0  # FLOP/us
+        # Grid floor work is the binding component's work (matches i_binding's
+        # unit), scaled across all programs.
+        per_program_work = binding_work_1prog
         total_work = per_program_work * _total_programs
 
     total_work = max(total_work, 1.0)  # avoid division by zero
