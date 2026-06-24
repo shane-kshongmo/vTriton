@@ -127,6 +127,35 @@ if(TRITONSIM_HAS_BISHENGIR_HIVM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/hivm-cru
 endif()
 
 #===----------------------------------------------------------------------===//
+# hivm-optimize - Apply bottleneck-driven optimisations to HIVM MLIR
+#===----------------------------------------------------------------------===//
+
+if(TRITONSIM_HAS_BISHENGIR_HIVM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/hivm-optimize/hivm-optimize.cpp")
+  add_llvm_executable(hivm-optimize
+    hivm-optimize/hivm-optimize.cpp
+  )
+
+  target_link_libraries(hivm-optimize
+    PRIVATE
+    AscendModelTransforms
+    ${TRITONSIM_BISHENGIR_HIVM_LIBS}
+    MLIRIR
+    MLIRParser
+    MLIRSupport
+    MLIRSCFDialect
+    LLVMSupport
+  )
+
+  target_include_directories(hivm-optimize
+    PRIVATE
+    ${TRITONSIM_BISHENGIR_INCLUDE_DIRS}
+  )
+
+  mlir_check_all_link_libraries(hivm-optimize)
+  list(APPEND _installed_tools hivm-optimize)
+endif()
+
+#===----------------------------------------------------------------------===//
 # ascend-tiling-opt - Tiling Optimization Tool
 #===----------------------------------------------------------------------===//
 
