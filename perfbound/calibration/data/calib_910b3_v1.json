@@ -235,7 +235,8 @@
   },
   "startup_latency": {},
   "mandatory_handoff_cycles": 7620.865612052728,
-  "pipe_barrier_cycles_per_iter": 0.0,
+  "pipe_barrier_cycles_per_iter": 0.18451333295482839,
+  "pipe_barrier_cycles_per_iter_note": "Seeded-serial 910B3 held-out calibration, 2026-06-24: SEED_N_A=4194304, SEED_BARRIER=1 vs SEED_BARRIER=0, warmup=8, iters=40, median delta=10.54us. Derived as delta*1850/(ceil(2048/20)*1026 barrier loop-units). Evidence: .omc/research/hw_runs/seeded_serial/seeded_calib_a4m_{on,off_src}_op_summary.csv. Validation remains held out on SEED_N_A=8388608.",
   "scalar_overhead_factor": 1.0,
   "memory_spaces": {}
 }

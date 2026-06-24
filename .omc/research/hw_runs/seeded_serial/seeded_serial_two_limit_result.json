@@ -1,0 +1,129 @@
+{
+  "kernel_name": "seeded_serial",
+  "date_utc": "2026-06-24",
+  "vehicle": "purpose-built seeded serial MTE/HBM plus Vector FMA kernel",
+  "grid_dims": [4096],
+  "n_cores": 20,
+  "warmup": 8,
+  "iters": 40,
+  "barrier_on": {
+    "des_json": ".omc/research/hw_runs/seeded_serial/seeded_on_des.json",
+    "npuir": ".omc/research/hw_runs/seeded_serial/seeded_on_clean.npuir.mlir",
+    "ttadapter": ".omc/research/hw_runs/seeded_serial/seeded_on_ttadapter.mlir",
+    "op_summary_csv": ".omc/research/hw_runs/seeded_serial/seeded_on_op_summary.csv",
+    "median_us": 3289.604,
+    "mean_us": 3289.908,
+    "min_us": 3285.504,
+    "max_us": 3296.808,
+    "stdev_us": 2.0957314370907136,
+    "cv": 0.0006370182500819822,
+    "kernel_rows": 48,
+    "measured_rows": 40
+  },
+  "barrier_off_source": {
+    "op_summary_csv": ".omc/research/hw_runs/seeded_serial/seeded_off_src_op_summary.csv",
+    "median_us": 3268.054,
+    "mean_us": 3268.3898,
+    "min_us": 3265.804,
+    "max_us": 3273.828,
+    "stdev_us": 1.7016401017540332,
+    "cv": 0.0005206356052616592,
+    "kernel_rows": 48,
+    "measured_rows": 40
+  },
+  "barrier_off_ttadapter": {
+    "ttadapter": ".omc/research/hw_runs/seeded_serial/seeded_off_ttadapter.mlir",
+    "op_summary_csv": ".omc/research/hw_runs/seeded_serial/seeded_off_ttadapter_op_summary.csv",
+    "outa": ".omc/research/hw_runs/seeded_serial/seeded_off_ttadapter_outa.npy",
+    "outb": ".omc/research/hw_runs/seeded_serial/seeded_off_ttadapter_outb.npy",
+    "median_us": 3268.744,
+    "mean_us": 3269.2841,
+    "min_us": 3266.528,
+    "max_us": 3274.988,
+    "stdev_us": 1.8949932386050823,
+    "cv": 0.0005796355350717555,
+    "kernel_rows": 48,
+    "measured_rows": 40,
+    "hand_edit": "Removed exactly one gpu.barrier from the barrier-ON TTAdapter IR, then launched source SEED_BARRIER=1 with TRITON_KERNEL_OVERRIDE pointing at the edited TTAdapter. The normal Triton-Ascend TTAdapter-to-npubin pipeline compiled the overridden IR."
+  },
+  "barrier_off_hivm": {
+    "des_json": ".omc/research/hw_runs/seeded_serial/seeded_off_des.json",
+    "npuir": ".omc/research/hw_runs/seeded_serial/seeded_off_clean.npuir.mlir",
+    "barriers_removed": 4,
+    "remote_bishengir_compile_accepted": true,
+    "remote_runnable_host_binary": false,
+    "cache_replacement_launch_tested": true,
+    "cache_replacement_launch_ok": false,
+    "notes": "bishengir-compile accepted the edited NPUIR on 910B3 and produced an ELF device object, but standalone --enable-hivm-compile objects are not launch-compatible with the current Triton cache/launcher path. A manually recompiled barrier-ON NPUIR object fails the same launch test, so this is a toolchain path gap rather than evidence about the barrier removal itself."
+  },
+  "heldout_barrier_calibration": {
+    "seed_n_a": 4194304,
+    "grid_dims": [2048],
+    "n_cores": 20,
+    "warmup": 8,
+    "iters": 40,
+    "barrier_on": {
+      "op_summary_csv": ".omc/research/hw_runs/seeded_serial/seeded_calib_a4m_on_op_summary.csv",
+      "median_us": 1660.372,
+      "mean_us": 1660.6037,
+      "min_us": 1657.872,
+      "max_us": 1668.716,
+      "stdev_us": 1.941135250707279,
+      "cv": 0.0011689334732346308,
+      "kernel_rows": 48,
+      "measured_rows": 40
+    },
+    "barrier_off_source": {
+      "op_summary_csv": ".omc/research/hw_runs/seeded_serial/seeded_calib_a4m_off_src_op_summary.csv",
+      "median_us": 1649.8319999999999,
+      "mean_us": 1649.9399,
+      "min_us": 1648.152,
+      "max_us": 1656.812,
+      "stdev_us": 1.4350203036176254,
+      "cv": 0.0008697409545751487,
+      "kernel_rows": 48,
+      "measured_rows": 40
+    },
+    "measured_delta_us": 10.540000000000191,
+    "barrier_loop_units_per_program": 1026,
+    "waves": 103,
+    "pipe_barrier_cycles_per_iter": 0.18451333295482839,
+    "output_verified": true,
+    "notes": "This smaller SEED_N_A=4M run is used only to fit the barrier-cycle constant. The reported 8M validation below is held out from calibration."
+  },
+  "bounds": {
+    "t_bound_hivm_us": 1819.0702702702702,
+    "t_bound_dsl_us": 1840.0070480291229,
+    "predicted_headroom_us": 20.936777758852713,
+    "binding_component": "vector",
+    "calibration": "perfbound/calibration/data/calib_910b3_v1.json",
+    "pipe_barrier_cycles_per_iter": 0.18451333295482839
+  },
+  "hardware": {
+    "t_measured_us": 3289.604,
+    "t_off_ttadapter_us": 3268.744,
+    "t_off_src_us": 3268.054,
+    "measured_delta_us": 20.859999999999673,
+    "source_crosscheck_delta_us": 21.549999999999727,
+    "quantification_error": 0.0036806212297719044
+  },
+  "correctness": {
+    "output_verified": true,
+    "outa_equal": true,
+    "outb_equal": true,
+    "max_abs_outa": 0.0,
+    "max_abs_outb": 0.0
+  },
+  "ordering": {
+    "t_bound_hivm_le_t_bound_dsl": true,
+    "t_bound_dsl_le_t_measured": true
+  },
+  "acceptance": {
+    "compiler_ir_ttadapter_profiled": true,
+    "source_level_quantitative_validation": true,
+    "edited_npuir_hardware_profiled": false,
+    "satisfies_us_sb_008": true,
+    "notes": "The hardware-realized intervention is a hand-edited TTAdapter compiler IR artifact, not the standalone edited NPUIR object. Standalone NPUIR compile still emits a device ELF that is not launch-compatible with the current Triton path, but the TTAdapter edit goes through Triton's supported compiler and launcher pipeline."
+  },
+  "interpretation": "Gap-1/3-only two-limit. The DSL bound includes a held-out calibrated pipe_barrier component-floor cost; the idealized HIVM bound is the barrier-free DES. The hardware realization removes the corresponding compiler-IR barrier at TTAdapter (`gpu.barrier`) and compiles it through Triton's normal backend path."
+}

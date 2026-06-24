@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
 import time
 from pathlib import Path
@@ -64,7 +65,39 @@ def load_kernel_module(kernel_path: str):
     return module
 
 
-def run_kernel(module, iters: int = 10) -> list:
+def enable_ttadapter_override_patch() -> None:
+    """Allow Triton-Ascend TTAdapter IR overrides in validation runs.
+
+    Some Triton-Ascend builds find `TRITON_KERNEL_OVERRIDE` files for the
+    `ttadapter` stage but their generic compiler parser only handles module
+    objects and final binaries. The Ascend backend expects TTAdapter input as a
+    string, so an opt-in parser patch is enough to let the normal
+    TTAdapter-to-npubin pipeline compile and launch an overridden compiler IR.
+    """
+    if os.environ.get("TRITON_ACCEPT_TTADAPTER_OVERRIDE") not in {"1", "true", "TRUE"}:
+        return
+
+    try:
+        import triton.compiler.compiler as triton_compiler
+    except Exception as exc:
+        raise RuntimeError(
+            "TRITON_ACCEPT_TTADAPTER_OVERRIDE=1 requires triton.compiler.compiler"
+        ) from exc
+
+    current_parse = triton_compiler.parse
+    if getattr(current_parse, "_accepts_ttadapter_override", False):
+        return
+
+    def parse_with_ttadapter(full_name, ext, context):
+        if ext == "ttadapter":
+            return Path(full_name).read_text()
+        return current_parse(full_name, ext, context)
+
+    parse_with_ttadapter._accepts_ttadapter_override = True
+    triton_compiler.parse = parse_with_ttadapter
+
+
+def run_kernel(module, iters: int = 10, warmup: int = 1) -> list:
     """Run the kernel from a loaded module and return output tensors.
 
     Probes the module for standard entry points in preference order:
@@ -75,7 +108,8 @@ def run_kernel(module, iters: int = 10) -> list:
 
     Args:
         module: The imported kernel module.
-        iters: Number of iterations to run (for warmup + measurement).
+        iters: Number of measured iterations to run.
+        warmup: Number of warmup iterations to run before measured iterations.
 
     Returns:
         List of output tensors (torch.Tensor on CPU).
@@ -97,9 +131,10 @@ def run_kernel(module, iters: int = 10) -> list:
 
     if hasattr(module, "Model"):
         model = module.Model()
-        # Warmup: 1 iteration (also catches compile errors early)
-        _ = model.forward({k: v.clone() if hasattr(v, 'clone') else v
-                           for k, v in data.items()})
+        # Warmup also catches compile errors early.
+        for _ in range(warmup):
+            _ = model.forward({k: v.clone() if hasattr(v, 'clone') else v
+                               for k, v in data.items()})
 
         # Timed iterations
         outputs = None
@@ -174,14 +209,23 @@ def main():
         "--iters", type=int, default=10,
         help="Number of kernel iterations to run (default: 10)",
     )
+    parser.add_argument(
+        "--warmup", type=int, default=1,
+        help="Number of warmup iterations before measured iterations (default: 1)",
+    )
     args = parser.parse_args()
 
     print(f"[kernel_launcher] Loading kernel from {args.kernel}", file=sys.stderr)
+    enable_ttadapter_override_patch()
     module = load_kernel_module(args.kernel)
 
-    print(f"[kernel_launcher] Running {args.iters} iterations...", file=sys.stderr)
+    print(
+        f"[kernel_launcher] Running {args.warmup} warmup + "
+        f"{args.iters} measured iterations...",
+        file=sys.stderr,
+    )
     t0 = time.time()
-    outputs = run_kernel(module, iters=args.iters)
+    outputs = run_kernel(module, iters=args.iters, warmup=args.warmup)
     elapsed = time.time() - t0
     print(f"[kernel_launcher] Done in {elapsed:.2f}s, "
           f"{len(outputs)} output(s)", file=sys.stderr)

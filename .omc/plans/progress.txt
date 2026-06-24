@@ -179,6 +179,40 @@ PRD to reality (Item 1) and then genuinely closes the open items.
 - Validation set now 6 entries / 5 distinct families (chunk_kda[tier2_des],
   vector_add, softmax, layernorm, rmsnorm); soundness_rate=1.0. vector_add
   double-count is no longer the sole distinctness source.
+
+## Ralph completion pass (2026-06-24) — US-SB-008 CLOSED via TTAdapter compiler-IR edit
+
+- Vehicle: `test/seeded_serial_bench.py`, a purpose-built kernel with independent
+  MTE/HBM and Vector streams separated by a redundant `tl.debug_barrier`.
+- Local HIVM edit: generated `seeded_off_clean.npuir.mlir` and `seeded_off_des.json`
+  by removing all four `hivm.hir.pipe_barrier` ops from `seeded_on_clean.npuir.mlir`.
+- Hardware timing on 910B3 used `warmup=8`, `iters=40`:
+  - Barrier ON median: 3289.604 us, CV=0.064%
+  - Barrier OFF hand-edited TTAdapter median: 3268.744 us, CV=0.058%
+  - Barrier OFF source median: 3268.054 us, CV=0.052%
+  - Measured TTAdapter delta: 20.860 us
+  - Source cross-check delta: 21.550 us
+- Held-out calibrated two-limit:
+  - `T_bound_HIVM=1819.070 us`
+  - `T_bound_DSL=1840.007 us`
+  - `T_bound_HIVM <= T_bound_DSL <= T_measured`
+  - Predicted headroom: 20.937 us
+  - Quantification error: 0.368% (<20%)
+- Calibration is non-circular: `pipe_barrier_cycles_per_iter=0.18451333295482839`
+  is fitted from a held-out `SEED_N_A=4M` source-level ON/OFF run, then
+  validated on the `SEED_N_A=8M` run above.
+- Output verification: `outa` and `outb` are bitwise equal between ON and OFF.
+- Hardware realization: source stays `SEED_BARRIER=1`; `TRITON_KERNEL_OVERRIDE=1`
+  points Triton at a hand-edited TTAdapter IR with exactly one `gpu.barrier`
+  removed, and the normal Triton-Ascend backend compiles and launches it.
+- Evidence:
+  `.omc/research/hw_runs/seeded_serial/RESULTS.md`,
+  `seeded_serial_two_limit_result.json`, ON/OFF DES, timing CSVs, and outputs.
+- CI: `tests/perfbound/test_seeded_serial_two_limit_hardware.py`.
+- Caveat: remote `bishengir-compile` accepted the edited NPUIR and emitted a
+  device ELF, but standalone NPUIR objects are not launch-compatible with the
+  current Triton cache/launcher path. TTAdapter is the accepted compiled-IR
+  hardware realization.
 - Fetched test/rmsnorm_bench.py + rmsnorm_op_summary_910b3.csv into the tree;
   added test_at_least_five_distinct_kernels + TestRmsnormKernelSoundness.
 - KEY FINDING: the triton/msprof path WORKS on the box (unlike the AscendC

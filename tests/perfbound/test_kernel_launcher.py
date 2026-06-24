@@ -18,7 +18,12 @@ import pytest
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
-from kernel_launcher import load_kernel_module, run_kernel, save_outputs
+from kernel_launcher import (
+    enable_ttadapter_override_patch,
+    load_kernel_module,
+    run_kernel,
+    save_outputs,
+)
 
 torch = pytest.importorskip("torch")
 
@@ -37,6 +42,40 @@ class TestLoadKernelModule:
     def test_missing_file_raises(self):
         with pytest.raises(FileNotFoundError, match="not found"):
             load_kernel_module("/nonexistent/kernel.py")
+
+
+class TestTTAdapterOverridePatch:
+    def test_patch_is_opt_in(self, monkeypatch):
+        monkeypatch.delenv("TRITON_ACCEPT_TTADAPTER_OVERRIDE", raising=False)
+        enable_ttadapter_override_patch()
+
+    def test_patch_reads_ttadapter_as_text(self, monkeypatch, tmp_path):
+        compiler = types.ModuleType("compiler")
+
+        def parse(full_name, ext, context):
+            return ("orig", full_name, ext, context)
+
+        compiler.parse = parse
+        triton_compiler_pkg = types.ModuleType("triton.compiler")
+        triton_compiler_pkg.compiler = compiler
+        triton_pkg = types.ModuleType("triton")
+        triton_pkg.compiler = triton_compiler_pkg
+
+        monkeypatch.setitem(sys.modules, "triton", triton_pkg)
+        monkeypatch.setitem(sys.modules, "triton.compiler", triton_compiler_pkg)
+        monkeypatch.setitem(sys.modules, "triton.compiler.compiler", compiler)
+        monkeypatch.setenv("TRITON_ACCEPT_TTADAPTER_OVERRIDE", "1")
+
+        enable_ttadapter_override_patch()
+
+        override = tmp_path / "seeded_serial_kernel.ttadapter"
+        override.write_text("module { test.ttadapter }")
+        assert compiler.parse(str(override), "ttadapter", object()) == (
+            "module { test.ttadapter }"
+        )
+        assert compiler.parse("x.ttir", "ttir", "ctx") == (
+            "orig", "x.ttir", "ttir", "ctx"
+        )
 
 
 # ── run_kernel: entry-point probing ────────────────────────────────────
@@ -101,6 +140,22 @@ class TestRunKernelEntryPoints:
         m.Model = Model
         with pytest.raises(RuntimeError, match="returned None"):
             run_kernel(m, iters=1)
+
+    def test_warmup_count_is_explicit(self):
+        m = _module("k_warmup")
+        calls = []
+        m.build_inputs = lambda: {"x": torch.tensor([float(len(calls))])}
+
+        class Model:
+            def forward(self, data):
+                calls.append(float(data["x"][0]))
+                return data["x"]
+
+        m.Model = Model
+        out = run_kernel(m, iters=2, warmup=3)
+
+        assert len(calls) == 5
+        assert torch.allclose(out[0], torch.tensor([4.0]))
 
 
 # ── save_outputs ───────────────────────────────────────────────────────

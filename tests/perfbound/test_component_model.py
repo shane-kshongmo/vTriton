@@ -214,6 +214,42 @@ class TestHarmonicMean:
         assert result.per_component_us["mte_ub"] == pytest.approx(1.5)
         assert result.total_bytes["mte_ub"] == 200_000
 
+    def test_pipe_barrier_cycles_contribute_to_realized_component_floor(
+            self, calibration):
+        """DES pipe_barrier ops are scheduled stalls even when they carry no work."""
+        compute_op = OpRecord(
+            op_id=1, op_name="vadd", component=Component.VECTOR,
+            precision=Precision.FP16, pipe="PIPE_V",
+            elements=18_000_000, loop_multiplier=1,
+        )
+        base = compute_component_floor(
+            HIVMExtract(operations=[compute_op], handoffs=[]),
+            calibration["cube"],
+            calibration["vector"],
+            calibration["memory"],
+            calibration["core"],
+        )
+        extract = HIVMExtract(operations=[
+            compute_op,
+            OpRecord(
+                op_id=2, op_name="pipe_barrier", component=Component.VECTOR,
+                precision=None, pipe="PIPE_V",
+                duration_cycles=1850, loop_multiplier=2,
+            ),
+        ], handoffs=[])
+
+        result = compute_component_floor(
+            extract,
+            calibration["cube"],
+            calibration["vector"],
+            calibration["memory"],
+            calibration["core"],
+        )
+
+        delta = result.per_component_us["vector"] - base.per_component_us["vector"]
+        assert delta == pytest.approx(2.0)
+        assert result.binding_component == Component.VECTOR
+
 
 # ── Serialization Tests ────────────────────────────────────────────────────
 

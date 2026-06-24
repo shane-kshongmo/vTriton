@@ -250,6 +250,7 @@ def compute_component_floor(
     memory: MemHierarchy,
     core: Optional[CoreConfig] = None,
     active_cores: int = 0,
+    pipe_barrier_cycles_per_iter: Optional[float] = None,
 ) -> ComponentBound:
     """Compute T_core_floor from Tier 2 HIVM extraction.
 
@@ -281,12 +282,26 @@ def compute_component_floor(
     # Aggregate work per (component, precision)
     # compute_work[(comp, prec)] = total ops (or bytes for MTE)
     compute_work: dict[tuple[Component, Optional[Precision]], float] = {}
+    component_extra_us: dict[Component, float] = {}
     mte_bytes: dict[Component, float] = {}
     mte_operations: dict[Component, list[tuple[OpRecord, float]]] = {}
+    cycles_per_us = core.clock_freq_ghz * 1000.0
 
     for op in extract.operations:
         comp = op.component
         prec = op.precision
+
+        if op.op_name == "pipe_barrier":
+            barrier_cycles = (
+                pipe_barrier_cycles_per_iter
+                if pipe_barrier_cycles_per_iter is not None
+                else float(op.duration_cycles)
+            )
+            if barrier_cycles <= 0:
+                continue
+            component_extra_us[comp] = component_extra_us.get(comp, 0.0) + (
+                float(barrier_cycles) * float(op.loop_multiplier) / cycles_per_us
+            )
 
         if comp in (Component.CUBE, Component.VECTOR, Component.SCALAR):
             # Work in FLOPs (preferred) or elements (fallback) scaled by loop_multiplier.
@@ -321,7 +336,9 @@ def compute_component_floor(
             if c == comp and w > 0:
                 precision_work.append((p, w))
 
-        if not precision_work and comp not in mte_bytes:
+        extra_us = component_extra_us.get(comp, 0.0)
+
+        if not precision_work and comp not in mte_bytes and extra_us <= 0.0:
             continue
 
         total_work = sum(w for _, w in precision_work)
@@ -346,6 +363,7 @@ def compute_component_floor(
                 )
             i_c = numerator / denominator if denominator > 0 else 0.0
             t_c = total_work / i_c if i_c > 0 else float("inf")
+            t_c += extra_us
             total_ops[comp_str] = total_work
 
         elif comp == Component.VECTOR:
@@ -380,6 +398,7 @@ def compute_component_floor(
                 )
             i_c = numerator / denominator if denominator > 0 else 0.0
             t_c = total_work / i_c if i_c > 0 else float("inf")
+            t_c += extra_us
             total_ops[comp_str] = total_work
 
         elif comp == Component.SCALAR:
@@ -401,6 +420,7 @@ def compute_component_floor(
             else:
                 i_c = 0.0
                 t_c = 0.0
+            t_c += extra_us
 
         elif comp in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB):
             total_bytes[comp_str] = mte_bytes.get(comp, 0.0)
@@ -420,6 +440,7 @@ def compute_component_floor(
                 if t_c > 0 and t_c != float("inf")
                 else 0.0
             )
+            t_c += extra_us
             for (prec, bw), work in path_work.items():
                 prec_str = prec.value if prec else "bytes"
                 key = f"{comp_str}/{prec_str}/{bw:g}"

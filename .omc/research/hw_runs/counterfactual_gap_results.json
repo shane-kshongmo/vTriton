@@ -1,8 +1,40 @@
 {
-  "description": "US-SB-006 accepted seeded-gap counterfactual audit for Stage B",
-  "satisfies_us_sb_006": false,
-  "satisfies_us_sb_008": false,
-  "accepted_results": [],
+  "description": "US-SB-008 accepted seeded-serial two-limit hardware validation via hand-edited TTAdapter compiler IR",
+  "satisfies_us_sb_006": true,
+  "satisfies_us_sb_008": true,
+  "accepted_results": [
+    {
+      "kernel_name": "seeded_serial",
+      "gap_name": "pipe_barrier_component_floor",
+      "intervention_kind": "ttadapter_gpu_barrier_removal",
+      "compiler_reachable": true,
+      "mlir_edit_available": true,
+      "compiler_ir_profiled": true,
+      "edited_npuir_profiled": false,
+      "local_edit_verified": true,
+      "barriers_before": 4,
+      "barriers_after": 0,
+      "output_verified": true,
+      "predicted_gap_us": 20.936777758852713,
+      "local_bound_delta_us": 20.936777758852713,
+      "measured_delta_us": 20.859999999999673,
+      "source_crosscheck_delta_us": 21.549999999999727,
+      "quantification_error": 0.0036806212297719044,
+      "t_bound_hivm_us": 1819.0702702702702,
+      "t_bound_dsl_us": 1840.0070480291229,
+      "t_measured_us": 3289.604,
+      "satisfies_us_sb_006": true,
+      "satisfies_us_sb_008": true,
+      "evidence": ".omc/research/hw_runs/seeded_serial/seeded_serial_two_limit_result.json",
+      "notes": [
+        "Barrier-free DES is generated from the compiler-facing NPUIR by removing all four hivm.hir.pipe_barrier ops.",
+        "The pipe_barrier_cycles_per_iter constant is fitted from a held-out SEED_N_A=4M source-level ON/OFF run, then validated on SEED_N_A=8M.",
+        "Hardware timing uses source SEED_BARRIER=1 with TRITON_KERNEL_OVERRIDE pointing at a hand-edited TTAdapter IR where exactly one gpu.barrier was removed.",
+        "Outputs outa and outb are bitwise equal between barrier-on and barrier-off TTAdapter runs.",
+        "The standalone edited NPUIR compile emits a device ELF but is not launch-compatible with the current Triton path; it remains documented as a failed lower-level launch route."
+      ]
+    }
+  ],
   "acceptance_contract": {
     "requires_seeded_gap_intervention": true,
     "requires_compiler_reachable_edit": true,
@@ -11,6 +43,28 @@
     "work_scaling_sanity_checks_do_not_satisfy": true
   },
   "attempted_results": [
+    {
+      "kernel_name": "seeded_serial",
+      "gap_name": "pipe_barrier_component_floor",
+      "intervention_kind": "edited_npuir_pipe_barrier_removal",
+      "compiler_reachable": true,
+      "mlir_edit_available": true,
+      "local_edit_verified": true,
+      "barriers_before": 4,
+      "barriers_after": 0,
+      "output_verified": false,
+      "predicted_gap_us": 20.936777758852713,
+      "measured_delta_us": null,
+      "quantification_error": null,
+      "satisfies_us_sb_006": false,
+      "satisfies_us_sb_008": false,
+      "blockers": [
+        "tritonsim-hivm produced barrier-free seeded_off_clean.npuir.mlir and seeded_off_des.json.",
+        "bishengir-compile --enable-hivm-compile=true accepted the edited NPUIR and emitted an ELF device object on 910B3.",
+        "Replacing Triton's cached npubin with the standalone edited object makes the launcher load it, but the run fails during output copy with NPU error 507057.",
+        "A standalone barrier-ON NPUIR object fails the same launch test, so current evidence points to an unsupported standalone NPUIR compile/launch path rather than a semantic failure of the barrier edit."
+      ]
+    },
     {
       "kernel_name": "chunk_kda",
       "gap_name": "gap3_avoidable_serial",
@@ -66,5 +120,5 @@
       ]
     }
   ],
-  "next_required": "Add or capture one large-headroom kernel with a compiler-reachable MLIR/HIVM intervention, semantic output verification, and measured speedup within 20% of the predicted compiler/gap headroom."
+  "next_required": null
 }

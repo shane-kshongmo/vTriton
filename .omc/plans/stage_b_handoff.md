@@ -80,7 +80,7 @@ Already fixed and wired this session. `run_remote_bench(remote_host, kernel_name
 | Gap 4 (`repeat`/`mask`) real data | ✅ **done (2026-06-11)** — derived analytically (`repeat=ceil(elements/lanes)` in C++; 271/1378 ops repeat>1) since repeat/mask are absent at npuir level for all kernels and the bishengir codegen stage is unparseable (compile >600s). Per-instruction Gap-4 model; real bound 46,110µs ≤ 104,326µs (2.26×). See RESULTS.md §5. `mask` lane-fill model deferred. |
 | Scalar throughput | ❌ Vector/20 proxy, uncalibrated |
 | `redundancy(grid)` < 1 | ❌ hardcoded 1 (conservative); needs Experiment 7 |
-| Two-limit compiler-headroom (`T_bound_DSL − T_bound_HIVM`) | 🟡 **computed only, never measured** — `two_limit.py` derives it analytically; no hardware run has confirmed a hand-optimized HIVM actually reaches it (see Task 7) |
+| Two-limit compiler-headroom (`T_bound_DSL − T_bound_HIVM`) | ✅ **measured on seeded_serial via hand-edited TTAdapter compiler IR (2026-06-24)** — held-out calibration gives `T_bound_HIVM=1819.070us <= T_bound_DSL=1840.007us <= T_measured=3289.604us`; predicted headroom 20.937us vs measured TTAdapter-edit delta 20.860us, output-verified. Evidence: `.omc/research/hw_runs/seeded_serial/RESULTS.md` |
 
 ---
 
@@ -220,6 +220,12 @@ These surfaced alongside Task 4 and feed the same evidence pipeline — fix oppo
 ---
 
 ## TASK 7 — Validate the two-limit compiler-headroom on hardware (Spec §6)
+
+**Status update 2026-06-24:** CLOSED via `seeded_serial` using a hand-edited
+TTAdapter compiler-IR hardware realization; see
+`.omc/research/hw_runs/seeded_serial/RESULTS.md` and
+`tests/perfbound/test_seeded_serial_two_limit_hardware.py`. The older steps below
+are retained as historical context.
 
 **Why:** §6 is a headline result of the model — `T_bound_DSL − T_bound_HIVM` =
 "performance the compiler's lowering leaves inaccessible to Triton users," which

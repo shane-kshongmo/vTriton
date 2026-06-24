@@ -1,0 +1,5 @@
+# Stream-A output arrays are 32MB each (8M float32) — excluded from git to keep
+# history lean.  Their bitwise equality (ON vs both OFF paths) is recorded in
+# seeded_serial_two_limit_result.json (correctness.outa_equal / max_abs_outa)
+# and asserted by tests/perfbound/test_seeded_serial_two_limit_hardware.py.
+*outa.npy

@@ -85,7 +85,10 @@ def compute_bounds(
     active_cores = min(_total_programs, _n_cores) if _n_cores > 0 else _total_programs
 
     # Compute component floor first to discover which component binds
-    comp = compute_component_floor(extract, cube, vector, memory, core, active_cores)
+    comp = compute_component_floor(
+        extract, cube, vector, memory, core, active_cores,
+        pipe_barrier_cycles_per_iter=calib_db.pipe_barrier_cycles_per_iter,
+    )
 
     # Apply wave scaling to component floor:
     # busiest core runs `waves` programs, so per-core time is waves × single-program time.

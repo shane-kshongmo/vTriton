@@ -1,7 +1,7 @@
 # Tests for Stage-B stories: US-SB-006, US-SB-007, US-SB-008
 #
 # US-SB-007: Scalar throughput calibration.
-# US-SB-008: Two-limit compiler-headroom validation (chunk_kda).
+# US-SB-008: Two-limit compiler-headroom validation (seeded_serial TTAdapter edit).
 # US-SB-006: accepted seeded-gap counterfactual audit.
 
 import json
@@ -102,12 +102,11 @@ requires_des_json = pytest.mark.skipif(
 
 @requires_des_json
 class TestTwoLimitCompilerHeadroom:
-    """Validates the two-limit (T_bound_HIVM / T_bound_DSL) for chunk_kda.
+    """Retains the historical chunk_kda two-limit sanity checks.
 
-    Acceptance (US-SB-008):
-    - T_bound_HIVM <= T_bound_DSL <= T_measured computed for chunk_kda
-    - Result annotated with Gap-1/3 interpretation
-    - Evidence committed
+    US-SB-008 closure is now audited by
+    TestAcceptedSeededGapCounterfactualAudit below. These older assertions keep
+    the original chunk_kda bound hierarchy from regressing.
 
     Note: hand-optimized HIVM compilation is documented as infeasible for
     chunk_kda (bishengir-compile accepts MLIR, not des.json; the compiler
@@ -329,7 +328,7 @@ class TestWorkScalingSanityCheck:
 
 @requires_counterfactual_gap
 class TestAcceptedSeededGapCounterfactualAudit:
-    """US-SB-006/008 accepted counterfactual evidence must be explicit."""
+    """US-SB-006/008 accepted seeded counterfactual evidence must be explicit."""
 
     @staticmethod
     def _load_results():
@@ -338,8 +337,18 @@ class TestAcceptedSeededGapCounterfactualAudit:
 
     def test_no_accepted_counterfactual_is_claimed_without_evidence(self):
         data = self._load_results()
-        assert data.get("satisfies_us_sb_006") is False
-        assert data.get("accepted_results") == []
+        assert data.get("satisfies_us_sb_006") is True
+        assert data.get("satisfies_us_sb_008") is True
+        accepted = data.get("accepted_results")
+        assert accepted, "expected accepted seeded counterfactual evidence"
+        assert any(
+            r["kernel_name"] == "seeded_serial"
+            and r["output_verified"] is True
+            and r["quantification_error"] < 0.20
+            and r["compiler_ir_profiled"] is True
+            and r["satisfies_us_sb_008"] is True
+            for r in accepted
+        )
 
     def test_acceptance_contract_excludes_work_scaling(self):
         data = self._load_results()
@@ -353,6 +362,10 @@ class TestAcceptedSeededGapCounterfactualAudit:
         data = self._load_results()
         attempts = data["attempted_results"]
         assert attempts, "expected attempted counterfactual records"
+        assert any(
+            a["intervention_kind"] == "edited_npuir_pipe_barrier_removal"
+            for a in attempts
+        )
         assert any(a["intervention_kind"] == "mlir_pipe_barrier_removal" for a in attempts)
         assert any(a["intervention_kind"] == "des_json_raise_repeat" for a in attempts)
         assert any(a["intervention_kind"] == "work_scaling_sanity_check" for a in attempts)
@@ -369,10 +382,19 @@ class TestAcceptedSeededGapCounterfactualAudit:
         assert pipe_edit["barriers_before"] > pipe_edit["barriers_after"]
         assert pipe_edit["local_bound_delta_us"] == pytest.approx(0.0)
 
-    def test_two_limit_hardware_reachability_not_claimed(self):
+    def test_two_limit_hardware_reachability_is_claimed_with_evidence(self):
         data = self._load_results()
-        assert data.get("satisfies_us_sb_008") is False
-        assert "large-headroom kernel" in data["next_required"]
+        assert data.get("satisfies_us_sb_008") is True
+        accepted = data["accepted_results"][0]
+        assert accepted["t_bound_hivm_us"] <= accepted["t_bound_dsl_us"]
+        assert accepted["t_bound_dsl_us"] <= accepted["t_measured_us"]
+        assert accepted["local_bound_delta_us"] == pytest.approx(
+            accepted["measured_delta_us"], rel=0.20
+        )
+        assert accepted["compiler_ir_profiled"] is True
+        assert accepted["edited_npuir_profiled"] is False
+        assert accepted["satisfies_us_sb_008"] is True
+        assert data["next_required"] is None
 
 
 # ===========================================================================
