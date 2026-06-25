@@ -39,3 +39,14 @@ __pycache__/
 .DS_Store
 Thumbs.db
 .omx/
+
+# E2E calibration outputs (large generated files)
+scripts/e2e_chunk/output/*des_*.json
+scripts/e2e_chunk/output/*trace_*.json
+scripts/e2e_split_qkv/output/*des_*.json
+scripts/e2e_split_qkv/output/*trace_*.json
+msprof_data/
+msprof_chunk_full/
+
+# Temp files
+temp/

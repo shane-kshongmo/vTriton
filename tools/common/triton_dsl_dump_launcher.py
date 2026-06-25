@@ -104,7 +104,8 @@ def _install_compile_command_capture(dump_dir):
     commands_output = Path(dump_dir) / _COMPILE_COMMANDS_FILENAME
     _npuir_index = [0]
     # Asks bishengir-compile to print HIVM IR after the sync-injection pass.
-    _NPUIR_FLAG = "--bishengir-print-ir-after=hivm-inject-sync"
+    # CANN 8.5 uses hivm-inject-sync; CANN 9.0 uses hivm-graph-sync-solver.
+    _NPUIR_FLAG = "--bishengir-print-ir-after=hivm-graph-sync-solver"
     # Marker for the start/end of the IR dump in bishengir output.
     _NPUIR_START = "// -----// IR Dump After"
     _NPUIR_END = "// -----// IR Dump Before"

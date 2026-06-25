@@ -1,0 +1,22 @@
+split_qkv_rmsnorm_mrope Calibration Report
+Date: 20260625
+========================================================================
+  Real wall:         2,433.8 us
+  Real blocks:       20
+  Tokens/block:      103
+  Real per-token:    23.63 us
+  Real per-block:    2433.8 us
+  Model per-token:   2.77 us
+  Model per-block:   285.6 us
+  Model E2E wall:    285.6 us
+  Model/Real ratio:  0.1174
+
+Per-pipe ratios:
+  aiv_overall    : 0.1174
+  aiv_vec        : 0.0028
+  aiv_scalar     : 0.0007
+  aiv_mte2       : 0.0002
+  aiv_mte3       : 0.0010
+  model_per_token_us: 2.7730
+  tokens_per_block: 103.0000
+  model_per_block_us: 285.6190

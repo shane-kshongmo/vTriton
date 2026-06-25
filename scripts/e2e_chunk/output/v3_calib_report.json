@@ -1,0 +1,20 @@
+{
+  "kernel": "chunk_kda",
+  "version": "v3",
+  "real_e2e_us": 111891.595,
+  "model_e2e_us": 729.8,
+  "ratio": 0.0065,
+  "total_ops": 242744,
+  "per_pipe_cycles": {
+    "PIPE_S": 1191314,
+    "PIPE_UNKNOWN": 1339,
+    "PIPE_ALL": 35328,
+    "PIPE_MTE2_C": 27504,
+    "PIPE_MTE1": 1300,
+    "PIPE_FIX": 22737,
+    "PIPE_M": 275,
+    "PIPE_V": 11239,
+    "PIPE_MTE2_V": 29630,
+    "PIPE_MTE3": 29422
+  }
+}

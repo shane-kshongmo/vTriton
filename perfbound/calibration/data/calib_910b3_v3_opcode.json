@@ -1,0 +1,112 @@
+{
+  "_version": "v3_opcode_level",
+  "_derived_from": "CCE microbenchmarks on triton_profiling (CANN 8.5, Ascend 910B3)",
+  "_method": "Python timing via torch.npu.synchronize(), 40 blocks × 2000 iter × 128 SIMD, 3 repeats",
+  "_note": "Dependent-chain latency measurement. Includes store + loop overhead. Relative proportions are hardware-accurate. DES uses per-op cycle cost for pipeline scheduling.",
+
+  "hardware": {
+    "model": "Ascend 910B3",
+    "aic_cores": 20,
+    "aiv_cores": 40,
+    "clock_ghz": 1.85,
+    "block_launch_overhead_us": 0.12,
+    "scalar_alu_width": 1,
+    "simd_vector_width": 128
+  },
+
+  "opcode_cycles": {
+
+    "PIPE_V": {
+      "_description": "Vector ALU — 128-wide SIMD. Measured via dependent-chain latency on 40-block kernels.",
+      "vmul":    {"cycles": 3.0,  "source": "CCE_bench_v4", "note": "batch1"},
+      "vadd":    {"cycles": 3.5,  "source": "CCE_bench_v4", "note": "batch1"},
+      "vsub":    {"cycles": 3.4,  "source": "CCE_bench_v4", "note": "batch1"},
+      "vbrc":    {"cycles": 14.6, "source": "CCE_bench_v4", "note": "batch1 — broadcast, more expensive than ALU"},
+      "vcast":   {"cycles": 10.2, "source": "CCE_bench_v4", "note": "batch1 — type cast, fp32→fp16"},
+      "vcmp":    {"cycles": 5.5,  "source": "CCE_bench_v4", "note": "batch1 — compare"},
+      "vsel":    {"cycles": 4.5,  "source": "CCE_bench_v4", "note": "batch1 — select/mux"},
+      "vreduce": {"cycles": 10.1, "source": "CCE_bench_v4", "note": "batch1 — reduction (tl.sum)"},
+      "vdiv":    {"cycles": 5.2,  "source": "CCE_bench_v4", "note": "batch2 — fp32 divide"},
+      "vand":    {"cycles": 3.2,  "source": "CCE_bench_v4", "note": "batch2 — bitwise and (int32)"},
+      "vor":     {"cycles": 5.4,  "source": "CCE_bench_v4", "note": "batch2 — bitwise or (int32)"},
+      "vnot":    {"cycles": 4.0,  "source": "CCE_bench_v4", "note": "batch2 — bitwise not (int32)"},
+      "varange": {"cycles": 9.9,  "source": "CCE_bench_v4", "note": "batch2 — arange (range generation)"},
+      "vmax":    {"cycles": 3.0,  "source": "CCE_bench_v4_inferred", "note": "similar to vmul (same ALU class)"},
+      "vmin":    {"cycles": 3.0,  "source": "CCE_bench_v4_inferred"},
+      "vexp":    {"cycles": 82.6, "source": "CCE_v1", "note": "P_vector_exp_sustained 3.33 GFLOPS → 82.6 cyc. Much slower than ALU ops."},
+      "vlog":    {"cycles": 82.6, "source": "CCE_v1"},
+      "vsqrt":   {"cycles": 82.6, "source": "CCE_v1"},
+      "vrsqrt":  {"cycles": 82.6, "source": "CCE_v1"},
+      "copy":    {"cycles": 3.0,  "source": "CCE_bench_v4_inferred", "note": "elementwise copy, similar to vadd"},
+      "_default": {"cycles": 5.0, "note": "conservative average for unmapped PIPE_V ops"}
+    },
+
+    "PIPE_S": {
+      "_scalar_alu": {
+        "_description": "Scalar ALU (1-wide, single-issue). CCE v1: P_scalar_add_sustained 0.60 GFLOPS → 3.1 cyc/op.",
+        "addi":   {"cycles": 3.1, "source": "CCE_v1"},
+        "subi":   {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "muli":   {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "cmpi":   {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "select": {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "ori":    {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "andi":   {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "trunci": {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "extsi":  {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "sexti":  {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "zexti":  {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "maxsi":  {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "minsi":  {"cycles": 3.1, "source": "CCE_v1_inferred"},
+        "divsi":  {"cycles": 12.0, "source": "estimated", "note": "~4× scalar add (TBD: CCE benchmark)"},
+        "remsi":  {"cycles": 12.0, "source": "estimated"},
+        "_default_scalar_alu": {"cycles": 3.1, "note": "all basic scalar ALU ops"}
+      },
+      "_agu": {
+        "_description": "Address Generation Unit — pointer arithmetic, memref ops. TBD: CCE benchmarks.",
+        "index_cast":       {"cycles": 5.0, "source": "estimated"},
+        "reinterpret_cast": {"cycles": 5.0, "source": "estimated"},
+        "cast":             {"cycles": 5.0, "source": "estimated"},
+        "subview":          {"cycles": 8.0, "source": "estimated"},
+        "memref_subview":   {"cycles": 8.0, "source": "estimated"},
+        "collapse_shape":   {"cycles": 10.0, "source": "estimated"},
+        "expand_shape":     {"cycles": 10.0, "source": "estimated"},
+        "_default_agu":     {"cycles": 6.0, "note": "conservative for AGU ops"}
+      },
+      "_sync": {
+        "_description": "Synchronization barriers. TBD: multi-kernel profiling solve.",
+        "pipe_barrier":     {"cycles": 350, "source": "profiling_estimate"},
+        "wait_flag":        {"cycles": 250, "source": "profiling_estimate"},
+        "set_flag":         {"cycles": 100, "source": "profiling_estimate"},
+        "sync_block_set":   {"cycles": 500, "source": "profiling_estimate"},
+        "sync_block_wait":  {"cycles": 500, "source": "profiling_estimate"}
+      },
+      "_misc": {
+        "constant":         {"cycles": 0, "source": "free"},
+        "if":               {"cycles": 0, "source": "free"},
+        "apply":            {"cycles": 10, "source": "estimated"},
+        "load":             {"cycles": 3,  "source": "estimated"},
+        "alloc_workspace":  {"cycles": 0,  "source": "free"},
+        "min":              {"cycles": 5,  "source": "estimated"},
+        "max":              {"cycles": 5,  "source": "estimated"},
+        "extui":            {"cycles": 5,  "source": "estimated"},
+        "_default_misc":    {"cycles": 5,  "note": "unknown PIPE_S ops"}
+      }
+    },
+
+    "PIPE_M": {
+      "_description": "Cube MAC — deep pipeline. Issue_interval=1 cycle, latency=92 cycles.",
+      "mmadL1":      {"cycles": 1, "latency": 92, "source": "CCE_v1_pipelined"},
+      "mmadL1.cube": {"cycles": 1, "latency": 92, "source": "CCE_v1_pipelined"}
+    },
+
+    "MTE": {
+      "_description": "Data movement engines. Cost = startup_cycles + bytes × cycles_per_byte.",
+      "PIPE_MTE3":   {"startup_cycles": 40, "cycles_per_byte": 0.013, "source": "CCE_v1_BW_gm_to_l1_141GBs"},
+      "PIPE_MTE2_V": {"startup_cycles": 50, "cycles_per_byte": 0.004, "source": "CCE_v1_BW_l1_to_l0a_452GBs"},
+      "PIPE_MTE2_C": {"startup_cycles": 50, "cycles_per_byte": 0.004, "source": "CCE_v1"},
+      "PIPE_FIX":    {"startup_cycles": 30, "cycles_per_byte": 0.013, "source": "CCE_v1_BW_l0c_to_gm_144GBs"},
+      "PIPE_MTE1":   {"startup_cycles": 10, "cycles_per_byte": 0.021, "source": "CCE_v1_BW_ub_to_gm_87GBs"}
+    }
+
+  }
+}
