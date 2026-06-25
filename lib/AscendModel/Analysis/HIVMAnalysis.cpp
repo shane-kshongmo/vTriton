@@ -1889,9 +1889,9 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
     return 1;
 
   if (opName == "set_flag")
-    return 1;
+    return 100;   // v3: profiling estimate
   if (opName == "wait_flag")
-    return 2;
+    return 250;   // v3: profiling estimate
   if (opName == "sync_block_set") {
     HIVMPipe sender = parsed.senderPipe;
     HIVMPipe receiver = parsed.receiverPipe;
@@ -1987,23 +1987,16 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
 
   auto isVectorALUOp = [&](llvm::StringRef name) {
     return name == "vadd" || name == "vmul" || name == "vsub" ||
+           name == "vmax" || name == "vmin" ||
            name == "vcast" || name == "vexp" || name == "vdiv" ||
            name == "vlog" || name == "vsqrt" || name == "vrsqrt" ||
-           name == "vtanh" || name == "vsigmoid" || name == "vreduce";
+           name == "vtanh" || name == "vsigmoid" || name == "vreduce" ||
+           name == "vbrc" || name == "vcmp" || name == "vsel" ||
+           name == "vand" || name == "vor" || name == "vnot" ||
+           name == "varange" || name == "copy";
   };
   if (isVectorALUOp(opName))
     return vectorCycles(config.getVectorOpCyclesPerInstruction(opName));
-  if (opName == "vbrc") {
-    if (parsed.op.pipe == HIVMPipe::VectorMTE2 ||
-        parsed.op.pipe == HIVMPipe::CubeMTE2) {
-      int64_t bytes = std::max<int64_t>(parsed.op.bytes, config.getVectorWidthBytes());
-      return estimateSpaceTransferCycles("ub",
-                                         parsed.op.pipe == HIVMPipe::CubeMTE2 ? "l1" : "ub",
-                                         bytes,
-                                         config.getMTE2StartupLatency());
-    }
-    return vectorCycles(1);
-  }
   if (opName == "fixpipe") {
     int64_t bytes = std::max<int64_t>(parsed.op.bytes, 1);
     auto spaces = parseLoadStoreSpaces(line);

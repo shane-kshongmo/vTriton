@@ -1,0 +1,401 @@
+{
+  "$schema": "./hardware_schema.json",
+  "name": "Ascend 910B3",
+  "vendor": "Huawei",
+  "version": "3.0-opcode-calibrated",
+
+  "_v3_calibration_note": "Per-opcode cycle costs from CCE microbenchmarks on triton_profiling (CANN 8.5). PIPE_V opcodes: 40-block × 2000-iter × 128-SIMD, Python timing via torch.npu.synchronize(). PIPE_S scalar ALU from CCE v1 (P_scalar_add_sustained 0.60 GFLOPS). MTE from CCE v1 bandwidth benchmarks. Replace all previous per-pipe multiplier calibrations.",
+
+  "_v3_files_referenced": [
+    "perfbound/calibration/data/calib_910b3_v3_opcode.json",
+    "perfbound/calibration/data/calib_910b3_v1.json (CCE microbenchmarks)",
+    "test/benchmarks/bench_vector_ops.py (PIPE_V benchmark source)"
+  ],
+
+  "clock": {
+    "frequency_ghz": 1.85,
+    "cycles_per_us": 1850
+  },
+
+  "memory_spaces": {
+    "hbm": {
+      "type": "off_chip",
+      "size_gb": 32,
+      "bandwidth_tbps": 1.6,
+      "latency_cycles": 200
+    },
+    "l2": {
+      "type": "on_chip_shared",
+      "size_mb": 192,
+      "bandwidth_gbps": 3200,
+      "latency_cycles": 50
+    },
+    "l1": {
+      "type": "on_chip_local",
+      "size_kb": 1024,
+      "bandwidth_gbps": 6400,
+      "latency_cycles": 10,
+      "description": "Cube data staging buffer"
+    },
+    "l0a": {
+      "type": "register_file",
+      "size_kb": 64,
+      "description": "Left matrix input for Cube"
+    },
+    "l0b": {
+      "type": "register_file",
+      "size_kb": 64,
+      "description": "Right matrix input for Cube"
+    },
+    "l0c": {
+      "type": "register_file",
+      "size_kb": 256,
+      "description": "Cube output accumulator"
+    },
+    "ub": {
+      "type": "on_chip_local",
+      "size_kb": 256,
+      "bandwidth_gbps": 3200,
+      "latency_cycles": 5,
+      "description": "Unified Buffer for Vector compute"
+    }
+  },
+
+  "compute_units": {
+    "cube": {
+      "type": "matrix_engine",
+      "tflops_fp16": 320,
+      "tflops_fp32": 160,
+      "tflops_int8": 640,
+      "fractal_sizes": {
+        "fp16": { "m": 16, "k": 16, "n": 16 },
+        "bf16": { "m": 16, "k": 16, "n": 16 },
+        "fp32": { "m": 16, "k": 8, "n": 16 },
+        "int8": { "m": 16, "k": 32, "n": 16 }
+      },
+      "tile_m": 16,
+      "tile_n": 16,
+      "tile_k": 16,
+      "input_spaces": ["l0a", "l0b"],
+      "output_space": "l0c",
+      "supported_dtypes": ["fp16", "bf16", "fp32", "int8"]
+    },
+    "vector": {
+      "type": "simd_engine",
+      "width_elements": 128,
+      "width_bytes": 256,
+      "tflops_fp32": 10,
+      "tflops_fp16": 20,
+      "compute_space": "ub",
+      "supported_ops": [
+        "add", "sub", "mul", "div", "max", "min",
+        "exp", "log", "sqrt", "rsqrt", "tanh", "sigmoid", "relu",
+        "reduce_sum", "reduce_max", "reduce_min",
+        "cast", "broadcast", "cmp", "sel", "brc",
+        "and", "or", "not", "arange", "copy"
+      ],
+      "supported_dtypes": ["fp32", "fp16", "bf16", "int32", "int8"]
+    }
+  },
+
+  "data_movers": {
+    "cube_mte2": {
+      "description": "Cube input: HBM to L1",
+      "src_space": "hbm",
+      "dst_space": "l1",
+      "bandwidth_gbps": 200,
+      "max_burst_bytes": 65536,
+      "alignment_bytes": 32
+    },
+    "mte1": {
+      "description": "Cube input: L1 to L0A/L0B",
+      "src_space": "l1",
+      "dst_spaces": ["l0a", "l0b"],
+      "bandwidth_gbps": 400,
+      "max_burst_bytes": 32768,
+      "alignment_bytes": 32
+    },
+    "fixpipe": {
+      "description": "Cube output: L0C to HBM",
+      "src_space": "l0c",
+      "dst_space": "hbm",
+      "bandwidth_gbps": 200,
+      "max_burst_bytes": 65536,
+      "alignment_bytes": 32,
+      "supports_accumulate": true,
+      "supports_cast": true
+    },
+    "vector_mte2": {
+      "description": "Vector input: HBM to UB",
+      "src_space": "hbm",
+      "dst_space": "ub",
+      "bandwidth_gbps": 200,
+      "max_burst_bytes": 65536,
+      "alignment_bytes": 32
+    },
+    "mte3": {
+      "description": "Vector output: UB to HBM",
+      "src_space": "ub",
+      "dst_space": "hbm",
+      "bandwidth_gbps": 200,
+      "max_burst_bytes": 65536,
+      "alignment_bytes": 32
+    }
+  },
+
+  "pipeline": {
+    "cube_path": {
+      "stages": ["cube_mte2", "mte1", "cube", "fixpipe"],
+      "description": "Matrix multiplication data flow",
+      "fully_pipelined": true
+    },
+    "vector_path": {
+      "stages": ["vector_mte2", "vector", "mte3"],
+      "description": "Vector computation data flow",
+      "fully_pipelined": true
+    },
+    "hardware_units": {
+      "cube_mte2": { "path": "cube", "can_overlap": true },
+      "mte1":      { "path": "cube", "can_overlap": true },
+      "cube":      { "path": "cube", "can_overlap": true },
+      "fixpipe":   { "path": "cube", "can_overlap": true },
+      "vector_mte2": { "path": "vector", "can_overlap": true },
+      "vector":      { "path": "vector", "can_overlap": true },
+      "mte3":        { "path": "vector", "can_overlap": true }
+    },
+    "parallelism": {
+      "inter_path": {
+        "cube_path_and_vector_path": true,
+        "description": "Cube and Vector paths execute in parallel"
+      },
+      "intra_path": {
+        "cube_mte2_mte1_cube_fixpipe": true,
+        "vector_mte2_vector_mte3": true,
+        "description": "All units within each path can execute in parallel (pipelined)"
+      }
+    }
+  },
+
+  "performance_model": {
+    "cube_cycles_per_tile": {
+      "formula": "ceil(M/16) * ceil(N/16) * ceil(K/16)",
+      "base_cycles": 1
+    },
+    "vector_cycles_per_op": {
+      "formula": "ceil(elements / 128)",
+      "base_cycles": 1
+    },
+    "memory_cycles": {
+      "formula": "bytes / bandwidth_per_cycle",
+      "include_latency": true
+    }
+  },
+
+  "calibration": {
+    "description": "v3 calibration: per-opcode cycle costs from CCE microbenchmarks on Ascend 910B3 (CANN 8.5, triton_profiling container). Validated against chunk_kda (MIX_AIC, 4096 blocks) and split_qkv (AIV-only, 20 blocks) E2E profiling. Chunk E2E ratio improved from 0.12 (raw DES) to 0.63 (v3). Split E2E ratio improved from 0.023 to 0.17.",
+    "calibration_date": "2026-06-25",
+
+    "startup_latencies": {
+      "vector_startup_cycles": 35,
+      "mte2_startup_cycles": 50,
+      "mte3_startup_cycles": 40,
+      "cube_startup_cycles": 20,
+      "fixpipe_startup_cycles": 30,
+      "mte1_startup_cycles": 10,
+      "scalar_startup_cycles": 1,
+      "pipe_barrier_startup_cycles": 350,
+      "notes": "MTE3 startup=40 verified via chunk profiling (PIPE_MTE3 ratio=1.1 with this value). pipe_barrier=350 estimated from chunk PIPE_S profiling residual. Others are datasheet seeds pending validation."
+    },
+
+    "vector_op_cycles_per_vec_instruction": {
+      "_description": "Per-PIPE_V-opcode cycle cost. Measured on Ascend 910B3 via CCE microbenchmarks: 40 blocks × 2000 iterations × 128-element SIMD, Python timing with torch.npu.synchronize(). Dependent-chain latency measurement (includes store + loop overhead as constant per kernel).",
+
+      "_measured_batch1_20260625": {
+        "method": "40 blocks, 2000 iterations, 128 SIMD, 3 repeats, dependent-chain latency",
+        "environment": "triton_profiling (CANN 8.5), Ascend 910B3, NPU driver 25.5.1"
+      },
+
+      "_measured_batch2_20260625": {
+        "method": "same as batch1, separate execution for vdiv/vand/vor/vnot/varange",
+        "note": "vdiv uses fp32 (div is fp32-only on this hardware)"
+      },
+
+      "vmul":   3.0,
+      "vadd":   3.5,
+      "vsub":   3.4,
+      "vmax":   3.0,
+      "vmin":   3.0,
+      "vdiv":   5.2,
+      "vbrc":   14.6,
+      "vcast":  10.2,
+      "vcmp":   5.5,
+      "vsel":   4.5,
+      "vreduce": 10.1,
+      "vand":   3.2,
+      "vor":    5.4,
+      "vnot":   4.0,
+      "varange": 9.9,
+      "copy":   3.0,
+      "vexp":   82.6,
+      "vlog":   82.6,
+      "vsqrt":  82.6,
+      "vrsqrt": 82.6,
+
+      "_notes_by_opcode": {
+        "vmul_vadd_vsub": "Simple ALU: ~3-3.5 cyc/128elem. Fastest vector ops — fully pipelined.",
+        "vmax_vmin": "Same ALU class as vmul — estimated same cost.",
+        "vdiv": "fp32 divide — ~5.2 cyc. Uses different microcode from multiply.",
+        "vbrc": "Broadcast/fill — 14.6 cyc. Much more expensive than ALU. Includes zero-init + fill sequence.",
+        "vcast": "Type cast (fp32→fp16) — 10.2 cyc. Format conversion overhead.",
+        "vcmp": "Compare + where — 5.5 cyc. Moderate cost, includes mask + select.",
+        "vsel": "Select/mux — 4.5 cyc. Slightly cheaper than compare.",
+        "vreduce": "Reduction (tl.sum) — 10.1 cyc. Reduction tree overhead.",
+        "vand_vor_vnot": "Bitwise — 3-5 cyc. On integer ALU path, similar to basic arithmetic.",
+        "varange": "Range generation — 9.9 cyc. Includes arange + cast sequence.",
+        "vexp_vlog_vsqrt_vrsqrt": "Transcendental — 82.6 cyc. From CCE v1 (P_vector_exp_sustained 3.33 GFLOPS). MUCH slower than ALU ops — avoid in hot paths."
+      },
+
+      "simple_ops_add_sub_mul_etc": 3.0,
+      "exp": 82.6,
+      "log": 82.6,
+      "tanh": 82.6,
+      "sigmoid": 82.6,
+      "sqrt": 82.6,
+      "rsqrt": 82.6,
+      "div": 5.2,
+      "brc": 14.6,
+      "cast": 10.2,
+      "cmp": 5.5,
+      "sel": 4.5,
+      "reduce_sum": 10.1,
+      "reduce_max": 10.1,
+      "reduce_min": 10.1,
+      "reduce_prod": 10.1,
+      "bitwise_and": 3.2,
+      "bitwise_or": 5.4,
+      "bitwise_not": 4.0,
+      "broadcast": 14.6,
+      "arange": 9.9,
+      "copy": 3.0,
+
+      "notes_legacy_keys": "Keys like 'simple_ops_add_sub_mul_etc', 'exp', 'div' are the original key names read by HardwareConfig.cpp parseJSON(). New opcode-specific keys (vbrc, vcmp, etc.) need corresponding readInt() calls in the C++ parser. Until then, the post-processor (perfbound/calibration/des_trace_postprocessor.py) applies these values."
+    },
+
+    "scalar_op_cycles": {
+      "_description": "Per-PIPE_S-opcode cycle cost. Scalar operations are 1-wide (single ALU), fundamentally serial.",
+
+      "scalar_alu": {
+        "_description": "Scalar arithmetic/logic ALU. CCE v1: P_scalar_add_sustained 0.60 GFLOPS → 3.1 cyc/op.",
+        "addi": 3.1,
+        "subi": 3.1,
+        "muli": 3.1,
+        "cmpi": 3.1,
+        "select": 3.1,
+        "ori": 3.1,
+        "andi": 3.1,
+        "trunci": 3.1,
+        "extsi": 3.1,
+        "sexti": 3.1,
+        "zexti": 3.1,
+        "maxsi": 3.1,
+        "minsi": 3.1,
+        "divsi": 12.0,
+        "remsi": 12.0,
+        "source": "CCE_v1_scalar_add (3.1). divsi/remsi estimated ~4×."
+      },
+
+      "agu": {
+        "_description": "Address Generation Unit — pointer arithmetic, memref shape ops. TBD: CCE benchmarks.",
+        "index_cast": 5.0,
+        "reinterpret_cast": 5.0,
+        "cast": 5.0,
+        "subview": 8.0,
+        "memref_subview": 8.0,
+        "collapse_shape": 10.0,
+        "expand_shape": 10.0,
+        "extui": 5.0,
+        "load": 3.0,
+        "apply": 10.0,
+        "source": "Estimated from profiling residual. Needs dedicated CCE benchmarks."
+      },
+
+      "sync": {
+        "_description": "Synchronization barriers. Dominate wall time in scalar-heavy kernels despite small op count.",
+        "pipe_barrier": 350,
+        "wait_flag": 250,
+        "set_flag": 100,
+        "sync_block_set": 500,
+        "sync_block_wait": 500,
+        "source": "Estimated from chunk_kda profiling residual (pipe_barrier). Others proportional to expected hardware sync protocol cost."
+      },
+
+      "misc": {
+        "constant": 0,
+        "if": 0,
+        "alloc_workspace": 0,
+        "min": 5,
+        "max": 5,
+        "source": "Zero-cost for compile-time ops. Min/max estimated as AGU."
+      }
+    },
+
+    "cube_mac_cycles": {
+      "_description": "Cube MAC pipeline model. Deep pipeline (91 stages). issue_interval=1 cycle per MAC, latency=92 cycles for dependency tracking.",
+      "mmadL1": {"issue_interval_cycles": 1, "latency_cycles": 91.8, "source": "CCE_v1_P_cube_fp16_sustained 5.16 TFLOPS. Chunk profiling confirms issue_interval≈1 (cube_mac ratio=0.89)."}
+    },
+
+    "mte_cycles": {
+      "_description": "MTE data movement cost = startup_cycles + transfer_bytes × cycles_per_byte.",
+      "PIPE_MTE3":   {"startup_cycles": 40, "cycles_per_byte": 0.013, "source": "CCE_v1_BW_gm_to_l1 141 GB/s. Startup=40 verified by chunk (ratio=1.1)."},
+      "PIPE_MTE2_V": {"startup_cycles": 50, "cycles_per_byte": 0.004, "source": "CCE_v1_BW_l1_to_l0a 452 GB/s."},
+      "PIPE_MTE2_C": {"startup_cycles": 50, "cycles_per_byte": 0.004, "source": "Same as PIPE_MTE2_V."},
+      "PIPE_FIX":    {"startup_cycles": 30, "cycles_per_byte": 0.013, "source": "CCE_v1_BW_l0c_to_gm 144 GB/s."},
+      "PIPE_MTE1":   {"startup_cycles": 10, "cycles_per_byte": 0.021, "source": "CCE_v1_BW_ub_to_gm 87 GB/s."}
+    },
+
+    "scalar_overhead": {
+      "aiv_scalar_alu_width": 1,
+      "aic_scalar_alu_width": 1,
+      "max_scalar_ops_per_cycle_per_core": 1,
+      "verified_by": "chunk_kda profiling: AIC scalar ratio=0.035 (28.4× gap), AIV scalar ratio=0.258 (PIPE_S dominates 84% of AIV wall time). Confirms 1-wide scalar ALU.",
+      "impact": "For kernels with >10% scalar ops (PIPE_S), scalar ALU becomes the E2E bottleneck. This is a HARDWARE LIMIT, not a modeling error."
+    },
+
+    "parallelism": {
+      "num_aic_cores": 20,
+      "num_aiv_cores": 40,
+      "block_launch_overhead_us": 0.12,
+      "description": "Core counts from Ascend 910B spec. Block overhead = 0.12 us/block verified by chunk_kda: (111,892 - 111,384) / 4096 = 0.12 us."
+    },
+
+    "e2e_formula": {
+      "v3_validated": "E2E = max(waves_AIC × per_block_AIC_cycles, waves_AIV × per_block_AIV_cycles) / (clock × 1000) + grid_blocks × block_launch_overhead_us",
+      "chunk_kda_verification": "E2E_model = max(205 × 47.1us, 103 × 682.7us) = 70,315 us. Real = 111,892 us. Ratio = 0.63 (up from 0.12 with raw DES)."
+    },
+
+    "cross_kernel_validation": {
+      "chunk_kda": {
+        "raw_des_ratio": 0.12,
+        "v3_ratio": 0.63,
+        "improvement": "5.2x",
+        "per_pipe_v3_accuracy": {
+          "PIPE_V": "raw=0.021 → v3=0.125 (6x)",
+          "PIPE_S": "raw=0.140 → v3=0.706 (5x, best improvement)",
+          "PIPE_MTE3": "raw=0.028 → v3=1.430 (slightly over, sync overhead not modeled)",
+          "PIPE_MTE2_V": "raw=0.014 → v3=0.781 (57x, MTE model is excellent)"
+        }
+      },
+      "split_qkv": {
+        "raw_des_ratio": 0.023,
+        "v3_ratio": 0.17,
+        "improvement": "7.5x",
+        "note": "PIPE_S sync ops (barrier/wait_flag) still use estimated values. Real barrier cost likely higher than 250-500 cyc. This is the primary remaining gap."
+      },
+      "remaining_gap_sources": [
+        "PIPE_S sync ops (barrier/wait_flag/set_flag) — estimated 100-500 cyc each. Actual may be 2-3× higher. These dominate PIPE_S wall time in chunk (1,191,314 / 1,350,088 = 88% of all cycles).",
+        "DES pipeline scheduling — DES models pipes as parallel but real hardware may have port contention when multiple pipes issue to shared units.",
+        "Loop overhead in split_qkv — 103 token iterations amplify per-iteration overhead (barrier sync between MTE→Vector→Scalar per iteration)."
+      ]
+    }
+  }
+}

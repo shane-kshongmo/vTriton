@@ -609,6 +609,8 @@ bool HardwareConfig::parseJSON(const llvm::json::Value &json,
       readInt("simple_ops_add_sub_mul_etc", "vsub");
       readInt("simple_ops_add_sub_mul_etc", "vmul");
       readInt("simple_ops_add_sub_mul_etc", "vcast");
+      readInt("simple_ops_add_sub_mul_etc", "vmax");
+      readInt("simple_ops_add_sub_mul_etc", "vmin");
       readInt("exp", "vexp");
       readInt("log", "vlog");
       readInt("tanh", "vtanh");
@@ -616,6 +618,19 @@ bool HardwareConfig::parseJSON(const llvm::json::Value &json,
       readInt("sqrt", "vsqrt");
       readInt("rsqrt", "vrsqrt");
       readInt("div", "vdiv");
+      readInt("brc", "vbrc");
+      readInt("cmp", "vcmp");
+      readInt("sel", "vsel");
+      readInt("reduce_sum", "vreduce");
+      readInt("reduce_max", "vreduce_max");
+      readInt("reduce_min", "vreduce_min");
+      readInt("reduce_prod", "vreduce_prod");
+      readInt("bitwise_and", "vand");
+      readInt("bitwise_or", "vor");
+      readInt("bitwise_not", "vnot");
+      readInt("broadcast", "vbrc");
+      readInt("arange", "varange");
+      readInt("copy", "copy");
     }
   }
 
@@ -765,9 +780,12 @@ int HardwareConfig::getVectorOpCyclesPerInstruction(
   auto it = vectorOpCyclesPerInstruction.find(opName);
   if (it != vectorOpCyclesPerInstruction.end())
     return it->second;
+  // v3 defaults — all basic vector ALU ops ~3 cycles, reduce ~10
   if (opName == "vreduce")
-    return 2;
-  return 1;
+    return 10;
+  if (opName.starts_with("v"))
+    return 5;   // conservative v3 fallback for unmapped vector ops
+  return 1;     // non-vector, don't guess
 }
 
 double HardwareConfig::getHBMBandwidthGBs() const {
