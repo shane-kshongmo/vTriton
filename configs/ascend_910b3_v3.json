@@ -225,6 +225,7 @@
       "broadcast": 15,
       "arange": 10,
       "copy": 3,
+      "_canonical_source": "perfbound/calibration/data/calib_910b3_v3_opcode.json (opcode_cycles.PIPE_V) is the single source of truth; the integer values above are rounded from it for the C++ HardwareConfig parser.",
       "_measured_raw": {
         "vmul": 3.0, "vadd": 3.5, "vsub": 3.4, "vmax": 3.0, "vmin": 3.0,
         "vdiv": 5.2, "vbrc": 14.6, "vcast": 10.2, "vcmp": 5.5,
@@ -246,6 +247,12 @@
       "num_aiv_cores": 40,
       "block_launch_overhead_us": 0.12,
       "description": "Block overhead verified via chunk_kda: (111,892 - 111,384) / 4096 = 0.12 us/block."
+    },
+
+    "sync_op_cycles": {
+      "set_flag": 100,
+      "wait_flag": 250,
+      "_note": "Inter-pipe AIC/AIV flag-sync cost in cycles (v3 profiling estimate). Consumed by HardwareConfig::getSyncOpCycles() in HIVMAnalysis estimateDuration(); when this section is absent the model falls back to the conservative defaults set_flag=1, wait_flag=2."
     }
   }
 }

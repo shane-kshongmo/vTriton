@@ -170,6 +170,9 @@ public:
   int getVectorWidthBytes() const;
   llvm::StringRef getVectorComputeSpace() const;
   int getVectorOpCyclesPerInstruction(llvm::StringRef opName) const;
+  // Inter-pipe sync op cost (cycles) from calibration.sync_op_cycles, or the
+  // supplied conservative default when the config omits the entry.
+  int getSyncOpCycles(llvm::StringRef opName, int defaultCycles) const;
 
   // HBM bandwidth (convenience)
   double getHBMBandwidthGBs() const;
@@ -236,6 +239,7 @@ private:
   llvm::StringMap<DataMover> dataMovers;
   llvm::StringMap<PipelinePath> pipelinePaths;
   llvm::StringMap<int> vectorOpCyclesPerInstruction;
+  llvm::StringMap<int> syncOpCycles;
 
   // Parallelism info
   llvm::StringMap<bool> parallelismFlags;

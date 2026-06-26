@@ -1889,9 +1889,9 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
     return 1;
 
   if (opName == "set_flag")
-    return 100;   // v3: profiling estimate
+    return config.getSyncOpCycles("set_flag", 1);
   if (opName == "wait_flag")
-    return 250;   // v3: profiling estimate
+    return config.getSyncOpCycles("wait_flag", 2);
   if (opName == "sync_block_set") {
     HIVMPipe sender = parsed.senderPipe;
     HIVMPipe receiver = parsed.receiverPipe;

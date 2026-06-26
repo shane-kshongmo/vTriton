@@ -632,6 +632,13 @@ bool HardwareConfig::parseJSON(const llvm::json::Value &json,
       readInt("arange", "varange");
       readInt("copy", "copy");
     }
+
+    if (const auto *syncOps = calibration->getObject("sync_op_cycles")) {
+      for (const auto &kv : *syncOps) {
+        if (auto v = kv.second.getAsInteger())
+          syncOpCycles[kv.first.str()] = static_cast<int>(*v);
+      }
+    }
   }
 
   return true;
@@ -786,6 +793,14 @@ int HardwareConfig::getVectorOpCyclesPerInstruction(
   if (opName.starts_with("v"))
     return 5;   // conservative v3 fallback for unmapped vector ops
   return 1;     // non-vector, don't guess
+}
+
+int HardwareConfig::getSyncOpCycles(llvm::StringRef opName,
+                                    int defaultCycles) const {
+  auto it = syncOpCycles.find(opName);
+  if (it != syncOpCycles.end())
+    return it->second;
+  return defaultCycles;
 }
 
 double HardwareConfig::getHBMBandwidthGBs() const {
