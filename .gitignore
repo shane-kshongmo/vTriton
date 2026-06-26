@@ -40,11 +40,14 @@ __pycache__/
 Thumbs.db
 .omx/
 
-# E2E calibration outputs (large generated files)
-scripts/e2e_chunk/output/*des_*.json
-scripts/e2e_chunk/output/*trace_*.json
-scripts/e2e_split_qkv/output/*des_*.json
-scripts/e2e_split_qkv/output/*trace_*.json
+# E2E calibration artifacts (regenerable; the run_*.sh runners are tracked,
+# their dump/output products are not — they duplicate .omc/research/hw_runs
+# and tests/perfbound/fixtures)
+scripts/e2e_chunk/dump/
+scripts/e2e_chunk/output/
+scripts/e2e_split_qkv/dump/
+scripts/e2e_split_qkv/output/
+test/benchmarks/output/
 msprof_data/
 msprof_chunk_full/
 
