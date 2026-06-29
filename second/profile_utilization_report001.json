@@ -1,0 +1,336 @@
+{
+  "kernel_name": "split_qkv_rmsnorm_rope_kernel",
+  "elapsed_time_us": 11.14,
+  "diagnosis": "Compute Bound",
+  "bound_kind": "Compute Bound",
+  "dominant_component": "vector",
+  "dominant_item": "fp32",
+  "dominant_share": 0.6592113358074183,
+  "exposed_control_frac_model": null,
+  "exposed_control_frac_measured": null,
+  "exposed_control_deficit_pts": null,
+  "exposed_control_deficit_us": null,
+  "n_sync_ops": null,
+  "hivm_bottleneck": {
+    "global_root_cause": "PipelineImbalance",
+    "global_evidence": "[weightedPipeCycles[PIPE_S]=4199371, weightedPipeCycles[PIPE_M]=4422, ratio=949.7x]",
+    "global_explanation": "PIPE_S weighted cycles dominate PIPE_M by 949.7x",
+    "global_suggestions": [
+      "将 PIPE_S 工作与其他 pipe 通过 multi-buffer/software pipeline 重叠",
+      "检查 Cube/Vector split 是否能更均衡利用 AIC/AIV"
+    ],
+    "sync_overhead_ratio": 4.346512075171031,
+    "barrier_overhead_ratio": 2.763964062972223,
+    "one_iteration_cycles": 36397.0,
+    "weighted_cycles": 4200661.0,
+    "pipe_busy_cycles": {
+      "PIPE_S": 4795.0,
+      "PIPE_MTE2_C": 3398.0,
+      "PIPE_M": 558.0,
+      "PIPE_MTE1": 965.0,
+      "PIPE_FIX": 2418.0,
+      "PIPE_MTE3": 1021.0,
+      "PIPE_V": 27872.0,
+      "PIPE_MTE2_V": 2730.0
+    },
+    "weighted_pipe_cycles": {
+      "PIPE_S": 4199371.0,
+      "PIPE_MTE2_C": 26414.0,
+      "PIPE_M": 4422.0,
+      "PIPE_MTE1": 7629.0,
+      "PIPE_FIX": 19330.0,
+      "PIPE_MTE3": 5725.0,
+      "PIPE_V": 217488.0,
+      "PIPE_MTE2_V": 21770.0
+    },
+    "pipeline_diagnosis": {
+      "root_cause": "PipelineImbalance",
+      "bottleneck_pipe": "PIPE_S",
+      "imbalance_ratio": 949.6542288557214,
+      "evidence": "[weightedPipeCycles[PIPE_S]=4199371, weightedPipeCycles[PIPE_M]=4422, ratio=949.7x]",
+      "explanation": "PIPE_S weighted cycles dominate PIPE_M by 949.7x",
+      "suggestions": [
+        "将 PIPE_S 工作与其他 pipe 通过 multi-buffer/software pipeline 重叠",
+        "检查 Cube/Vector split 是否能更均衡利用 AIC/AIV"
+      ]
+    },
+    "op_diagnoses": [
+      {
+        "op_id": 804,
+        "line_number": 285,
+        "op_name": "vbrc",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vbrc on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 1486,
+        "line_number": 466,
+        "op_name": "vmul",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vmul on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 1491,
+        "line_number": 471,
+        "op_name": "vcast",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vcast on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 1497,
+        "line_number": 477,
+        "op_name": "vadd",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vadd on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 2142,
+        "line_number": 466,
+        "op_name": "vmul",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vmul on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 2147,
+        "line_number": 471,
+        "op_name": "vcast",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vcast on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 2153,
+        "line_number": 477,
+        "op_name": "vadd",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vadd on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 2798,
+        "line_number": 466,
+        "op_name": "vmul",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vmul on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 2803,
+        "line_number": 471,
+        "op_name": "vcast",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vcast on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      },
+      {
+        "op_id": 2809,
+        "line_number": 477,
+        "op_name": "vadd",
+        "pipe": "PIPE_V",
+        "root_cause": "ComputeBound",
+        "evidence": "[duration=355 cyc, elements=8192, flops=0, compute_work=320 cyc]",
+        "explanation": "vadd on PIPE_V: compute work dominates modeled duration",
+        "suggestions": [
+          "提高 arithmetic intensity",
+          "将 compute 与 MTE prefetch 重叠"
+        ],
+        "theoretical_min_cycles": 163.0,
+        "actual_cycles": 355.0,
+        "overhead_ratio": 0.5408450704225352
+      }
+    ],
+    "warnings": [
+      "DES graph 中 flops 全部为 0；compute theoretical_min 需要回退或依赖 extractor 推断",
+      "DES graph 中 src_space 为空的 op 占比 97.9%；memory path 诊断会使用带宽回退",
+      "DES graph 中 dst_space 为空的 op 占比 98.7%；memory path 诊断会使用带宽回退",
+      "calibration 缺少 startup_latency['scalar']；HIVM bottleneck diagnosis 使用 1 cycles 回退值",
+      "calibration 缺少 startup_latency['mte2']；HIVM bottleneck diagnosis 使用 50 cycles 回退值",
+      "calibration 缺少 startup_latency['mte1']；HIVM bottleneck diagnosis 使用 25 cycles 回退值",
+      "calibration 缺少 startup_latency['cube']；HIVM bottleneck diagnosis 使用 20 cycles 回退值",
+      "calibration 缺少 startup_latency['fixpipe']；HIVM bottleneck diagnosis 使用 30 cycles 回退值",
+      "calibration 缺少 startup_latency['vector']；HIVM bottleneck diagnosis 使用 35 cycles 回退值",
+      "calibration 缺少 startup_latency['mte3']；HIVM bottleneck diagnosis 使用 40 cycles 回退值"
+    ]
+  },
+  "components": {
+    "vector": {
+      "component": "vector",
+      "work_done": 3224896.0,
+      "bound_work": 3224896.0,
+      "elapsed_time_us": 11.14,
+      "active_time_us": 2744.348,
+      "actual_performance": 289487.9712746858,
+      "ideal_performance": 15133.235851136873,
+      "u_utilization": 19.129284319780044,
+      "r_residency": 246.3508078994614,
+      "e_efficiency": 0.07765058488294842,
+      "dominant_item": "fp32",
+      "dominant_share": 0.6592113358074183,
+      "warnings": [
+        "active_time_us 大于 elapsed_time_us",
+        "U > 1.05；请检查 A/I 的单位或 ideal performance 来源",
+        "R > 1.05；active_time 和 elapsed_time 的统计口径可能不同"
+      ]
+    },
+    "scalar": {
+      "component": "scalar",
+      "work_done": 0.0,
+      "bound_work": 0,
+      "elapsed_time_us": 11.14,
+      "active_time_us": 10569.963,
+      "actual_performance": 0.0,
+      "ideal_performance": 0.0,
+      "u_utilization": 0.0,
+      "r_residency": 948.8297127468581,
+      "e_efficiency": 0.0,
+      "dominant_item": null,
+      "dominant_share": 0.0,
+      "warnings": [
+        "profiling 中有该 component，但理论 bound 中没有对应 work",
+        "该 component 没有正数的 ideal performance",
+        "active_time_us 大于 elapsed_time_us",
+        "R > 1.05；active_time 和 elapsed_time 的统计口径可能不同"
+      ]
+    },
+    "mte_gm": {
+      "component": "mte_gm",
+      "work_done": 11290624.0,
+      "bound_work": 11290624.0,
+      "elapsed_time_us": 11.14,
+      "active_time_us": 16858.67,
+      "actual_performance": 1013521.0053859963,
+      "ideal_performance": 129701.20089691151,
+      "u_utilization": 7.814276185395987,
+      "r_residency": 1513.3456014362655,
+      "e_efficiency": 0.0051635767652674445,
+      "dominant_item": "gm->l1",
+      "dominant_share": 0.8606929076727734,
+      "warnings": [
+        "active_time_us 大于 elapsed_time_us",
+        "U > 1.05；请检查 A/I 的单位或 ideal performance 来源",
+        "R > 1.05；active_time 和 elapsed_time 的统计口径可能不同"
+      ]
+    },
+    "mte_ub": {
+      "component": "mte_ub",
+      "work_done": 1867776.0,
+      "bound_work": 1867776.0,
+      "elapsed_time_us": 11.14,
+      "active_time_us": 1308.585,
+      "actual_performance": 167663.91382405744,
+      "ideal_performance": 129997.6058967852,
+      "u_utilization": 1.2897461662269252,
+      "r_residency": 117.46723518850987,
+      "e_efficiency": 0.010979624779259999,
+      "dominant_item": "l0c->gm",
+      "dominant_share": 0.8421052631578947,
+      "warnings": [
+        "active_time_us 大于 elapsed_time_us",
+        "U > 1.05；请检查 A/I 的单位或 ideal performance 来源",
+        "R > 1.05；active_time 和 elapsed_time 的统计口径可能不同"
+      ]
+    }
+  },
+  "warnings": [
+    "vector: active_time_us 大于 elapsed_time_us",
+    "vector: U > 1.05；请检查 A/I 的单位或 ideal performance 来源",
+    "vector: R > 1.05；active_time 和 elapsed_time 的统计口径可能不同",
+    "scalar: profiling 中有该 component，但理论 bound 中没有对应 work",
+    "scalar: 该 component 没有正数的 ideal performance",
+    "scalar: active_time_us 大于 elapsed_time_us",
+    "scalar: R > 1.05；active_time 和 elapsed_time 的统计口径可能不同",
+    "mte_gm: active_time_us 大于 elapsed_time_us",
+    "mte_gm: U > 1.05；请检查 A/I 的单位或 ideal performance 来源",
+    "mte_gm: R > 1.05；active_time 和 elapsed_time 的统计口径可能不同",
+    "mte_ub: active_time_us 大于 elapsed_time_us",
+    "mte_ub: U > 1.05；请检查 A/I 的单位或 ideal performance 来源",
+    "mte_ub: R > 1.05；active_time 和 elapsed_time 的统计口径可能不同",
+    "hivm_bottleneck: DES graph 中 flops 全部为 0；compute theoretical_min 需要回退或依赖 extractor 推断",
+    "hivm_bottleneck: DES graph 中 src_space 为空的 op 占比 97.9%；memory path 诊断会使用带宽回退",
+    "hivm_bottleneck: DES graph 中 dst_space 为空的 op 占比 98.7%；memory path 诊断会使用带宽回退",
+    "hivm_bottleneck: calibration 缺少 startup_latency['scalar']；HIVM bottleneck diagnosis 使用 1 cycles 回退值",
+    "hivm_bottleneck: calibration 缺少 startup_latency['mte2']；HIVM bottleneck diagnosis 使用 50 cycles 回退值",
+    "hivm_bottleneck: calibration 缺少 startup_latency['mte1']；HIVM bottleneck diagnosis 使用 25 cycles 回退值",
+    "hivm_bottleneck: calibration 缺少 startup_latency['cube']；HIVM bottleneck diagnosis 使用 20 cycles 回退值",
+    "hivm_bottleneck: calibration 缺少 startup_latency['fixpipe']；HIVM bottleneck diagnosis 使用 30 cycles 回退值",
+    "hivm_bottleneck: calibration 缺少 startup_latency['vector']；HIVM bottleneck diagnosis 使用 35 cycles 回退值",
+    "hivm_bottleneck: calibration 缺少 startup_latency['mte3']；HIVM bottleneck diagnosis 使用 40 cycles 回退值"
+  ]
+}
