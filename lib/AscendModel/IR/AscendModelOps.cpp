@@ -295,6 +295,49 @@ IMPL_COMPLEX_VECTOR_UNARY(SigmoidOp, 15)
 // Reduce Operations
 //===----------------------------------------------------------------------===//
 
+static ParseResult parseReduceOp(OpAsmParser &parser,
+                                 OperationState &result) {
+  OpAsmParser::UnresolvedOperand input;
+  Type inputType;
+  Type resultType;
+  IntegerAttr axisAttr;
+
+  if (parser.parseOperand(input) || parser.parseKeyword("axis"))
+    return failure();
+  (void)parser.parseOptionalEqual();
+  if (parser.parseAttribute(axisAttr, parser.getBuilder().getI64Type(),
+                            "axis", result.attributes) ||
+      parser.parseOptionalAttrDict(result.attributes) ||
+      parser.parseColonType(inputType) || parser.parseArrow() ||
+      parser.parseType(resultType) ||
+      parser.resolveOperand(input, inputType, result.operands))
+    return failure();
+
+  result.addTypes(resultType);
+  return success();
+}
+
+template <typename OpTy>
+static void printReduceOp(OpAsmPrinter &printer, OpTy op) {
+  printer << ' ' << op.getInput() << " axis " << op.getAxis();
+  printer.printOptionalAttrDict(op->getAttrs(), {"axis"});
+  printer << " : " << op.getInput().getType() << " -> "
+          << op.getResult().getType();
+}
+
+#define CUSTOM_REDUCE_ASM(OpClass)                                             \
+  ParseResult OpClass::parse(OpAsmParser &parser, OperationState &result) {    \
+    return parseReduceOp(parser, result);                                      \
+  }                                                                            \
+  void OpClass::print(OpAsmPrinter &printer) { printReduceOp(printer, *this); }
+
+CUSTOM_REDUCE_ASM(ReduceSumOp)
+CUSTOM_REDUCE_ASM(ReduceMaxOp)
+CUSTOM_REDUCE_ASM(ReduceMinOp)
+CUSTOM_REDUCE_ASM(ReduceProdOp)
+
+#undef CUSTOM_REDUCE_ASM
+
 #define IMPL_REDUCE_OP(OpClass)                                                  \
   int64_t OpClass::estimateCycles(const HardwareConfig &config) {                \
     int64_t numElems = getNumElementsFromType(getInput().getType());             \
