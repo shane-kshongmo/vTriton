@@ -112,6 +112,39 @@ class TestTritonsimHivmCLI:
         ops = load_hivm_desgraph(out_file)
         assert len(ops) > 0, "Parsed operations must be non-empty"
 
+    def test_non_scheduling_eviction_policy_attr_is_ignored(self, tmp_path):
+        """NPUIR dump-only load attrs should not block DES modeling."""
+        source = HIVM_ADD_KERNEL.read_text()
+        marker = (
+            "      outs(%ub0 : memref<1024xf32, #hivm.address_space<ub>>)"
+        )
+        assert marker in source
+        npuir_file = tmp_path / "hivm_add_eviction_policy.npuir.mlir"
+        npuir_file.write_text(
+            source.replace(
+                marker,
+                marker + " eviction_policy = <EvictFirst>",
+                1,
+            )
+        )
+        out_file = tmp_path / "hivm_add_eviction_policy_des.json"
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(npuir_file),
+            "--des-graph-file", str(out_file),
+        ]
+        if HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(HW_CONFIG)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (
+            f"tritonsim-hivm failed (returncode={result.returncode}): "
+            f"{result.stderr[:300]}"
+        )
+        data = json.loads(out_file.read_text())
+        ops = data.get("operations", data.get("nodes", []))
+        assert len(ops) > 0, "DES graph must contain at least one operation"
+
     def test_remove_pipe_barrier_emits_edited_npuir(self, tmp_path):
         """tritonsim-hivm can erase a pipe_barrier through MLIR parsing."""
         edited_file = tmp_path / "hivm_add_no_barrier.npuir.mlir"
