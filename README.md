@@ -1,23 +1,33 @@
 # TritonSim
 
-基于 MLIR 的 Ascend NPU 性能建模工具。
+基于 MLIR 的 Ascend NPU 性能建模工具，目标硬件为昇腾 910B / 910B3。
 
-当前仓库主要覆盖两类输入：
+仓库采用**双层架构**：
+
+- **C++ / MLIR 层**（`lib/AscendModel/`、`tools/`）：自定义 AscendModel 方言与变换 pass，
+  负责 IR 解析、操作分类、周期估算与调度分析。工具 `tritonsim-opt` / `tritonsim-hivm`。
+- **Python 层**（`perfbound/`）：零 MLIR 依赖的纯 Python **分析性能下界模型**，
+  给出内核执行时间的可证明保守下界。这是当前活跃开发重心。
+
+C++ 工具与 Python 模型之间通过 JSON（DES 图、依赖图）松耦合通信。当前主要覆盖两类输入：
 
 - AscendModel MLIR：用于 pass 级性能分析与报告生成
 - HIVM IR：用于调度、同步与 trace 分析
 
-如需更详细的构建说明，见 [BUILD.md](BUILD.md)。硬件配置说明见
-[configs/README.md](configs/README.md)。
+如需更详细的构建说明见 [BUILD.md](BUILD.md)，硬件配置见 [configs/README.md](configs/README.md)，
+整体架构与 bound 模型深入说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 功能概览
 
-| 工具 | 用途 |
+| 工具 / 组件 | 用途 |
 |------|------|
 | `tritonsim-opt` | 运行 AscendModel 相关 pass pipeline |
 | `tritonsim-hivm` | 直接分析 `.npuir.mlir`，也可从 Triton DSL 触发 compile-only dump |
-| `ascend-tiling-opt` | 在构建中存在时提供 tiling 优化入口 |
+| `ascend-tiling-opt` | 在构建中存在时提供 tiling 优化入口（当前默认未构建） |
+| `perfbound/` | Python 两层级分析性能下界模型（C++ 工具的建模后端） |
+| `scripts/run_bound.py` | 端到端 bound 流水线入口（NPUIR dump → DES 图 → bound 报告） |
 | `configs/*.json` | 定义硬件参数，默认使用 `configs/ascend_910b.json` |
+| `docs/` | 架构、校准、部署文档 |
 
 ## 前置要求
 
@@ -237,6 +247,50 @@ $TRITON_OPT kernel.ttir --allow-unregistered-dialect --mlir-print-op-generic | \
 
 ---
 
+## Python 性能边界模型 (perfbound)
+
+`perfbound/` 是一个**零 MLIR 依赖的纯 Python 分析性能下界模型**。模型从不编译或运行内核——
+测量数据仅通过校准 (M1) 与验证 (M6) 进入系统。它直接消费 C++ 工具产出的 JSON（DES 图、依赖图）。
+
+### 核心公式
+
+```
+T_bound = max(T_grid_floor, T_core_floor + T_serial_irreducible)
+```
+
+- `T_grid_floor`：芯片网格级下界（占据率、负载均衡、带宽 / 算力瓶颈）
+- `T_core_floor`：单核组件级下界（基于加权调和平均的 Roofline 各组件吞吐率）
+- `T_serial_irreducible`：不可消除的跨组件串行握手开销
+
+> 这是实现的**保守**形式——`T_serial` 附着于 Tier-2 项（握手为核内 Cube↔Vector）。spec 散文与 `perfbound/__init__.py` 使用加性简写 `max(grid, core)+serial`，该形式非保守（可能违反 `T_bound ≤ T_measured`）；`bound_combiner.py` 实现的是上式。详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §1。
+
+模型按六个阶段组织：`calibration/` (M1) → `extract/` (M2/M3) → `model/` (M4) → `combine/` (M5) →
+`validate/` (M6)。完整说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，校准流程见
+[docs/CALIBRATION_GUIDE.md](docs/CALIBRATION_GUIDE.md)。
+
+### 运行端到端 bound 流水线
+
+入口脚本 [`scripts/run_bound.py`](scripts/run_bound.py) 串联：
+
+```
+内核脚本 → Triton NPUIR dump → 清洗后的 NPUIR → DES 图 JSON → perfbound JSON 报告
+```
+
+```bash
+# 按注册名运行（内置内核见 perfbound/experiments/registry.py：
+# vector_add, softmax, layernorm, rmsnorm, seeded_gap1/gap2/serial 等）
+python scripts/run_bound.py --kernel seeded_serial --grid 128,32
+
+# 按脚本路径运行，并对比实测时间
+python scripts/run_bound.py --script path/to/kernel.py --grid 128,32 \
+  --calibration <calib.json> --measured-us <T_measured>
+```
+
+`run_bound.py` 会调用 `build/bin/tritonsim-hivm` 生成 DES 图，因此真实（非 `--dry-run`）运行需要该二进制存在。
+内核脚本需暴露 `build_inputs()` 与 `Model`（契约见 `perfbound/experiments/registry.py` 的 `KernelSpec`）。
+
+---
+
 ## 测试与验证
 
 常用本地检查：
@@ -247,10 +301,19 @@ $TRITON_OPT kernel.ttir --allow-unregistered-dialect --mlir-print-op-generic | \
 python3 test/triton_smoke.py
 ```
 
-启用测试后可运行：
+Python (perfbound) 测试套件位于 `tests/perfbound/`，`conftest.py` 会自动把仓库根加入 `sys.path`：
 
 ```bash
-ctest --test-dir build
+python -m pytest tests/perfbound/                       # 全部
+python -m pytest tests/perfbound/test_bounds.py         # 单文件
+python -m pytest tests/perfbound/ -k chunk_kda          # 按关键字筛选
+python -m pytest tests/hivm/                            # HIVM 同步 / 组件验证
+```
+
+启用 C++ 测试后可运行：
+
+```bash
+ctest --test-dir build     # 需在 cmake 配置时加 -DASCEND_MODEL_ENABLE_TESTS=ON
 ```
 
 ---
@@ -408,21 +471,27 @@ bash /tmp/run_prefill.sh
 ## 仓库结构
 
 ```text
-include/AscendModel/   公共头文件
-lib/AscendModel/       分析、IR 与 transforms 实现
-tools/                 命令行工具入口
-configs/               硬件配置与 schema
+include/AscendModel/   公共头文件（方言、接口、pass 声明）
+lib/AscendModel/       分析、IR 与 transforms 的 C++ 实现
+tools/                 命令行工具入口（tritonsim-opt / tritonsim-hivm）
+perfbound/             Python 两层级分析性能下界模型（活跃开发重心）
+tests/                 Python 测试套件（perfbound / hivm）
+test/                  C++ 示例输入（.mlir/.ttir）与 smoke/bench 脚本
+configs/               硬件配置与 schema（910B / 910B3）
+scripts/               构建、补丁应用、bound 流水线与基准脚本
+docs/                  架构、校准、部署文档
 patches/               应用到 thirdparty 子模块的本地补丁
-scripts/               构建、补丁应用等辅助脚本
-test/                  示例输入与 smoke tests
-thirdparty/            外部依赖
+thirdparty/            外部依赖（triton-ascend、AscendNPU-IR 等）
 ```
 
 ## 说明
 
-- 默认硬件配置为 Ascend 910B
+- 默认硬件配置为 Ascend 910B；校准与硬件实测针对 **910B3**（见 `configs/ascend_910b3.json`）
+- `perfbound` 以源码内导入方式运行（仓库根加入 `sys.path`），无需 pip 安装
+- 硬件实测 / 校准微基准 (M6) 在远端 910B3 机器上执行，而非本地
 - 与具体本机路径绑定的示例、临时脚本路径和历史实现细节未保留在本 README 中
-- 更深入的构建选项、Triton 集成方式和硬件配置格式请分别查看 [BUILD.md](BUILD.md) 与 [configs/README.md](configs/README.md)
+- 更深入的构建选项、Triton 集成方式和硬件配置格式请分别查看 [BUILD.md](BUILD.md) 与 [configs/README.md](configs/README.md)；
+  整体架构与 bound 模型见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## License
 

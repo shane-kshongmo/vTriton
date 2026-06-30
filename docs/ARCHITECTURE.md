@@ -1,6 +1,6 @@
 # vTriton (TritonSim) 项目架构深度分析报告
 
-> 生成日期：2026-06-09
+> 生成日期：2026-06-09 · 最近更新：2026-06-27（至 commit `4a63cc2`：含 US-SB-006 绝对 Gap-2 闭合、US-SB-008 双限硬件验证、occupancy-aware HBM 与 vector-floor soundness 修复）
 
 ---
 
@@ -31,12 +31,18 @@
 ### 核心公式
 
 ```
-T_bound = max(T_grid_floor, T_core_floor) + T_serial_irreducible
+T_bound = max(T_grid_floor, T_core_floor + T_serial_irreducible)
 ```
 
 - **T_grid_floor**：芯片网格级下界（基于占据率、负载均衡、带宽/算力瓶颈）
 - **T_core_floor**：单核组件级下界（基于加权调和平均的 Roofline 各组件吞吐率）
 - **T_serial_irreducible**：不可消除的串行开销（跨组件数据交换的强制握手开销）
+
+> **实现与 spec 的有意分歧（soundness fix）**：spec 文本（`performance_bound_model.md` §4.1/§7）与
+> `perfbound/__init__.py` 写成加性形式 `max(T_grid, T_core) + T_serial`。该形式 **非保守**：
+> `max(a,b)+c ≥ max(a, b+c)`（c≥0），可能高估下界并导致 `T_bound > T_measured`，违反 spec §4.0 的
+> 保守性定理。`combine/bound_combiner.py` 实际实现为 `max(grid, core+serial)` —— 最紧的可证明下界，
+> 也与 spec §4.0 散文（“+T_serial 附着于 Tier-2 项”）一致。本文档以实现为准。
 
 ---
 
@@ -155,37 +161,56 @@ T_bound = max(T_grid_floor, T_core_floor) + T_serial_irreducible
 
 ```
 perfbound/
-├── __init__.py                    # 包入口，版本 0.1.0
-├── calibration/                   # M1: 硬件常数校准数据库
-│   ├── constants.py               #   数据类型、内存位置、校准常数数据类
-│   ├── calib_loader.py            #   校准 JSON 加载与验证
-│   ├── data/calib_910b3_v1.json   #   16 个 P0 常数，n=45，CI<2.5%
-│   ├── data/bandwidth_910b3.csv   #   带宽原始数据
-│   ├── microbench/                #   AscendC 微基准测试源码 (.cce)
-│   ├── scripts/                   #   远程执行与拟合脚本
-│   └── bench_output/              #   基准测试输出
+├── __init__.py                    # 包入口，版本 0.1.0（两层级 bound 公式）
+├── calibration/                   # M1: 硬件常数校准（微基准 + 负载校准双层）
+│   ├── constants.py               #   CalibrationDB / CoreConfig / Cube/Vector/Mem 数据类
+│   ├── calib_loader.py            #   校准 JSON 加载与验证（含 occupancy-aware HBM peak）
+│   ├── calib_reporter.py          #   校准报告生成
+│   ├── model_trace_extractor.py   #   模型侧 trace 抽取（用于负载校准对比）
+│   ├── msprof_trace_extractor.py  #   msprof 真实 trace 抽取 (RealTrace)
+│   ├── per_core_calibrator.py     #   Layer 1: 单核时间校准（startup/scalar 系数）
+│   ├── pipeline_calibrator.py     #   Layer 2: 流水重叠校准（handoff/barrier cycles）
+│   ├── trace_calibrator.py        #   Layer 0–3 编排入口（grid→core, 收敛检查）
+│   ├── data/calib_910b3_v1.json   #   微基准常数（16 个 P0，n=45，CI<2.5%）
+│   ├── data/calib_910b3_v2.json   #   负载校准产出（startup/scalar/overlap 调整）
+│   ├── microbench/                #   AscendC (.cce) 微基准源码 + bench_launcher
+│   ├── scripts/                   #   cce_remote_bench / fit_constants / validate_vs_tilesim
+│   └── bench_output/              #   基准测试 CSV（带宽/cube peak/handoff/MTE/scalar/vector）
 ├── extract/                       # M2/M3: 信息提取层
 │   ├── dsl_extractor.py           #   M2: TTIR 网格信息提取 (GridInfo)
 │   ├── grid_idioms.py             #   M2: 1D/2D 常见网格模式模板
 │   ├── mlir_parser.py             #   M2: C++ ExtractTTIRInfo pass 子进程封装
-│   ├── hivm_extractor.py          #   M3: HIVM 组件级操作提取 (OpRecord)
-│   ├── op_classifier.py           #   M3: 操作→(组件, 精度) 分类器
+│   ├── hivm_extractor.py          #   M3: HIVM 组件级操作提取 (OpRecord/HandoffRecord)
+│   ├── op_classifier.py           #   M3: 操作→(组件, 精度) 分类器（6 组件）
 │   ├── semantic_extractor.py      #   M3: Gap 1 语义资格分析
 │   ├── eligibility_oracle.py      #   M3: 硬件资格判定 (Gap 1 输入)
 │   └── hivm_runner.py             #   M3: HIVM CLI 运行器
 ├── model/                         # M4: 分析模型 (纯函数)
-│   ├── bounds.py                  #   顶层 compute_bounds() 入口
+│   ├── bounds.py                  #   顶层 compute_bounds() 入口 + wave 缩放 (A.5 #2b)
 │   ├── grid_model.py              #   Tier 1: 网格分析模型 (GridBound)
-│   ├── component_model.py         #   Tier 2: 组件分析模型 (ComponentBound)
-│   ├── bandwidth.py               #   持续带宽查找 (ported from tilesim)
+│   ├── component_model.py         #   Tier 2: 组件分析模型 (occupancy-aware, vector floor sound)
+│   ├── bandwidth.py               #   持续带宽查找（含 occupancy-aware MTE cap）
 │   └── serialization.py           #   强制/可避免串行化分裂
-├── combine/                       # M5: 边界合并
-│   ├── bound_combiner.py          #   T_bound = max(T_grid, T_core) + T_serial
-│   ├── report.py                  #   每内核文本+JSON 报告生成
-│   └── two_limit.py               #   A.7: 双限计算 (编译器/作者余量)
-├── validate/                      # M6: 验证 (硬件门控, 已存根)
-│   ├── harness.py                 #   验证框架骨架
-│   └── counterfactual.py          #   反事实分析
+├── distribution/                  # 单 block DES → 全 launch wall-clock 桥接
+│   └── core_mapper.py             #   固件 block→core 轮询分布，waves=ceil(blocks/cores)
+├── analyze/                       # 诊断分析（非 bound 组成部分）
+│   ├── hivm_bottleneck_diagnosis.py  # 已抽取 DES ops + 校准库的瓶颈归因
+│   └── profile_utilization.py     #   真实 component 利用率 vs 理论 floor 对比
+├── combine/                       # M5: 边界合并 + 双限
+│   ├── bound_combiner.py          #   T_bound = max(T_grid, T_core + T_serial)（sound 形式）
+│   ├── two_limit.py               #   A.7: 双限 (T_bound_DSL / T_bound_HIVM, 已实现)
+│   ├── report.py                  #   每内核文本+JSON 报告 + 五维归因
+│   └── run_report.py              #   端到端入口 (report_from_npuir / report_from_desgraph)
+├── experiments/                   # Stage-A/B 实验装置
+│   ├── registry.py                #   内核注册表 (KernelSpec, 组 I–V, build_inputs/Model 契约)
+│   ├── stage_a.py                 #   chunk_kda 等 Stage-A 固定装置与加载器
+│   └── artifacts.py               #   Stage-B 结果产物 schema (.omc/research/hw_runs/stageB)
+├── validate/                      # M6: 验证（驱动 remote-bench-910b3）
+│   ├── harness.py                 #   三态验证 (sound/tight/counterfactual)
+│   ├── counterfactual.py          #   反事实：手改 HIVM → 重编译 → 正确性 + 计时 delta
+│   ├── correctness.py             #   numpy.allclose 输出等价校验
+│   ├── hivm_edits.py              #   结构化 HIVM JSON 编辑原语（非 regex）
+│   └── msprof_parser.py           #   msprof op_summary CSV 解析（MIX_AIC/AIV/AI_VECTOR_CORE）
 └── data/                          #   共享数据
     └── bandwidth_910b3.csv
 ```
@@ -216,6 +241,17 @@ perfbound/
 - `CalibrationConstant`：值 ± CI，来源，运行次数
 - `CalibrationDB`：包含 `CoreConfig`、`CubeConfig`、`VectorConfig`、`MemHierarchy`
 - 完整 JSON 序列化/反序列化支持
+
+**两层校准**：
+
+1. **微基准层**（`calib_910b3_v1.json`，AscendC `.cce` 源码 → 远端 910B3 执行 → `fit_constants.py` 拟合）：得到上文 16 个 P0 持续速率常数。
+2. **负载校准层**（`trace_calibrator.py` 编排 4 层，产出 `calib_910b3_v2.json`）：用真实内核的 msprof trace 与模型 trace 对比，调整 `startup_latency` / `scalar_overhead_factor` / 流水重叠系数。
+   - Layer 0：核分布（grid→core，单 block→E2E 缩放）
+   - Layer 1：单核时间校准
+   - Layer 2：流水重叠校准（handoff/barrier cycles）
+   - Layer 3：多内核收敛检查
+
+**Occupancy-aware HBM peak（US-SB-006 / 绝对 Gap-2 闭合）**：实测峰值 HBM ≈ **1167 GB/s**。MTE 容量上限取 `min(single_core_rate, peak / active_cores)` —— 占据率越高，单核可分带宽越低。Vector floor 同步改为“可达成 per-op 速率”而非聚合峰值（修复了聚合速率偏低 15.6× 的非保守缺陷）。held-out 误差约 5.4%。
 
 #### M2：DSL 提取器 (Grid)
 
@@ -291,14 +327,19 @@ T_core_floor = max_c(O_c / I_c)
 
 - 加权调和平均正确建模混合精度指令流：整体速率受最慢精度按其工作份额支配
 - 移植自 tilesim 的 `aicore_costmodel.py` 结构（非数值）
+- **Wave 缩放（A.5 #2b，`bounds.py`）**：一次 extract 只覆盖一个 program；最忙核需运行 `waves = ceil(total_programs / n_cores)` 个 program。Tier-2 `T_core_floor` 按 waves 缩放（最忙核组件工作量）；Tier-1 `total_work = total_programs × per_program_work` 天然携带 waves 因子。
+- **单 block → 全 launch 桥接（`distribution/core_mapper.py`）**：建模固件 `rtKernelLaunch` 的 block→core 轮询分布，`E2E wall = waves × per_block_span`（取瓶颈核类型），对齐 triton-ascend driver 行为。
 
 #### M5：边界合并器
 
-**核心公式**：
+**核心公式**（实现的真实形式，见 §1 soundness 说明）：
 
 ```
-T_bound = max(T_grid_floor, T_core_floor) + T_serial_irreducible
+T_bound = max(T_grid_floor, T_core_floor + T_serial_irreducible)
 ```
+
+> `bound_combiner.py` 实现的是 `max(grid, core+serial)` 而非 spec 字面的加性形式 `max(grid,core)+serial`；
+> 后者非保守（可违反 `T_bound ≤ T_measured`）。`T_serial` 附着于 Tier-2 项，因握手是核内（同核 Cube↔Vector）。
 
 **五维归因分析**（诊断输出，非边界组成部分）：
 
@@ -310,27 +351,36 @@ T_bound = max(T_grid_floor, T_core_floor) + T_serial_irreducible
 | `gap3` (avoidable_serial) | 可通过调度/ping-pong 消除的握手 | 添加乒乓缓冲区     |
 | `gap4` (intra_unit_exec)  | SIMD repeat/mask 利用率低       | 提高 SIMD 利用率   |
 
-**输出报告** (`report.py`)：
+**输出报告**：报告由 `report.py` 生成，端到端入口在 `run_report.py`：
 
-- 每内核文本报告 + JSON 报告
-- 绑定层级/组件识别
-- 双限差距（编译器余量 / 内核作者余量）
-- 单一推荐优化动作
+- `report_from_npuir(npuir_path, grid, calib_db, hardware_config)` —— 运行 `tritonsim-hivm` → `des.json` → extract → 报告
+- `report_from_desgraph(des_json, grid, calib_db)` —— 直接消费已有 `des.json`（`python -m perfbound.combine.run_report`）
+- 每内核文本 + JSON 报告、绑定层级/组件识别、双限差距、单一推荐优化动作
+- `scripts/run_bound.py` 在此之上串联完整 Stage-B 流水线（kernel → NPUIR dump → 清洗 → DES 图 → 报告）
 
 #### M6：验证 (Validation)
 
-**状态**：存根（`NotImplementedError`），硬件门控
-**计划**：集成 `remote-bench-910b3` 远端基准测试
+**状态**：已实现（驱动远端 910B3 硬件，非模型本身）。`validate/harness.py` 提供三态验证：
 
-### 4.3 双限分析 (A.7)
+1. **Soundness**：`T_bound ≤ T_measured`（二元，必须 100% 成立）
+2. **Tightness**：`T_measured / T_bound`（记录中位数）
+3. **Counterfactual**：手改 HIVM（提升 repeat / 插入 ping-pong）→ bishengir 重编译 → `correctness.py` 校验输出等价（`numpy.allclose`）→ `msprof_parser.py` 解析计时 delta，确认归因量与实测改进一致
+
+`hivm_edits.py` 对 HIVM JSON 做结构化源到源编辑（**非 regex**，遵守项目规则）。`msprof_parser.py` 按集合精确匹配 `task_type` 枚举（`AI_CORE` / `MIX_AIC` / `MIX_AIV` / `AI_VECTOR_CORE`），避免子串误分类。
+
+### 4.3 双限分析 (A.7) — 已实现 + 硬件验证
+
+`combine/two_limit.py` 已实现（不再存根）。`T_bound_HIVM` 通过对理想化 extract 重新计算得到（**不是**从 `T_bound_DSL` 减去 gap 值）——理想化 extract 放宽 Gap-1（错位 op 重指派到合格单元）与可避免握手（移出串行集合），保留 Gap-2/Gap-4（硬件极限）。
 
 ```
-T_bound_DSL  (realized bishengir structure)
-T_bound_HIVM (analytically relaxed, hardware-legal)
+T_bound_DSL  = 常规 T_bound（bishengir 实际生成的 HIVM 结构）
+T_bound_HIVM = 分析性放宽后的理想 HIVM 结构（硬件合法约束下）
 
-compiler_headroom = T_bound_DSL - T_bound_HIVM
-author_headroom   = T_measured - T_bound_DSL
+compiler_headroom = T_bound_DSL − T_bound_HIVM   (≥ 0，放宽只降 floor)
+author_headroom   = T_measured − T_bound_DSL       (M6 提供 T_measured 前为 None)
 ```
+
+**硬件验证（US-SB-008）**：在 910B3 上以 `seeded_serial` 内核验证了 compiler-headroom（结果见 `.omc/research/hw_runs/seeded_serial/seeded_serial_two_limit_result.json` 与 `RESULTS.md`）。
 
 ---
 
@@ -445,9 +495,11 @@ HIVM 原生分析工具。支持两种输入模式：
 
 ### 7.2 Python 测试（perfbound）
 
-位置：[tests/perfbound/](file:///d:/develop/vTriton/tests/perfbound/)
+位置：[tests/perfbound/](file:///d:/develop/vTriton/tests/perfbound/)（`conftest.py` 自动把仓库根加入 `sys.path`）
 
-**测试覆盖**：当前 63/63 全通过
+**测试覆盖**：当前 **36 个测试文件**，覆盖全部六个阶段。下表为各阶段代表性用例（非完整列举）。新增覆盖包括双限 (`test_two_limit.py` / `test_seeded_serial_two_limit_hardware.py`)、绝对 Gap-2 (`test_gap2_absolute_validation.py`)、负载校准 (`test_calibration_*.py`)、Stage-B 故事 (`test_stage_b_*.py`)、远端基准 (`test_remote_bench.py`)、反事实 (`test_counterfactual*.py`) 与组件模型 (`test_component_model.py`)。
+
+> 部分测试为**硬件门控**（需 910B3 + msprof/bishengir）：`test_*_hardware.py`、`test_remote_bench.py`、`test_hivm_cli_integration.py`、`test_stage_a_pipeline.py`（依赖 chunk_kda 固定装置）。无硬件时这些用例跳过，不应视为失败。运行：`python -m pytest tests/perfbound/`。
 
 | 测试文件                           | 覆盖模块                           |
 | ---------------------------------- | ---------------------------------- |
@@ -596,24 +648,27 @@ C++ 和 Python 层通过 **JSON 序列化** 进行通信：
 | 阶段             | 范围                                | 状态                                          |
 | ---------------- | ----------------------------------- | --------------------------------------------- |
 | **A.0**    | Python `perfbound/` 包脚手架      | ✅ 完成                                       |
-| **A.1**    | M1 校准 — 910B3 AscendC 微基准测试 | ✅ 完成 (16 P0 常数, 40/40 测试)              |
-| **A.2**    | M2 DSL 提取器 — TTIR 符号仿射恢复  | ✅ 完成 (C++ pass + 10 参考内核, 63/63 测试)  |
-| **A.3**    | M3 HIVM 提取器 — C++ JSON 往返验证 | 🔶 部分 (Python loader 完成，C++ JSON 未验证) |
-| **A.4**    | M4 模型 — 校准 I_c 值填充          | 🔶 部分 (公式完成，I_c 可从 A.1 数据加载)     |
-| **A.5**    | M5 合并器 — Gap 1/2/4 连线         | ✅ 代码完成 (未在真实数据上测试)              |
-| **A.6**    | M6 验证框架                         | ⛔ 存根 (硬件门控)                            |
-| **A.7**    | 双限计算                            | ⛔ 存根 (延后)                                |
-| **A.8**    | 端到端管道验证                      | ⛔ 未开始                                     |
-| **Part B** | 实验、论文写作、迭代校准            | ⛔ 未开始                                     |
+| **A.1**    | M1 校准 — 微基准 + 负载校准双层    | ✅ 完成 (16 P0 常数; `calib_910b3_v2.json` 负载校准; occupancy-aware HBM) |
+| **A.2**    | M2 DSL 提取器 — TTIR 符号仿射恢复  | ✅ 完成 (C++ pass + 参考内核)                  |
+| **A.3**    | M3 HIVM 提取器 — C++ JSON 往返     | ✅ 完成 (`run_report.py` 端到端消费 `des.json`) |
+| **A.4**    | M4 模型 — wave 缩放 + soundness    | ✅ 完成 (occupancy-aware HBM、vector floor sound、Gap-2 闭合 US-SB-006) |
+| **A.5**    | M5 合并器 — sound 公式 + 双限连线  | ✅ 完成 (`max(grid, core+serial)`; `core_mapper` E2E 桥接) |
+| **A.6**    | M6 验证框架                         | ✅ 已实现 (harness/counterfactual/correctness/msprof_parser/hivm_edits) |
+| **A.7**    | 双限计算                            | ✅ 完成 + 硬件验证 (`two_limit.py`, US-SB-008 seeded_serial) |
+| **A.8**    | 端到端管道验证                      | ✅ 完成 (`run_bound.py` / `run_report.py`; seeded_serial、chunk_kda) |
+| **Part B** | 实验、迭代校准、论文                | 🔶 进行中 (chunk_kda 分析、calib v2 迭代)     |
 
 ### 9.2 当前阻塞项
 
-| 阻塞项                        | 原因                                      | 优先级 |
-| ----------------------------- | ----------------------------------------- | ------ |
-| C++ JSON → Python 端到端往返 | 需要编译好的 `tritonsim-opt` + 真实内核 | P0     |
-| Cube 回退处理 (elements==0)   | Gap 4 小修复                              | P1     |
-| Gap 4 连线 (repeat/mask 字段) | C++ 发射器尚未发射这些字段                | P1     |
-| M6 验证框架                   | 需要 `remote-bench-910b3` 集成          | P2     |
+原阻塞项均已解决：C++ JSON → Python 端到端往返（`run_report.py`）、Cube `elements==0` 回退、Gap-4 repeat/mask 连线（`op_classifier.py` 已更新）、M6 验证框架（已实现并驱动远端硬件）。
+
+**当前重点 / 已知局限**：
+
+| 项                                    | 说明                                                                 | 优先级 |
+| ------------------------------------- | -------------------------------------------------------------------- | ------ |
+| spec ↔ 实现公式对齐                   | spec 仍写加性 `max(grid,core)+serial`；实现为 sound 的 `max(grid, core+serial)`。需回写 spec | P0     |
+| AIV scalar-issue 项                   | chunk_kda 实测 ~104ms 为 AIV 标量发射瓶颈；模型缺 scalar-issue 项，致 55% “余量” 实为 bound-model artifact | P1     |
+| Part B：扩展内核套件与迭代校准        | 更多 Group I–V 内核、负载校准 v2 迭代、论文写作                       | P2     |
 
 ---
 
@@ -727,4 +782,4 @@ C++ 和 Python 层通过 **JSON 序列化** 进行通信：
 
 ---
 
-> 本报告基于 2026-06-09 的 `HEAD` 代码状态生成。项目活跃开发中，部分模块（A.6-A.8, Part B）处于早期阶段。
+> 本报告基于 2026-06-09 的 `HEAD` 初版生成，并于 2026-06-27 更新至 commit `4a63cc2`（US-SB-006 绝对 Gap-2 闭合、US-SB-008 双限硬件验证、负载校准模块、occupancy-aware HBM 与 vector-floor soundness 修复）。A.0–A.8 已完成，Part B（实验 / 迭代校准 / 论文）进行中。
