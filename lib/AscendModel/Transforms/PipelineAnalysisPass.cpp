@@ -257,17 +257,17 @@ struct PipelineAnalysisPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     
-    // Load hardware config from file if specified
-    if (!hardwareConfigPath.empty()) {
-      std::string error;
-      if (!loadHardwareConfigFromFile(hardwareConfigPath, error)) {
-        emitError(module.getLoc(), error);
-        return signalPassFailure();
-      }
+    // Load an independent, validated hardware config for this analysis without
+    // mutating process-global state (back-port of triton-ascend #337).
+    std::string hardwareConfigError;
+    auto hardwareConfig =
+        loadHardwareConfigForAnalysis(hardwareConfigPath, hardwareConfigError);
+    if (!hardwareConfig) {
+      emitError(module.getLoc(), hardwareConfigError);
+      return signalPassFailure();
     }
-    
-    const HardwareConfig &config = getHardwareConfig();
-    
+    const HardwareConfig &config = *hardwareConfig;
+
     // Parse bindings
     llvm::DenseMap<unsigned, int64_t> argBindings;
     llvm::StringMap<int64_t> programIdBindings;
@@ -376,22 +376,28 @@ struct PipelineAnalysisPass
       hwUnitCycles[pipelineOp.hwUnit] += pipelineOp.duration * pipelineOp.loopMultiplier;
     }
     
-    // Group by path and apply roofline model
-    // Cube path: max(Cube, CubeMTE2, FixPipe)
+    // Group by path and apply roofline model.
+    // Cube path: max(Cube, CubeMTE2, FixPipe). No cube-side mutex on 910B
+    // (tilesim pipe_exclusive_config only pairs AIV MTE2<->MTE3).
     int64_t cubePathCycles = std::max({
       hwUnitCycles[HWUnit::Cube],
       hwUnitCycles[HWUnit::CubeMTE2],
       hwUnitCycles[HWUnit::FixPipe]
     });
-    
-    // Vector path: max(Vector, VecMTE2, MTE3)
-    int64_t vectorPathCycles = std::max({
-      hwUnitCycles[HWUnit::Vector],
-      hwUnitCycles[HWUnit::VecMTE2],
-      hwUnitCycles[HWUnit::MTE3]
-    });
-    
-    // Total: max of paths (assuming Cube and Vector can overlap)
+
+    // Vector path. Vector compute overlaps with load/store transfers, but on
+    // 910B AIV the MTE2 (load) and MTE3 (store) units share one physical
+    // pipeline (tilesim MutexComponents) and must serialize. With the mutex
+    // the transfer time is VecMTE2 + MTE3; without it (legacy) they are
+    // assumed to overlap (max). This is root cause 3.
+    int64_t vecTransfer;
+    if (config.areMutexUnits("vec_mte2", "mte3"))
+      vecTransfer = hwUnitCycles[HWUnit::VecMTE2] + hwUnitCycles[HWUnit::MTE3];
+    else
+      vecTransfer = std::max(hwUnitCycles[HWUnit::VecMTE2], hwUnitCycles[HWUnit::MTE3]);
+    int64_t vectorPathCycles = std::max(hwUnitCycles[HWUnit::Vector], vecTransfer);
+
+    // Total: max of paths (Cube and Vector paths overlap)
     int64_t rooflineTotalCycles = std::max(cubePathCycles, vectorPathCycles);
     
     // Also calculate simple sum for comparison
@@ -402,6 +408,12 @@ struct PipelineAnalysisPass
     module->setAttr("ascend.scheduled_cycles_one_iter",
                     IntegerAttr::get(IntegerType::get(module.getContext(), 64), oneIterCycles));
     module->setAttr("ascend.roofline_cycles",
+                    IntegerAttr::get(IntegerType::get(module.getContext(), 64), rooflineTotalCycles));
+    // Public summary consumed by the PerfReport pass (and any in-process
+    // costmodel bridge). This must include loop multipliers; otherwise configs
+    // with many inner-loop iterations are under-estimated and can incorrectly
+    // outrank faster configs during costmodel prefiltering (root cause 4).
+    module->setAttr("ascend.scheduled_cycles",
                     IntegerAttr::get(IntegerType::get(module.getContext(), 64), rooflineTotalCycles));
     module->setAttr("ascend.simple_sum_cycles",
                     IntegerAttr::get(IntegerType::get(module.getContext(), 64), simpleSumCycles));

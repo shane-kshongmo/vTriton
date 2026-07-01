@@ -110,10 +110,20 @@ if(TRITONSIM_HAS_BISHENGIR_HIVM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/hivm-cru
   target_link_libraries(hivm-crud
     PRIVATE
     AscendModelTransforms
-    ${TRITONSIM_BISHENGIR_HIVM_LIBS}
+    # NOTE: AscendModelTransforms is an OBJECT library that already PUBLIC-
+    # propagates ${TRITONSIM_BISHENGIR_HIVM_LIBS} (raw bishengir .o objects).
+    # Re-listing them here appended the same objects a second time — CMake does
+    # not de-duplicate raw object-file paths — producing thousands of ODR
+    # "multiple definition" errors (DimensionAnalyzerBase, ValueDependencyAnalyzer,
+    # ...). Rely on the single transitive copy instead.
     MLIRIR
     MLIRParser
     MLIRSupport
+    # The bishengir MemRef/TilingInterface external models pull
+    # linalg::makeTiledShapes; name its providers explicitly, mirroring
+    # tritonsim-opt / tritonsim-hivm (unsatisfied in the submodule CMake config).
+    MLIRLinalgUtils
+    MLIRLinalgTransforms
     LLVMSupport
   )
 

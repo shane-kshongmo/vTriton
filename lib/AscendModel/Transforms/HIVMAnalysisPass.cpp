@@ -36,16 +36,17 @@ struct HIVMAnalysisPass : public impl::HIVMAnalysisPassBase<HIVMAnalysisPass> {
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
-    if (!hardwareConfigPath.empty()) {
-      std::string loadError;
-      if (!loadHardwareConfigFromFile(hardwareConfigPath, loadError)) {
-        module.emitError() << "failed to load hardware config: " << loadError;
-        signalPassFailure();
-        return;
-      }
+    // Load an independent, validated hardware config for this analysis without
+    // mutating process-global state (back-port of triton-ascend #337).
+    std::string loadError;
+    auto hardwareConfig =
+        loadHardwareConfigForAnalysis(hardwareConfigPath, loadError);
+    if (!hardwareConfig) {
+      module.emitError() << "failed to load hardware config: " << loadError;
+      signalPassFailure();
+      return;
     }
-
-    auto &config = getHardwareConfig();
+    const HardwareConfig &config = *hardwareConfig;
     auto schedulerOr = parseSchedulerMode(schedulerMode);
     if (failed(schedulerOr)) {
       module.emitError() << "invalid HIVM scheduler mode `" << schedulerMode

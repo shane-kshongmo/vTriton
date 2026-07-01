@@ -15,6 +15,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Pass/PassOptions.h"
+#include "mlir/Transforms/Passes.h"  // createInlinerPass, createSymbolDCEPass
 
 namespace mlir {
 namespace ascend {
@@ -69,6 +70,17 @@ void registerAscendModelPipeline() {
       "ascend-perf-model",
       "Run the full Ascend 910B performance modeling pipeline",
       [](OpPassManager &pm, const AscendPerfModelPipelineOptions &options) {
+        // Step 0: Inline tt.call / func.call helpers (e.g. softmax's @max/@sum
+        // reduce helpers) BEFORE conversion/estimation. Without this, ops in a
+        // helper invoked from inside a loop are analyzed at the helper's top
+        // level (outside the loop) and receive loopMultiplier=1 instead of the
+        // caller's trip count, so per-iteration ops like reductions are
+        // under-counted (back-port of triton-ascend #608). SymbolDCE then
+        // erases the now-dead private helpers so their ops are not
+        // double-counted alongside the inlined copies.
+        pm.addPass(mlir::createInlinerPass());
+        pm.addPass(mlir::createSymbolDCEPass());
+
         // Step 1: Convert Triton IR to AscendModel IR
         pm.addPass(createConvertTritonToAscendPass());
         
