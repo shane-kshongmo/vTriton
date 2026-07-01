@@ -127,8 +127,13 @@ struct PerfReportPass
       totalCycles += cycles;
     });
     
+    // Prefer the loop-multiplied scheduled summary; fall back to the roofline
+    // summary (also loop-multiplied) before the raw per-op sum (back-port of
+    // triton-ascend #608 — avoids under-counting loop-heavy kernels).
     auto scheduledCyclesAttr = module->getAttrOfType<IntegerAttr>("ascend.scheduled_cycles");
-    int64_t scheduledCycles = scheduledCyclesAttr ? scheduledCyclesAttr.getInt() : totalCycles;
+    auto rooflineCyclesAttr = module->getAttrOfType<IntegerAttr>("ascend.roofline_cycles");
+    int64_t scheduledCycles = scheduledCyclesAttr ? scheduledCyclesAttr.getInt()
+                                                   : (rooflineCyclesAttr ? rooflineCyclesAttr.getInt() : totalCycles);
     
       // Ascend 910B clock: 1.85 GHz = 1850 cycles/us
     constexpr double CYCLES_PER_US = 1850.0;
