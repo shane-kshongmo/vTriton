@@ -352,9 +352,7 @@ class Ascend_ReduceOp<string mnemonic>
   
   let results = (outs AnyType:$result);
 
-  let assemblyFormat = [{
-    $input `axis` $axis attr-dict `:` type($input) `->` type($result)
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 def Ascend_ReduceSumOp : Ascend_ReduceOp<"reduce_sum"> {

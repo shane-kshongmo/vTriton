@@ -50,6 +50,47 @@ using namespace mlir::ascend;
 
 namespace {
 
+static std::string jsonEscape(llvm::StringRef value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  constexpr char kHex[] = "0123456789abcdef";
+  for (unsigned char c : value) {
+    switch (c) {
+    case '\"':
+      escaped += "\\\"";
+      break;
+    case '\\':
+      escaped += "\\\\";
+      break;
+    case '\b':
+      escaped += "\\b";
+      break;
+    case '\f':
+      escaped += "\\f";
+      break;
+    case '\n':
+      escaped += "\\n";
+      break;
+    case '\r':
+      escaped += "\\r";
+      break;
+    case '\t':
+      escaped += "\\t";
+      break;
+    default:
+      if (c < 0x20) {
+        escaped += "\\u00";
+        escaped += kHex[(c >> 4) & 0xf];
+        escaped += kHex[c & 0xf];
+      } else {
+        escaped += static_cast<char>(c);
+      }
+      break;
+    }
+  }
+  return escaped;
+}
+
 struct ParsedOp {
   HIVMOp op;
   std::string definedValue;
@@ -70,6 +111,10 @@ static int64_t estimateMmadL1MTE1Cycles(const ParsedOp &parsed,
 
 static int64_t estimateND2NZCycles(const ParsedOp &parsed,
                                    const HardwareConfig &config);
+static void finalizeScheduledReport(HIVMAnalysisReport &report,
+                                    const HardwareConfig &config);
+static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
+                                        const HardwareConfig &config);
 
 static std::vector<HIVMOp> expandMacroOp(const ParsedOp &parsed,
                                          const HardwareConfig &config) {
@@ -537,10 +582,21 @@ static void eraseAttributeAssignment(std::string &line, llvm::StringRef name) {
     if (pos == std::string::npos)
       return;
 
-    size_t valueStart = line.find('#', pos + needle.size());
-    if (valueStart == std::string::npos)
+    size_t cursor = pos + needle.size();
+    while (cursor < line.size() && line[cursor] == ' ')
+      ++cursor;
+    if (cursor >= line.size() || line[cursor] != '=')
       return;
-    size_t valueEnd = line.find('>', valueStart);
+    ++cursor;
+    while (cursor < line.size() && line[cursor] == ' ')
+      ++cursor;
+    if (cursor >= line.size())
+      return;
+
+    char opener = line[cursor];
+    if (opener != '#' && opener != '<')
+      return;
+    size_t valueEnd = line.find('>', cursor);
     if (valueEnd == std::string::npos)
       return;
     ++valueEnd;
@@ -582,7 +638,9 @@ static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
           trimmed.starts_with("[WARNING]") || trimmed.starts_with("[INFO]"))
         continue;
       std::string l = line.str();
-      // Replace #hivm.address_space<xxx> with integer memory space
+#ifndef TRITONSIM_HAS_BISHENGIR_HIVM
+      // Replace #hivm.address_space<xxx> with integer memory space when the
+      // typed HIVM dialect is unavailable.
       while (auto pos = l.find("#hivm.address_space<")) {
         auto end = l.find('>', pos);
         if (end == std::string::npos) break;
@@ -597,6 +655,7 @@ static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
         else if (space == "cbuf") num = 6;
         l.replace(pos, end - pos + 1, std::to_string(num));
       }
+#endif
       // Strip whole custom attribute assignments whose values require
       // external dialect parsers.
       eraseAttributeAssignment(l, "hacc.arg_type");
@@ -2549,6 +2608,275 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
                         replayIterations);
 }
 
+static std::string textLeafOpName(llvm::StringRef record) {
+  size_t pos = record.find("hivm.hir.");
+  if (pos == llvm::StringRef::npos)
+    return "";
+  pos += strlen("hivm.hir.");
+  size_t end = pos;
+  while (end < record.size()) {
+    char c = record[end];
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+      break;
+    ++end;
+  }
+  return record.slice(pos, end).str();
+}
+
+static std::string textCurrentCoreType(llvm::StringRef funcName) {
+  if (funcName.contains("aic") || funcName.contains("AIC") ||
+      funcName.contains("cube"))
+    return "CUBE";
+  if (funcName.contains("aiv") || funcName.contains("AIV") ||
+      funcName.contains("vector") || funcName.contains("mix"))
+    return "VECTOR";
+  return "";
+}
+
+static std::string textFuncName(llvm::StringRef line) {
+  size_t at = line.find('@');
+  if (at == llvm::StringRef::npos)
+    return "";
+  size_t end = at + 1;
+  while (end < line.size()) {
+    char c = line[end];
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '.')
+      break;
+    ++end;
+  }
+  return line.slice(at + 1, end).str();
+}
+
+static llvm::SmallVector<llvm::StringRef, 4>
+textStaticOperands(llvm::StringRef record) {
+  llvm::SmallVector<llvm::StringRef, 4> tokens;
+  size_t open = record.find('[');
+  if (open == llvm::StringRef::npos)
+    return tokens;
+  size_t close = record.find(']', open + 1);
+  if (close == llvm::StringRef::npos)
+    return tokens;
+  llvm::StringRef body = record.slice(open + 1, close);
+  body.split(tokens, ',', -1, false);
+  for (llvm::StringRef &token : tokens)
+    token = token.trim();
+  return tokens;
+}
+
+static std::string textDynamicEventToken(llvm::StringRef record) {
+  size_t bracketEnd = record.find(']');
+  if (bracketEnd == llvm::StringRef::npos)
+    return "";
+  size_t pos = record.find('%', bracketEnd);
+  if (pos == llvm::StringRef::npos)
+    return "";
+  size_t end = pos + 1;
+  while (end < record.size()) {
+    char c = record[end];
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+      break;
+    ++end;
+  }
+  return ("dyn_" + record.slice(pos + 1, end).str());
+}
+
+static std::string textEventToken(llvm::StringRef record,
+                                  llvm::ArrayRef<llvm::StringRef> operands,
+                                  size_t staticIndex) {
+  if (staticIndex < operands.size()) {
+    llvm::StringRef token = operands[staticIndex];
+    if (token.contains("EVENT_ID"))
+      return parseEventToken(token);
+    if (token.contains("FLAG_ID") || token.contains("BLOCK_ID"))
+      return token.trim("<>").str();
+  }
+  return textDynamicEventToken(record);
+}
+
+static int64_t textCountChar(llvm::StringRef line, char needle) {
+  int64_t n = 0;
+  for (char c : line)
+    if (c == needle)
+      ++n;
+  return n;
+}
+
+static ParsedOp parseSemanticHivmRecord(llvm::StringRef record,
+                                        llvm::StringRef currentFunc,
+                                        int lineNumber,
+                                        const HardwareConfig &config) {
+  ParsedOp parsed;
+  parsed.op.opName = textLeafOpName(record);
+  parsed.op.text = record.str();
+  parsed.op.lineNumber = lineNumber;
+  parsed.op.loopMultiplier = 1;
+  parsed.op.coreType = textCurrentCoreType(currentFunc);
+  parsed.op.bytes = parseMemRefBytes(record);
+  parsed.op.elements = parseMemRefElementCount(record);
+  parsed.op.packetBytes = parsed.op.bytes;
+
+  auto spaces = parseLoadStoreSpaces(record);
+  parsed.op.srcSpace = spaces.first;
+  parsed.op.dstSpace = spaces.second;
+  {
+    size_t memrefPos = record.find("memref<");
+    if (memrefPos != llvm::StringRef::npos) {
+      size_t addrPos = record.find(", #hivm.address_space<", memrefPos);
+      if (addrPos != llvm::StringRef::npos) {
+        llvm::StringRef shapeAndType = record.slice(memrefPos + 7, addrPos);
+        llvm::SmallVector<llvm::StringRef, 8> parts;
+        shapeAndType.split(parts, 'x', -1, false);
+        if (!parts.empty())
+          parsed.op.elemType = trim(parts.back()).str();
+      }
+    }
+  }
+
+  llvm::SmallVector<llvm::StringRef, 4> operands =
+      textStaticOperands(record);
+  llvm::StringRef name = parsed.op.opName;
+  if (name == "pipe_barrier") {
+    parsed.op.isSyncOp = true;
+    parsed.op.isBarrier = true;
+    HIVMPipe rawPipe = operands.empty() ? HIVMPipe::All : parsePipeToken(operands[0]);
+    parsed.op.pipe =
+        disambiguateMTE2Pipe(rawPipe, HIVMPipe::Unknown, parsed.op.coreType);
+    parsed.barrierPipes.push_back(parsed.op.pipe);
+  } else if (name == "set_flag" || name == "wait_flag") {
+    parsed.op.isSyncOp = true;
+    HIVMPipe setPipe = operands.size() > 0 ? parsePipeToken(operands[0])
+                                           : HIVMPipe::Unknown;
+    HIVMPipe waitPipe = operands.size() > 1 ? parsePipeToken(operands[1])
+                                            : HIVMPipe::Unknown;
+    parsed.senderPipe =
+        disambiguateMTE2Pipe(setPipe, waitPipe, parsed.op.coreType);
+    parsed.receiverPipe =
+        disambiguateMTE2Pipe(waitPipe, parsed.senderPipe, parsed.op.coreType);
+    parsed.eventId = textEventToken(record, operands, 2);
+    parsed.op.pipe = name == "set_flag" ? parsed.senderPipe : parsed.receiverPipe;
+  } else if (name == "sync_block_set" || name == "sync_block_wait") {
+    parsed.op.isSyncOp = true;
+    parsed.op.isBarrier = name == "sync_block_wait";
+    parsed.senderPipe =
+        operands.size() > 1 ? parsePipeToken(operands[1]) : HIVMPipe::Unknown;
+    parsed.receiverPipe =
+        operands.size() > 2 ? parsePipeToken(operands[2]) : HIVMPipe::Unknown;
+    parsed.eventId = textEventToken(record, operands, 3);
+    parsed.op.pipe =
+        name == "sync_block_wait" ? HIVMPipe::All : parsed.senderPipe;
+    if (parsed.op.isBarrier)
+      parsed.barrierPipes.push_back(HIVMPipe::All);
+  } else if (name == "sync_block") {
+    parsed.op.isSyncOp = true;
+    parsed.op.isBarrier = true;
+    parsed.op.pipe = HIVMPipe::All;
+    parsed.barrierPipes.push_back(HIVMPipe::All);
+  } else if (name == "load") {
+    parsed.op.pipe = selectMTE2PipeForSpaces(parsed.op.srcSpace,
+                                             parsed.op.dstSpace,
+                                             parsed.op.coreType);
+  } else if (name == "store") {
+    parsed.op.pipe = HIVMPipe::MTE3;
+  } else if (name == "fixpipe") {
+    parsed.op.pipe = HIVMPipe::FixPipe;
+  } else if (name == "copy") {
+    if (parsed.op.dstSpace == "gm")
+      parsed.op.pipe = HIVMPipe::MTE3;
+    else if (parsed.op.dstSpace == "l1")
+      parsed.op.pipe = HIVMPipe::CubeMTE2;
+    else
+      parsed.op.pipe = HIVMPipe::Vector;
+  } else if (name == "nd2nz") {
+    parsed.op.pipe = HIVMPipe::CubeMTE2;
+  } else if (name == "nz2nd") {
+    parsed.op.pipe = HIVMPipe::MTE3;
+  } else if (name == "pointer_cast" || name == "convert_layout") {
+    parsed.op.pipe = HIVMPipe::Unknown;
+  } else if (isCubeOpName(name)) {
+    parsed.op.pipe = HIVMPipe::Cube;
+  } else {
+    parsed.op.pipe = HIVMPipe::Vector;
+  }
+
+  attachSyncMetadata(parsed);
+  if (parsed.op.repeat == 1 && parsed.op.elements > 0 && parsed.op.bytes > 0) {
+    int64_t bitsPerElem = (parsed.op.bytes * 8) / parsed.op.elements;
+    if (bitsPerElem > 0) {
+      int64_t laneCount = std::max<int64_t>(1, 2048 / bitsPerElem);
+      parsed.op.repeat = (parsed.op.elements + laneCount - 1) / laneCount;
+    }
+  }
+  parsed.op.duration = estimateDuration(parsed, config);
+  return parsed;
+}
+
+static void finalizeSemanticReport(HIVMAnalysisReport &report,
+                                   const HardwareConfig &config,
+                                   HIVMSchedulerMode schedulerMode) {
+  if (schedulerMode == HIVMSchedulerMode::DES)
+    finalizeDiscreteEventReport(report, config);
+  else
+    finalizeScheduledReport(report, config);
+}
+
+static bool analyzeSemanticHivmBuffer(llvm::StringRef buffer,
+                                      llvm::StringRef path,
+                                      HIVMAnalysisReport &report,
+                                      const HardwareConfig &config,
+                                      llvm::StringRef argBindings,
+                                      HIVMSchedulerMode schedulerMode) {
+  if (!buffer.contains("hivm.hir."))
+    return false;
+
+  report = HIVMAnalysisReport();
+  report.sourcePath = path.str();
+  report.sourceMode = "direct-hivm-semantic";
+  report.schedulerMode = schedulerMode;
+
+  AnalysisState state;
+  state.argBindings = parseArgBindings(argBindings);
+  std::string currentFunc;
+  llvm::SmallVector<llvm::StringRef, 0> lines;
+  buffer.split(lines, '\n');
+
+  for (size_t i = 0; i < lines.size(); ++i) {
+    llvm::StringRef line = lines[i];
+    llvm::StringRef trimmed = line.trim();
+    if (trimmed.starts_with("func.func"))
+      currentFunc = textFuncName(trimmed);
+    size_t opPos = line.find("hivm.hir.");
+    if (opPos == llvm::StringRef::npos)
+      continue;
+
+    std::string record = line.str();
+    int64_t parenBalance = textCountChar(line, '(') - textCountChar(line, ')');
+    int64_t bracketBalance =
+        textCountChar(line, '[') - textCountChar(line, ']');
+    int64_t angleBalance = textCountChar(line, '<') - textCountChar(line, '>');
+    int startLine = static_cast<int>(i + 1);
+    while ((parenBalance > 0 || bracketBalance > 0 || angleBalance > 0) &&
+           i + 1 < lines.size()) {
+      ++i;
+      record += "\n";
+      record += lines[i].str();
+      parenBalance += textCountChar(lines[i], '(') - textCountChar(lines[i], ')');
+      bracketBalance += textCountChar(lines[i], '[') - textCountChar(lines[i], ']');
+      angleBalance += textCountChar(lines[i], '<') - textCountChar(lines[i], '>');
+    }
+
+    ParsedOp parsed =
+        parseSemanticHivmRecord(record, currentFunc, startLine, config);
+    if (parsed.op.opName.empty())
+      continue;
+    ingestParsedOp(parsed, state, report, config);
+  }
+
+  if (report.operations.empty())
+    return false;
+  finalizeSemanticReport(report, config, schedulerMode);
+  return true;
+}
+
 static void finalizeScheduledReport(HIVMAnalysisReport &report,
                                     const HardwareConfig &config) {
   std::map<HIVMPipe, int64_t> pipeAvailableAt;
@@ -3069,6 +3397,10 @@ bool HIVMAnalyzer::analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
   }
 
   llvm::StringRef rawBuffer = fileOrErr.get()->getBuffer();
+  if (analyzeSemanticHivmBuffer(rawBuffer, path, report, config,
+                                argBindingsStr, schedulerMode))
+    return true;
+
   std::string sanitized = sanitizeMlirBuffer(rawBuffer);
   report = HIVMAnalysisReport();
   report.sourcePath = path.str();
@@ -3097,11 +3429,16 @@ bool HIVMAnalyzer::analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
         });
 
     llvm::SmallVector<llvm::StringRef, 2> parseCandidates;
-    parseCandidates.push_back(rawBuffer);
+    // Prefer the sanitized buffer for direct NPUIR dumps. Some dump-only
+    // attributes parse without verifier but can still trip dialect-specific
+    // accessors during analysis; these attributes do not affect scheduling.
     if (sanitized != rawBuffer)
       parseCandidates.push_back(sanitized);
+    parseCandidates.push_back(rawBuffer);
+    mlir::ParserConfig parserConfig(&context, /*verifyAfterParse=*/false);
     for (llvm::StringRef buffer : parseCandidates) {
-      if (auto module = mlir::parseSourceString<mlir::ModuleOp>(buffer, &context)) {
+      if (auto module =
+              mlir::parseSourceString<mlir::ModuleOp>(buffer, parserConfig)) {
         if (!analyzeModule(*module, report, error))
           return false;
         report.sourcePath = path.str();
@@ -3278,7 +3615,7 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
     for (size_t i = 0; i < values.size(); ++i) {
       if (i)
         ss << ";";
-      ss << values[i];
+      ss << jsonEscape(values[i]);
     }
     ss.flush();
     return joined;
@@ -3361,14 +3698,14 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
        << ",\"tid\":" << pipeTid(op.pipe)
        << ",\"ts\":" << llvm::format("%.3f", cyclesToTraceUs(op.startCycle))
        << ",\"dur\":" << llvm::format("%.3f", cyclesToTraceUs(op.duration))
-       << ",\"name\":\"" << op.opName << "\",\"args\":{"
+       << ",\"name\":\"" << jsonEscape(op.opName) << "\",\"args\":{"
        << "\"line\":" << op.lineNumber
        << ",\"cycles\":" << op.duration
        << ",\"loop_multiplier\":" << op.loopMultiplier
        << ",\"bytes\":" << op.bytes
        << ",\"packet_bytes\":" << op.packetBytes
        << ",\"elements\":" << op.elements
-       << ",\"event_id\":\"" << op.eventId << "\""
+       << ",\"event_id\":\"" << jsonEscape(op.eventId) << "\""
        << ",\"event_generation\":" << op.eventGeneration
        << ",\"sender_pipe\":\"" << HIVMAnalyzer::stringifyPipe(op.senderPipe)
        << "\""
@@ -3378,12 +3715,12 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
        << ",\"write_buffers\":\"" << joinStrings(op.writeBuffers) << "\""
        << ",\"read_versions\":\"" << joinInts(op.readBufferVersions) << "\""
        << ",\"write_versions\":\"" << joinInts(op.writeBufferVersions) << "\""
-       << ",\"core_type\":\"" << op.coreType << "\""
+       << ",\"core_type\":\"" << jsonEscape(op.coreType) << "\""
        << ",\"sync\":" << (op.isSyncOp ? "true" : "false")
        << ",\"barrier\":" << (op.isBarrier ? "true" : "false")
-       << ",\"src_space\":\"" << op.srcSpace << "\""
-       << ",\"dst_space\":\"" << op.dstSpace << "\""
-       << ",\"elem_type\":\"" << op.elemType << "\""
+       << ",\"src_space\":\"" << jsonEscape(op.srcSpace) << "\""
+       << ",\"dst_space\":\"" << jsonEscape(op.dstSpace) << "\""
+       << ",\"elem_type\":\"" << jsonEscape(op.elemType) << "\""
        << "}}";
   }
 
@@ -3449,7 +3786,7 @@ void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
     ss << "[";
     for (size_t i = 0; i < v.size(); ++i) {
       if (i) ss << ",";
-      ss << "\"" << v[i] << "\"";
+      ss << "\"" << jsonEscape(v[i]) << "\"";
     }
     ss << "]";
     ss.flush();
@@ -3492,7 +3829,7 @@ void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
     if (i) os << ",\n";
     os << "    {"
        << "\"id\":" << op.id
-       << ",\"name\":\"" << op.opName << "\""
+       << ",\"name\":\"" << jsonEscape(op.opName) << "\""
        << ",\"pipe\":\"" << HIVMAnalyzer::stringifyPipe(op.pipe) << "\""
        << ",\"duration\":" << op.duration
        << ",\"start_cycle\":" << op.startCycle
@@ -3501,13 +3838,13 @@ void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
        << ",\"depends_on\":" << joinSizeVec(op.dependsOn)
        << ",\"is_sync\":" << (op.isSyncOp ? "true" : "false")
        << ",\"is_barrier\":" << (op.isBarrier ? "true" : "false")
-       << ",\"event_id\":\"" << op.eventId << "\""
+       << ",\"event_id\":\"" << jsonEscape(op.eventId) << "\""
        << ",\"event_generation\":" << op.eventGeneration
        << ",\"sender_pipe\":\"" << HIVMAnalyzer::stringifyPipe(op.senderPipe)
        << "\""
        << ",\"receiver_pipe\":\"" << HIVMAnalyzer::stringifyPipe(op.receiverPipe)
        << "\""
-       << ",\"core_type\":\"" << op.coreType << "\""
+       << ",\"core_type\":\"" << jsonEscape(op.coreType) << "\""
        << ",\"bytes\":" << op.bytes
        << ",\"packet_bytes\":" << op.packetBytes
        << ",\"elements\":" << op.elements
@@ -3518,9 +3855,9 @@ void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
        << ",\"write_buffers\":" << joinStrVec(op.writeBuffers)
        << ",\"read_versions\":" << joinIntVec(op.readBufferVersions)
        << ",\"write_versions\":" << joinIntVec(op.writeBufferVersions)
-       << ",\"src_space\":\"" << op.srcSpace << "\""
-       << ",\"dst_space\":\"" << op.dstSpace << "\""
-       << ",\"elem_type\":\"" << op.elemType << "\""
+       << ",\"src_space\":\"" << jsonEscape(op.srcSpace) << "\""
+       << ",\"dst_space\":\"" << jsonEscape(op.dstSpace) << "\""
+       << ",\"elem_type\":\"" << jsonEscape(op.elemType) << "\""
        << ",\"repeat\":" << op.repeat
        << ",\"mask\":" << op.mask
        << "}";

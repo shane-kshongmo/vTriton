@@ -15,7 +15,7 @@ module {
       : tensor<16x16xf32> -> tensor<16x16xf32>
     
     // Step 1: Find max along axis 1 for numerical stability
-    %max = ascend.reduce_max %input_loaded axis = 1 
+    %max = ascend.reduce_max %input_loaded axis 1 
       : tensor<16x16xf32> -> tensor<16x1xf32>
     
     // Step 2: Broadcast max back to original shape
@@ -31,7 +31,7 @@ module {
       : tensor<16x16xf32> -> tensor<16x16xf32>
     
     // Step 5: Sum along axis 1
-    %sum = ascend.reduce_sum %exp_val axis = 1 
+    %sum = ascend.reduce_sum %exp_val axis 1 
       : tensor<16x16xf32> -> tensor<16x1xf32>
     
     // Step 6: Broadcast sum
@@ -53,7 +53,7 @@ module {
     %input_loaded = ascend.vector_load %input {bytes = 262144 : i64} 
       : tensor<256x256xf32> -> tensor<256x256xf32>
     
-    %max = ascend.reduce_max %input_loaded axis = 1 
+    %max = ascend.reduce_max %input_loaded axis 1 
       : tensor<256x256xf32> -> tensor<256x1xf32>
     
     %max_broadcast = ascend.broadcast %max to [256, 256] 
@@ -65,7 +65,7 @@ module {
     %exp_val = ascend.exp %shifted 
       : tensor<256x256xf32> -> tensor<256x256xf32>
     
-    %sum = ascend.reduce_sum %exp_val axis = 1 
+    %sum = ascend.reduce_sum %exp_val axis 1 
       : tensor<256x256xf32> -> tensor<256x1xf32>
     
     %sum_broadcast = ascend.broadcast %sum to [256, 256] 

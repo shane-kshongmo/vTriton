@@ -26,7 +26,7 @@ module {
       : tensor<768xf32> -> tensor<768xf32>
 
     // Step 1: Compute mean = sum(x, axis=1) / N
-    %sum = ascend.reduce_sum %x axis = 1
+    %sum = ascend.reduce_sum %x axis 1
       : tensor<32x768xf32> -> tensor<32x1xf32>
     %n_broadcast = ascend.broadcast %sum to [32, 1]
       : tensor<32x1xf32> -> tensor<32x1xf32>
@@ -43,7 +43,7 @@ module {
     // Step 3: Compute variance = sum(x_centered^2, axis=1) / N
     %x_sq = ascend.mul %x_centered, %x_centered
       : (tensor<32x768xf32>, tensor<32x768xf32>) -> tensor<32x768xf32>
-    %var_sum = ascend.reduce_sum %x_sq axis = 1
+    %var_sum = ascend.reduce_sum %x_sq axis 1
       : tensor<32x768xf32> -> tensor<32x1xf32>
 
     // Step 4: Compute rstd = 1 / sqrt(variance + eps)
@@ -87,7 +87,7 @@ module {
       : tensor<4096xf32> -> tensor<4096xf32>
 
     // Mean
-    %sum = ascend.reduce_sum %x axis = 1
+    %sum = ascend.reduce_sum %x axis 1
       : tensor<8x4096xf32> -> tensor<8x1xf32>
     %mean_broadcast = ascend.broadcast %sum to [8, 4096]
       : tensor<8x1xf32> -> tensor<8x4096xf32>
@@ -97,7 +97,7 @@ module {
     // Variance
     %x_sq = ascend.mul %x_centered, %x_centered
       : (tensor<8x4096xf32>, tensor<8x4096xf32>) -> tensor<8x4096xf32>
-    %var_sum = ascend.reduce_sum %x_sq axis = 1
+    %var_sum = ascend.reduce_sum %x_sq axis 1
       : tensor<8x4096xf32> -> tensor<8x1xf32>
 
     // Rsqrt
