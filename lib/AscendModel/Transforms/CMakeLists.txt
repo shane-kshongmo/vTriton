@@ -34,6 +34,7 @@ add_mlir_library(AscendModelTransforms
 if(TRITONSIM_HAS_BISHENGIR_HIVM)
   target_sources(obj.AscendModelTransforms PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/HivmOpsEditor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/HivmCompiler.cpp
   )
   target_include_directories(obj.AscendModelTransforms SYSTEM PUBLIC
     ${TRITONSIM_BISHENGIR_INCLUDE_DIRS}
