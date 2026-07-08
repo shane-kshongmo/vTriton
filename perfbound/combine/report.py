@@ -534,8 +534,10 @@ class KernelReport:
             pts = profile_report.exposed_control_deficit_pts
             pts_str = f", +{pts * 100:.0f} pts exposed" if pts is not None else ""
             self.recommended_action = (
-                f"Profile-guided hypothesis: investigate sync barriers "
-                f"({n_sync} ops{pts_str}); validate any PIPE_S/pipe_barrier "
+                f"Profile-guided hypothesis: reduce scalar/control exposure "
+                f"from loop/tile structure and sync barriers ({n_sync} sync ops"
+                f"{pts_str}); try safe tile-size or exact-shape fast-path "
+                f"variants before scalar-throughput tuning, and validate each "
                 f"change with a correctness-checked hardware counterfactual"
             )
         elif diag == "Insufficient Parallelism":

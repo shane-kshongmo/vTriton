@@ -215,6 +215,57 @@ The grid is a *fifth*, separate axis — it lives in Tier 1, above all four
 per-core gaps, and is the spatial-partitioning dimension the single-core
 paper never had to consider.
 
+### Supplement — Control-Loop Multiplicity as an R-Axis Loss
+
+Some kernels show high measured scalar/control residency even when there is no
+wrong-unit placement and no scalar arithmetic bottleneck. In U = E × R terms,
+this is not primarily an `E_scalar` throughput problem. It is an R-axis exposure
+problem: the vector/cube work is repeatedly wrapped by scalar address math,
+predicates, loop counters, barriers, and branch structure, so the compute units
+are not resident often enough on useful vector/cube work.
+
+This pattern is distinct from Gap 1:
+
+- Gap 1 asks whether vectorizable work fell back to Scalar.
+- Control-loop multiplicity asks whether legal tiling and fusion choices create
+  too many scalar/control episodes around otherwise valid vector/cube work.
+
+The diagnostic signature is:
+
+1. msprof shows high same-core scalar ratio (`aiv_scalar_ratio` or equivalent).
+2. cube/vector arithmetic time is small relative to wall time.
+3. HIVM/DES shows scalar/control dominated by metadata, address arithmetic,
+   predicates, sync, and loop scaffolding rather than vectorizable scalar data
+   work.
+4. A tile or split experiment that reduces loop trip count also reduces measured
+   scalar time and wall time.
+
+The recommended first remedies are therefore not scalar-throughput calibration
+or "make scalar faster". They are structural rewrites that reduce the number of
+control episodes:
+
+- increase a safe tile dimension to reduce loop trip count;
+- split one-time branch work out of an inner loop;
+- specialize an exact-shape/no-tail fast path to remove masks and boundary
+  checks;
+- change layout to remove dynamic/discrete address paths;
+- only then consider lower-level scalar scheduling improvements.
+
+**Case study: package KDA backward.**  On 2026-07-02, the package kernel
+`chunk_kda_bwd_kernel_wy_dqkg_fused` at `B=1,T=8192,H=32,K=V=128` measured
+`202,922.196 us`, with `aiv_scalar_time=179,472.095 us` and
+`aiv_scalar_ratio=0.886`. A tile-only experiment changed the fused backward
+config from `BK=32,BV=32` to `BK=64,BV=32`; this reduced the same profiler row
+to `151,580.128 us` and reduced `aiv_scalar_time` by `42,266.444 us`.
+`BK=64,BV=64` failed due UB overflow, and removing `tl.debug_barrier()` did not
+help. Evidence is recorded in
+`.omc/research/hw_runs/kda_package_20260702/EXPERIMENTS.md`.
+
+This validates the supplement's prediction: when scalar/control residency is
+caused by loop/control multiplicity, the attainable headroom is bounded by how
+much legal tiling or specialization can reduce control exposure, not by a
+generic scalar peak-rate term.
+
 ### Gap 1 — Wrong-Unit Placement (R-axis, placement)
 
 An op that should run on Vector (high P) lands on Scalar (low P) — e.g.

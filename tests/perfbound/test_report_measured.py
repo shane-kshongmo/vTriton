@@ -248,6 +248,8 @@ def test_merge_profile_overrides_recommendation_when_headroom_large():
     report.merge_profile(_make_mock_profile())
     assert "402" in report.recommended_action
     assert "barrier" in report.recommended_action.lower() or "sync" in report.recommended_action.lower()
+    assert "tile" in report.recommended_action.lower()
+    assert "scalar-throughput" in report.recommended_action.lower()
 
 
 def test_merge_profile_no_override_when_headroom_small():
