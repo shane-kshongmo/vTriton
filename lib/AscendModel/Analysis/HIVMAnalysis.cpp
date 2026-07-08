@@ -45,6 +45,7 @@
 #include <queue>
 #include <sstream>
 #include <tuple>
+#include <vector>
 
 using namespace mlir::ascend;
 
@@ -656,17 +657,37 @@ static std::string sanitizeMlirBuffer(llvm::StringRef buffer) {
         l.replace(pos, end - pos + 1, std::to_string(num));
       }
 #endif
-      // Strip whole custom attribute assignments whose values require
-      // external dialect parsers.
+      // Strip whole custom attribute assignments only when the typed dialects
+      // are unavailable.  When they are registered, keep hacc.arg_type so
+      // argument binding remains consistent with the MLIR pass path.
+#ifndef TRITONSIM_HAS_BISHENGIR_HIVM
       eraseAttributeAssignment(l, "hacc.arg_type");
       eraseAttributeAssignment(l, "hivm.func_core_type");
       eraseAttributeAssignment(l, "hacc.function_kind");
+#endif
       os << l << "\n";
     }
     os.flush();
   }
 
   return preprocessed;
+}
+
+static std::string wrapBareMlirModule(llvm::StringRef buffer) {
+  llvm::StringRef trimmed = buffer.trim();
+  if (trimmed.empty() || trimmed.starts_with("module"))
+    return buffer.str();
+
+  std::string wrapped;
+  llvm::raw_string_ostream os(wrapped);
+  os << "module {\n";
+  llvm::SmallVector<llvm::StringRef, 0> lines;
+  buffer.split(lines, '\n');
+  for (llvm::StringRef line : lines)
+    os << "  " << line << "\n";
+  os << "}\n";
+  os.flush();
+  return wrapped;
 }
 
 static bool startsWithHivmOp(mlir::Operation *op) {
@@ -2394,14 +2415,47 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
     // not bleed across functions.  Only preserve arg-bindings.
     AnalysisState funcState;
     funcState.argBindings = state.argBindings;
-    unsigned userArgIndex = 0;
+    std::optional<unsigned> minBoundArgIndex;
+    for (const auto &entry : funcState.argBindings) {
+      llvm::StringRef name(entry.first);
+      if (!name.consume_front("arg"))
+        continue;
+      unsigned idxValue = 0;
+      if (name.getAsInteger(10, idxValue))
+        continue;
+      if (!minBoundArgIndex || idxValue < *minBoundArgIndex)
+        minBoundArgIndex = idxValue;
+    }
+
+    std::optional<unsigned> firstScalarArgIndex;
     for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
       if (funcOp.getArgAttr(idx, "hacc.arg_type"))
         continue;
-      auto bindIt =
+      if (llvm::isa<mlir::MemRefType>(arg.getType()))
+        continue;
+      firstScalarArgIndex = idx;
+      break;
+    }
+
+    bool preferActualArgNames =
+        minBoundArgIndex && firstScalarArgIndex &&
+        *minBoundArgIndex >= *firstScalarArgIndex;
+
+    unsigned userArgIndex = 0;
+    for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
+      if (preferActualArgNames) {
+        auto actualBindIt =
+            funcState.argBindings.find("arg" + std::to_string(idx));
+        if (actualBindIt != funcState.argBindings.end())
+          funcState.boundValues[arg] = actualBindIt->second;
+      }
+
+      if (funcOp.getArgAttr(idx, "hacc.arg_type"))
+        continue;
+      auto userBindIt =
           funcState.argBindings.find("arg" + std::to_string(userArgIndex++));
-      if (bindIt != funcState.argBindings.end())
-        funcState.boundValues[arg] = bindIt->second;
+      if (!preferActualArgNames && userBindIt != funcState.argBindings.end())
+        funcState.boundValues[arg] = userBindIt->second;
     }
     analyzeParsedRegion(funcOp.getBody(), loopMultiplier, funcState, report,
                         config, replayIterations);
@@ -2427,7 +2481,7 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
         if (hasConcreteInductionValue)
           loopState.boundValues[forOp.getInductionVar()] =
               lowerBound + iter * step;
-        analyzeParsedRegion(op->getRegion(0), nestedMultiplier, loopState, report,
+        analyzeParsedRegion(op->getRegion(0), loopMultiplier, loopState, report,
                             config, replayIterations);
         if (iter + 1 < tripCount)
           advanceLoopCarriedState(forOp, loopState);
@@ -3397,15 +3451,7 @@ bool HIVMAnalyzer::analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
   }
 
   llvm::StringRef rawBuffer = fileOrErr.get()->getBuffer();
-  if (analyzeSemanticHivmBuffer(rawBuffer, path, report, config,
-                                argBindingsStr, schedulerMode))
-    return true;
-
   std::string sanitized = sanitizeMlirBuffer(rawBuffer);
-  report = HIVMAnalysisReport();
-  report.sourcePath = path.str();
-  report.sourceMode = "direct-hivm";
-  report.schedulerMode = schedulerMode;
 
   {
     mlir::DialectRegistry registry;
@@ -3428,13 +3474,18 @@ bool HIVMAnalyzer::analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
           return mlir::success();
         });
 
-    llvm::SmallVector<llvm::StringRef, 2> parseCandidates;
-    // Prefer the sanitized buffer for direct NPUIR dumps. Some dump-only
-    // attributes parse without verifier but can still trip dialect-specific
-    // accessors during analysis; these attributes do not affect scheduling.
-    if (sanitized != rawBuffer)
+    std::vector<std::string> parseCandidates;
+    // Prefer MLIR-native analysis so scf.for trip counts, arg bindings, and
+    // program-id-dependent bounds are reflected in loop_multiplier.  Some
+    // dumped NPUIR files are bare func.func bodies with trailing compiler
+    // warnings, so sanitize and wrap before falling back to the text scanner.
+    parseCandidates.push_back(wrapBareMlirModule(sanitized));
+    if (sanitized != parseCandidates.front())
       parseCandidates.push_back(sanitized);
-    parseCandidates.push_back(rawBuffer);
+    if (sanitized != rawBuffer)
+      parseCandidates.push_back(wrapBareMlirModule(rawBuffer));
+    parseCandidates.push_back(rawBuffer.str());
+
     mlir::ParserConfig parserConfig(&context, /*verifyAfterParse=*/false);
     for (llvm::StringRef buffer : parseCandidates) {
       if (auto module =
@@ -3442,17 +3493,21 @@ bool HIVMAnalyzer::analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
         if (!analyzeModule(*module, report, error))
           return false;
         report.sourcePath = path.str();
-        report.sourceMode = "direct-hivm";
+        report.sourceMode = "direct-hivm-mlir";
         return true;
       }
     }
+
+    if (analyzeSemanticHivmBuffer(rawBuffer, path, report, config,
+                                  argBindingsStr, schedulerMode))
+      return true;
+
     error = "failed to parse HIVM MLIR module";
     if (!parseDiagnostics.empty())
       error += ":\n" + parseDiagnostics;
     return false;
   }
 }
-
 bool HIVMAnalyzer::analyzeModule(mlir::ModuleOp module,
                                  HIVMAnalysisReport &report,
                                  std::string &error) const {
