@@ -153,6 +153,7 @@ def report_from_npuir(
     op_summary_csv: "str | Path | None" = None,
     op_name_filter: "str | None" = None,
     calibration_source: "str | Path | None" = None,
+    des_json_path: "str | Path | None" = None,
 ) -> KernelReport:
     """Build a full A.5 report by first running tritonsim-hivm on an NPU IR file.
 
@@ -167,6 +168,8 @@ def report_from_npuir(
         kernel_name: Kernel label.
         tritonsim_hivm: Path to tritonsim-hivm binary.
         python_path: Python interpreter for tritonsim-hivm.
+        des_json_path: Where to keep the intermediate DES graph.  When None the
+            graph goes to a scratch file that is removed before returning.
 
     Returns:
         KernelReport.
@@ -179,13 +182,17 @@ def report_from_npuir(
         raise FileNotFoundError(f"NPU IR file not found: {npuir_path}")
 
     # Run tritonsim-hivm to produce DES graph
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        des_path = f.name
+    if des_json_path is not None:
+        des_path = Path(des_json_path)
+        des_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            des_path = Path(f.name)
 
     cmd = [
         tritonsim_hivm,
         "--npuir-file", str(npuir_path),
-        "--des-graph-file", des_path,
+        "--des-graph-file", str(des_path),
     ]
     if hardware_config:
         cmd.extend(["--hardware-config", str(hardware_config)])
@@ -195,24 +202,27 @@ def report_from_npuir(
 
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+        return report_from_desgraph(
+            des_json=str(des_path),
+            grid_dims=grid_dims,
+            calib_db=calib_db,
+            n_cores=n_cores,
+            occupancy=occupancy,
+            load_balance=load_balance,
+            kernel_name=kernel_name,
+            t_measured_us=t_measured_us,
+            op_summary_csv=op_summary_csv,
+            op_name_filter=op_name_filter,
+            calibration_source=calibration_source,
+        )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"tritonsim-hivm failed: {e.stderr}"
         ) from e
-
-    return report_from_desgraph(
-        des_json=des_path,
-        grid_dims=grid_dims,
-        calib_db=calib_db,
-        n_cores=n_cores,
-        occupancy=occupancy,
-        load_balance=load_balance,
-        kernel_name=kernel_name,
-        t_measured_us=t_measured_us,
-        op_summary_csv=op_summary_csv,
-        op_name_filter=op_name_filter,
-        calibration_source=calibration_source,
-    )
+    finally:
+        if des_json_path is None:
+            des_path.unlink(missing_ok=True)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
