@@ -1,0 +1,2407 @@
+diff --git a/third_party/ascend/backend/runtime/autotuner.py b/third_party/ascend/backend/runtime/autotuner.py
+index a5a2ad16250157079571d47c5173b0d7173b7e35..d87b754a335f9ef8b5ae90b0b49c540c664262aa 100644
+--- a/third_party/ascend/backend/runtime/autotuner.py
++++ b/third_party/ascend/backend/runtime/autotuner.py
+@@ -39,6 +39,8 @@ from triton.runtime.autotuner import Autotuner, Config
+ from triton.tools.get_ascend_devices import is_compile_on_910_95
+ 
+ from .autoparser import (LowDimsAxesParser, PtrNumsParser, ReductionAxesParser, SplitAxesParser, TilingAxesParser)
++from .candidate_expansion import expand_official_configs
++from .hardware_pruning import hard_prune_configs
+ from .utils import get_byte_per_numel, is_valid_axis_name, valid_axis_names
+ 
+ 
+@@ -106,6 +108,11 @@ class AutoTilingTuner(Autotuner):
+ 
+         self.auto_gen_config = not configs or self.hints.get("auto_gen_config", False)
+         self.gen_configs = []  # generated configs from TileGenerator
++        self.official_gen_configs = []
++        self.expansion_stage_configs = {}
++        self.expansion_stats = {}
++        self.hardware_prune_records = {}
++        self.official_generation_s = 0.0
+         self.auto_profile_dir = auto_profile_dir
+         if not configs:
+             self.user_configs = []
+@@ -317,6 +324,191 @@ class AutoTilingTuner(Autotuner):
+         if self.print_autotuning:
+             print("Generated configs number: {}".format(len(self.gen_configs)))
+ 
++    @staticmethod
++    def _config_signature(config: Config):
++        """Return a stable signature used to distinguish official and new configs."""
++        return (
++            tuple(sorted(config.kwargs.items())),
++            config.num_warps,
++            config.num_stages,
++            config.num_ctas,
++            config.maxnreg,
++        )
++
++    def _apply_candidate_expansion(self, all_args, dtype):
++        """
++        Optionally expand official TileGenerator candidates.
++
++        Candidate expansion is disabled by default. When enabled, the official
++        TileGenerator output is preserved as B0 and cumulative B1/B2/B3 pools
++        are generated before conservative hardware-capacity pruning.
++        """
++        self.official_gen_configs = copy.deepcopy(self.gen_configs)
++
++        expansion_mode = self.hints.get("candidate_expansion")
++        options = dict(self.hints.get("candidate_expansion_options", {}))
++
++        if expansion_mode not in ("three_stage", True):
++            self.expansion_stage_configs = {
++                "B0_official": copy.deepcopy(self.official_gen_configs),
++            }
++            self.expansion_stats = {
++                "requested_max_stage": "B0_official",
++                "generated_through_stage": "B0_official",
++                "official": len(self.official_gen_configs),
++                "executed_stage_names": ["B0_official"],
++                "feature_enabled": False,
++                "timings_s": {
++                    "official_generation_s": self.official_generation_s,
++                },
++            }
++            self.hardware_prune_records = {
++                config: {
++                    "kept": True,
++                    "reason": "candidate_expansion_disabled",
++                }
++                for config in self.official_gen_configs
++            }
++            return
++
++        max_stage = str(options.get("max_stage", "B3_plus_s3"))
++
++        if max_stage == "B0_official":
++            self.expansion_stage_configs = {
++                "B0_official": copy.deepcopy(self.official_gen_configs),
++            }
++            self.expansion_stats = {
++                "requested_max_stage": "B0_official",
++                "generated_through_stage": "B0_official",
++                "official": len(self.official_gen_configs),
++                "executed_stage_names": ["B0_official"],
++                "predicted_costs": {
++                    "s1": {},
++                    "s2": {},
++                    "s3": {},
++                    "all": {},
++                },
++                "baseline_bypass": True,
++                "timings_s": {
++                    "official_generation_s": self.official_generation_s,
++                },
++            }
++            self.hardware_prune_records = {
++                config: {
++                    "kept": True,
++                    "reason": "strict_official_baseline",
++                }
++                for config in self.official_gen_configs
++            }
++            self.gen_configs = copy.deepcopy(self.official_gen_configs)
++            return
++
++        expansion_options = {
++            **options,
++            "tunable_parameter": self.hints.get("tunable_parameter", []),
++        }
++
++        stages, stats = expand_official_configs(
++            self.official_gen_configs,
++            all_args,
++            expansion_options,
++        )
++
++        if max_stage not in stages:
++            raise ValueError(
++                f"Unknown max_stage={max_stage!r}; "
++                f"expected one of {tuple(stages)}"
++            )
++
++        self.expansion_stage_configs = stages
++        self.expansion_stats = stats
++        self.expansion_stats.setdefault("timings_s", {})[
++            "official_generation_s"
++        ] = self.official_generation_s
++
++        selected_configs = stages[max_stage]
++        uniform_hard_prune = bool(
++            options.get("uniform_hard_prune", False)
++        )
++
++        dtype_bytes = int(get_byte_per_numel(dtype) or 2)
++        hard_prune_options = options.get("hard_prune", options)
++
++        official_signatures = {
++            self._config_signature(config)
++            for config in self.official_gen_configs
++        }
++
++        novel_configs = [
++            config
++            for config in selected_configs
++            if self._config_signature(config) not in official_signatures
++        ]
++
++        hard_start = time.perf_counter()
++
++        kept_novel, novel_records = hard_prune_configs(
++            novel_configs,
++            all_args,
++            dtype_bytes=dtype_bytes,
++            options=hard_prune_options,
++        )
++
++        if uniform_hard_prune:
++            self.gen_configs, self.hardware_prune_records = (
++                hard_prune_configs(
++                    selected_configs,
++                    all_args,
++                    dtype_bytes=dtype_bytes,
++                    options=hard_prune_options,
++                )
++            )
++        else:
++            self.hardware_prune_records = {
++                config: {
++                    "kept": True,
++                    "reason": "official_baseline_exempt",
++                }
++                for config in self.official_gen_configs
++            }
++            self.hardware_prune_records.update(novel_records)
++            self.gen_configs = (
++                copy.deepcopy(self.official_gen_configs) + kept_novel
++            )
++
++        reason_counts = {}
++        for record in self.hardware_prune_records.values():
++            reason = record.get("reason", "unknown")
++            reason_counts[reason] = reason_counts.get(reason, 0) + 1
++
++        self.expansion_stats["hard_prune"] = {
++            "input": len(selected_configs),
++            "selected_stage": max_stage,
++            "uniform_hard_prune": uniform_hard_prune,
++            "official_exempt": (
++                0
++                if uniform_hard_prune
++                else len(self.official_gen_configs)
++            ),
++            "novel_input": len(novel_configs),
++            "kept": len(self.gen_configs),
++            "novel_kept": len(kept_novel),
++            "removed": len(novel_configs) - len(kept_novel),
++            "time_s": time.perf_counter() - hard_start,
++            "reason_counts": reason_counts,
++        }
++
++        if not self.gen_configs:
++            raise RuntimeError(
++                "Hardware hard prune removed every generated config"
++            )
++
++        if self.print_autotuning:
++            print(
++                "Triton autotuning: staged candidate expansion "
++                f"stats={self.expansion_stats}"
++            )
++
+     def generate_key_and_configs(self, *args, **kwargs):
+         self.nargs = dict(zip(self.arg_names, args))
+         self.is_simt_mode = kwargs.get('force_simt_only', False)
+@@ -348,7 +540,12 @@ class AutoTilingTuner(Autotuner):
+             if self.auto_gen_config:
+                 self._autoparse_axis_params(all_args)
+                 _kv_dict = {k: _args[v] for k, v in self.keys.items() if v in _args}
++                official_generation_start = time.perf_counter()
+                 self._gen_tile_configs(_kv_dict, dtype)
++                self.official_generation_s = (
++                    time.perf_counter() - official_generation_start
++                )
++                self._apply_candidate_expansion(all_args, dtype)
+             if len(self.gen_configs) == 0 and len(self.user_configs) == 0:
+                 self.configs = [
+                     Config(
+diff --git a/third_party/ascend/backend/runtime/candidate_expansion.py b/third_party/ascend/backend/runtime/candidate_expansion.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdac2890a0d5d2bb2aea259fb3bb99b1317290ba
+--- /dev/null
++++ b/third_party/ascend/backend/runtime/candidate_expansion.py
+@@ -0,0 +1,775 @@
++# Copyright (c) Huawei Technologies Co., Ltd. 2026.
++"""Cumulative candidate expansion for Ascend autotuning.
++
++B0 is the untouched output of the official TileGenerator/CVTileGenerator.
++S1 is a bounded multi-radius local expansion. S2 is a hardware-resource-aware
++coverage expansion driven by UB/core/wave/tail regions. S3 is a multi-generation,
++cost-model-guided evolutionary expansion. Hard pruning is conservative and is
++kept separate from cost-model ranking.
++"""
++from __future__ import annotations
++
++import copy
++import itertools
++import math
++import random
++import time
++from dataclasses import dataclass
++from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
++
++from triton.runtime.autotuner import Config
++
++
++def _sig(cfg: Config) -> Tuple:
++    return (tuple(sorted(cfg.kwargs.items())), cfg.num_warps, cfg.num_stages, cfg.num_ctas, cfg.maxnreg)
++
++
++def _clone(cfg: Config, kwargs: Dict[str, Any]) -> Config:
++    return Config(kwargs=kwargs, num_warps=cfg.num_warps, num_stages=cfg.num_stages,
++                  num_ctas=cfg.num_ctas, maxnreg=cfg.maxnreg, pre_hook=cfg.pre_hook,
++                  ir_override=cfg.ir_override)
++
++
++def _dedupe(configs: Iterable[Config]) -> List[Config]:
++    out, seen = [], set()
++    for cfg in configs:
++        key = _sig(cfg)
++        if key not in seen:
++            seen.add(key)
++            out.append(cfg)
++    return out
++
++
++def _divisors(n: int) -> List[int]:
++    if not isinstance(n, int) or n <= 0:
++        return []
++    vals = set()
++    for i in range(1, math.isqrt(n) + 1):
++        if n % i == 0:
++            vals.update((i, n // i))
++    return sorted(vals)
++
++
++def _runtime_bound(name: str, all_args: Mapping[str, Any], observed: Sequence[int]) -> int:
++    upper = name.upper()
++    preferred = []
++    if upper.endswith("_M") or upper in {"BM", "BLOCK_M"}:
++        preferred = ["N_CTX", "MAX_Q_LEN", "M", "SEQ_LEN", "N"]
++    elif upper.endswith("_N") or upper in {"BN", "BLOCK_N"}:
++        preferred = ["N_CTX", "MAX_K_LEN", "MAX_Q_LEN", "N", "SEQ_LEN", "M"]
++    elif upper.endswith("_K") or upper in {"BK", "BLOCK_K"}:
++        preferred = ["HEAD_DIM", "QK_DIM", "V_DIM", "K"]
++    for key in preferred:
++        value = all_args.get(key)
++        if isinstance(value, int) and value > 0:
++            return value
++    return max(observed) if observed else 1
++
++
++def _legal_values(name: str, configs: Sequence[Config], all_args: Mapping[str, Any],
++                  options: Mapping[str, Any]) -> List[int]:
++    """Build an explicit, auditable domain rather than a divisor-only space."""
++    observed = sorted({cfg.kwargs.get(name) for cfg in configs if isinstance(cfg.kwargs.get(name), int)})
++    bound = _runtime_bound(name, all_args, observed)
++    custom_domains = options.get("parameter_domains", {})
++    custom = custom_domains.get(name) or custom_domains.get(name.upper())
++    default_tiles = options.get("default_tile_values", (1, 2, 4, 8, 16, 24, 32, 48, 64, 80,
++                                                         96, 128, 160, 192, 224, 256, 384,
++                                                         512, 768, 1024))
++    vals = set(observed) | set(_divisors(bound)) | {int(v) for v in (custom or default_tiles)}
++    allow_tail = bool(all_args.get("__allow_tail_tiles__", options.get("allow_tail_tiles", True)))
++    alignment = max(1, int(options.get("parameter_alignment", {}).get(name, 1)))
++    return sorted(v for v in vals if isinstance(v, int) and 0 < v <= bound
++                  and v % alignment == 0 and (allow_tail or bound % v == 0))
++
++
++def _basic_legal(cfg: Config, all_args: Mapping[str, Any]) -> bool:
++    for name, value in cfg.kwargs.items():
++        if not isinstance(value, int) or value <= 0:
++            continue
++        upper = name.upper()
++        if upper in {"BM", "BN", "BLOCK_M", "BLOCK_N"}:
++            n_ctx = all_args.get("N_CTX", all_args.get("MAX_Q_LEN"))
++            if (not bool(all_args.get("__allow_tail_tiles__", True))
++                    and isinstance(n_ctx, int) and n_ctx > 0 and n_ctx % value != 0):
++                return False
++        if upper in {"BK", "BLOCK_K"}:
++            head_dim = all_args.get("HEAD_DIM", all_args.get("QK_DIM"))
++            if (bool(all_args.get("__require_head_dim_divisible__", True))
++                    and isinstance(head_dim, int) and head_dim > 0 and head_dim % value != 0):
++                return False
++    return True
++
++
++def _neighbor(values: Sequence[int], value: int, offsets: Sequence[int]) -> List[int]:
++    if value not in values:
++        return []
++    idx = values.index(value)
++    return [values[idx + off] for off in offsets if 0 <= idx + off < len(values)]
++
++
++def _nearest_legal(values: Sequence[int], target: float) -> int | None:
++    if not values:
++        return None
++    return min(values, key=lambda v: (abs(v - target), v))
++
++
++def _mutate_one(cfg: Config, spaces: Mapping[str, Sequence[int]], offsets: Sequence[int],
++                scale_factors: Sequence[float] = (), numeric_steps: Sequence[int] = ()) -> List[Config]:
++    """Generate explicit single-axis mutation families.
++
++    ``offsets`` are indices in the ordered legal domain, while scale factors and
++    numeric steps act on the value itself and are projected back to that domain.
++    Keeping the families separate makes the search semantics auditable.
++    """
++    children = []
++    for name, values in spaces.items():
++        current = cfg.kwargs.get(name)
++        if not isinstance(current, int):
++            continue
++        targets = set(_neighbor(values, current, offsets))
++        for factor in scale_factors:
++            nearest = _nearest_legal(values, current * float(factor))
++            if nearest is not None:
++                targets.add(nearest)
++        for step in numeric_steps:
++            for target in (current - int(step), current + int(step)):
++                nearest = _nearest_legal(values, target)
++                if nearest is not None:
++                    targets.add(nearest)
++        targets.discard(current)
++        for new_value in sorted(targets):
++            kwargs = dict(cfg.kwargs)
++            kwargs[name] = new_value
++            children.append(_clone(cfg, kwargs))
++    return children
++
++
++def _small_block_anchors(base: Sequence[Config], spaces: Mapping[str, Sequence[int]],
++                         budget: int) -> List[Config]:
++    """Inject a bounded set of small-BM anchors once, not once per official seed."""
++    if budget <= 0 or not base:
++        return []
++    bm_name = next((n for n in spaces if n.upper() in {"BM", "BLOCK_M"}), None)
++    bn_name = next((n for n in spaces if n.upper() in {"BN", "BLOCK_N"}), None)
++    if bm_name is None:
++        return []
++    small = [v for v in (1, 2, 4, 8) if v in spaces[bm_name]]
++    if not small:
++        return []
++    bn_anchors = [None]
++    if bn_name is not None:
++        bn_anchors = []
++        for target in (32, 64, 128):
++            value = _nearest_legal(spaces[bn_name], target)
++            if value is not None and value not in bn_anchors:
++                bn_anchors.append(value)
++    out: List[Config] = []
++    template = base[0]
++    for bm, bn in itertools.product(small, bn_anchors):
++        kwargs = dict(template.kwargs)
++        kwargs[bm_name] = bm
++        if bn_name is not None and bn is not None:
++            kwargs[bn_name] = bn
++        out.append(_clone(template, kwargs))
++    return out[:budget]
++
++
++def _cross(parents: Sequence[Config], tunable: Sequence[str], max_pairs: int, rng: random.Random,
++           min_distance: float = 0.0) -> List[Config]:
++    pairs = [(a, b) for a, b in itertools.combinations(parents, 2)
++             if _distance(a, b, tunable) >= min_distance]
++    rng.shuffle(pairs)
++    children = []
++    for left, right in pairs[:max_pairs]:
++        if not tunable:
++            continue
++        if len(tunable) == 2:
++            # The only novel two-dimensional recombinations are the two mixed
++            # children. Random masks also produce unchanged parent duplicates.
++            a, b = tunable
++            for source, donor in ((left, right), (right, left)):
++                kwargs = dict(source.kwargs)
++                if b in donor.kwargs:
++                    kwargs[b] = donor.kwargs[b]
++                children.append(_clone(source, kwargs))
++            continue
++        mask = rng.randrange(1, 1 << len(tunable))
++        kwargs = dict(left.kwargs)
++        for idx, name in enumerate(tunable):
++            if mask & (1 << idx) and name in right.kwargs:
++                kwargs[name] = right.kwargs[name]
++        children.append(_clone(left, kwargs))
++    return children
++
++
++def _novel(base: Sequence[Config], candidates: Iterable[Config], all_args: Mapping[str, Any]) -> List[Config]:
++    seen = {_sig(cfg) for cfg in base}
++    out = []
++    for cfg in _dedupe(candidates):
++        if not _basic_legal(cfg, all_args) or _sig(cfg) in seen:
++            continue
++        seen.add(_sig(cfg))
++        out.append(cfg)
++    return out
++
++
++
++def _pairwise_local(cfg: Config, spaces: Mapping[str, Sequence[int]], offsets: Sequence[int]) -> List[Config]:
++    """Jointly perturb two tunable parameters inside a bounded local neighbourhood."""
++    children: List[Config] = []
++    names = [name for name in spaces if isinstance(cfg.kwargs.get(name), int)]
++    for left, right in itertools.combinations(names, 2):
++        left_values = _neighbor(spaces[left], cfg.kwargs[left], offsets)
++        right_values = _neighbor(spaces[right], cfg.kwargs[right], offsets)
++        for lv, rv in itertools.product(left_values, right_values):
++            kwargs = dict(cfg.kwargs)
++            kwargs[left], kwargs[right] = lv, rv
++            children.append(_clone(cfg, kwargs))
++    return children
++
++
++def _resource_metrics(cfg: Config, all_args: Mapping[str, Any], options: Mapping[str, Any]) -> Dict[str, float]:
++    """Operator-family-aware analytical proxies used by S2 selection.
++
++    These are ranking/coverage proxies, not profiler counters.  The caller must
++    pass ``operator_family`` in candidate_expansion_options.  Legacy callers
++    default to the original Flash-Attention model.
++    """
++    family = str(options.get("operator_family", "flash_attention")).lower()
++    cores = max(1, int(options.get("num_cores", 20)))
++    kw = cfg.kwargs
++
++    def block(*names, default=1):
++        for name in names:
++            value = kw.get(name)
++            if isinstance(value, int) and value > 0:
++                return value
++        return default
++
++    def finish(programs, padded, useful, ub_bytes, memory, compute, tile_ratio=1.0, divisible_axes=0):
++        waves = max(1, math.ceil(programs / cores))
++        wave_eff = programs / (waves * cores)
++        tail = max(0.0, (padded - useful) / max(1, padded))
++        return {
++            "ub_utilization": float(ub_bytes) / max(1.0, float(options.get("ub_capacity_bytes", 192 * 1024))),
++            "programs": float(programs), "waves": float(waves), "wave_efficiency": float(wave_eff),
++            "tail_waste": float(tail), "divisible_axes": float(divisible_axes),
++            "memory_proxy": float(memory), "compute_proxy": float(compute),
++            "core_imbalance": float(1.0 - wave_eff), "programs_per_core": float(programs / cores),
++            "tile_ratio": float(tile_ratio),
++        }
++
++    if family in {"vector", "vector_add"}:
++        n = max(1, int(all_args.get("N", all_args.get("n_elements", all_args.get("numel", 1)))))
++        b = block("BLOCK_SIZE", "XBLOCK", "XBLOCK_SIZE")
++        programs = math.ceil(n / b)
++        return finish(programs, programs * b, n, 3 * b * 2, 3 * b * 2, b, divisible_axes=int(n % b == 0))
++
++    if family in {"softmax", "vector_reduction", "layer_norm", "vector_multi_reduction"}:
++        rows = max(1, int(all_args.get("M", all_args.get("n_rows", 1))))
++        cols = max(1, int(all_args.get("N", all_args.get("n_cols", 1))))
++        b = block("BLOCK_SIZE", "RBLOCK_SIZE")
++        xblock = block("XBLOCK", "XBLOCK_SIZE", default=1)
++        programs = math.ceil(rows / xblock)
++        padded_cols = math.ceil(cols / b) * b
++        passes = 3 if family in {"layer_norm", "vector_multi_reduction"} else 2
++        ub = xblock * b * 4 * (3 if passes == 3 else 2)
++        memory = rows * cols * (4 if passes == 3 else 2)
++        compute = rows * padded_cols * passes
++        return finish(programs, rows * padded_cols, rows * cols, ub, memory, compute,
++                      tile_ratio=b / max(1, xblock), divisible_axes=int(cols % b == 0))
++
++    if family in {"matmul", "matmul_bias", "cube", "cube_dominant_mix"}:
++        m = max(1, int(all_args.get("M", 1))); n = max(1, int(all_args.get("N", 1))); k = max(1, int(all_args.get("K", 1)))
++        bm = block("BLOCK_M", "BLOCK_SIZE_M"); bn = block("BLOCK_N", "BLOCK_SIZE_N"); bk = block("BLOCK_K", "BLOCK_SIZE_K")
++        mt, nt, kt = math.ceil(m / bm), math.ceil(n / bn), math.ceil(k / bk)
++        programs = mt * nt
++        padded = mt * bm * nt * bn * kt * bk
++        useful = m * n * k
++        ub = (bm * bk + bk * bn) * 2 + bm * bn * 4
++        memory = mt * nt * kt * (bm * bk + bk * bn) * 2 + m * n * 2
++        compute = 2 * padded
++        return finish(programs, padded, useful, ub, memory, compute,
++                      tile_ratio=bn / max(1, bm), divisible_axes=int(m % bm == 0)+int(n % bn == 0)+int(k % bk == 0))
++
++    # Flash Attention / backward-compatible default.
++    bm = block("BLOCK_M", "BM"); bn = block("BLOCK_N", "BN")
++    n = max(1, int(all_args.get("N_CTX", all_args.get("MAX_Q_LEN", all_args.get("N", 1)))))
++    h = max(1, int(all_args.get("H", 1))); z = max(1, int(all_args.get("Z", 1)))
++    programs = math.ceil(n / bm) * math.ceil(n / bn) * h * z
++    padded = math.ceil(n / bm) * bm * math.ceil(n / bn) * bn
++    breakdown = analytic_cost_model(cfg, all_args, options)
++    result = finish(programs, padded, n * n, breakdown.ub_pressure * float(options.get("ub_capacity_bytes", 192 * 1024)),
++                    breakdown.memory, breakdown.compute, bn / max(1, bm), int(n % bm == 0)+int(n % bn == 0))
++    result["core_imbalance"] = breakdown.core_imbalance
++    return result
++
++
++def _bucket(value: float, cuts: Sequence[float]) -> int:
++    for idx, cut in enumerate(cuts):
++        if value < cut:
++            return idx
++    return len(cuts)
++
++
++def _resource_region(cfg: Config, all_args: Mapping[str, Any], options: Mapping[str, Any]) -> Tuple[int, ...]:
++    """Map a candidate to a stable resource-coverage region."""
++    m = _resource_metrics(cfg, all_args, options)
++    return (
++        _bucket(m["ub_utilization"], options.get("s2_ub_bucket_cuts", (0.35, 0.65, 0.85))),
++        _bucket(m["wave_efficiency"], options.get("s2_wave_efficiency_cuts", (0.50, 0.80, 0.95))),
++        _bucket(m["tail_waste"], options.get("s2_tail_bucket_cuts", (0.001, 0.05, 0.15, 0.30))),
++        int(m["divisible_axes"]),
++        _bucket(m["waves"], options.get("s2_wave_count_cuts", (1.5, 2.5, 4.5, 8.5))),
++        _bucket(m["programs_per_core"], options.get("s2_programs_per_core_cuts", (0.5, 1.0, 2.0, 4.0, 8.0))),
++        _bucket(math.log2(max(1e-12, m["tile_ratio"])),
++                options.get("s2_ratio_log2_cuts", (-0.5, 0.5, 1.5, 2.5))),
++    )
++
++
++def _resource_aware_candidates(base: Sequence[Config], spaces: Mapping[str, Sequence[int]],
++                               all_args: Mapping[str, Any], options: Mapping[str, Any]) -> Tuple[List[Config], Dict[str, Any]]:
++    """Construct candidates that fill missing or sparse hardware-resource regions.
++
++    The reservoir is bounded and deterministic. For the common BM/BN case it
++    evaluates the explicit legal BM x BN domain, classifies every point by
++    UB/core/wave/tail/divisibility proxies, and emits representatives only from
++    regions absent or under-represented in the incoming pool. No benchmark or
++    measured latency is used.
++    """
++    names = [name for name in spaces if any(isinstance(c.kwargs.get(name), int) for c in base)]
++    if not names:
++        return [], {"covered_before": 0, "reservoir": 0, "target_regions": 0, "emitted": 0}
++
++    region_counts: Dict[Tuple[int, ...], int] = {}
++    for cfg in base:
++        region = _resource_region(cfg, all_args, options)
++        region_counts[region] = region_counts.get(region, 0) + 1
++
++    max_domain_product = max(1, int(options.get("s2_max_domain_product", 4096)))
++    per_region = max(1, int(options.get("s2_candidates_per_region", 2)))
++    sparse_threshold = max(0, int(options.get("s2_sparse_region_threshold", 1)))
++    template_limit = max(1, int(options.get("s2_template_count", 1)))
++    # Preserve distinct compiler/kernel templates, but avoid repeating the full
++    # BM x BN reservoir for identical non-tunable metadata.
++    seed_templates = []
++    seen_templates = set()
++    for cfg in base:
++        signature = (cfg.num_warps, cfg.num_stages, cfg.num_ctas, cfg.maxnreg,
++                     tuple(sorted((k, v) for k, v in cfg.kwargs.items() if k not in names)))
++        if signature in seen_templates:
++            continue
++        seen_templates.add(signature)
++        seed_templates.append(cfg)
++        if len(seed_templates) >= template_limit:
++            break
++    reservoir: List[Config] = []
++
++    # BM/BN are the principal FA tiling variables. Use the complete explicit
++    # legal pair domain when bounded; otherwise use a deterministic subsample.
++    pair_names = [n for n in names if n.upper() in {"BM", "BN", "BLOCK_M", "BLOCK_N"}]
++    if len(pair_names) >= 2:
++        left, right = pair_names[:2]
++        pairs = list(itertools.product(spaces[left], spaces[right]))
++        if len(pairs) > max_domain_product:
++            step = max(1, math.ceil(len(pairs) / max_domain_product))
++            pairs = pairs[::step][:max_domain_product]
++        for template in seed_templates:
++            for lv, rv in pairs:
++                kwargs = dict(template.kwargs)
++                kwargs[left], kwargs[right] = lv, rv
++                reservoir.append(_clone(template, kwargs))
++    else:
++        # Generic fallback: sweep each parameter across its explicit legal
++        # domain and add bounded pairwise combinations.
++        for template in seed_templates:
++            for name in names:
++                for value in spaces[name]:
++                    kwargs = dict(template.kwargs); kwargs[name] = value
++                    reservoir.append(_clone(template, kwargs))
++            reservoir.extend(_pairwise_local(template, spaces, (-3, -2, -1, 1, 2, 3)))
++
++    reservoir = _novel(base, reservoir, all_args)
++    by_region: Dict[Tuple[int, ...], List[Config]] = {}
++    for cfg in reservoir:
++        by_region.setdefault(_resource_region(cfg, all_args, options), []).append(cfg)
++
++    target_regions = [r for r in by_region if region_counts.get(r, 0) <= sparse_threshold]
++    emitted: List[Config] = []
++    region_summary: Dict[str, int] = {}
++    for region in sorted(target_regions):
++        candidates = by_region[region]
++        scores = {c: _score(c, all_args, options) for c in candidates}
++        chosen = _diverse_top_k(candidates, scores, names, min(per_region, len(candidates)),
++                                float(options.get("diversity_weight", 0.08)))
++        emitted.extend(chosen)
++        region_summary[str(region)] = len(chosen)
++
++    return _dedupe(emitted), {
++        "covered_before": len(region_counts),
++        "reservoir": len(reservoir),
++        "target_regions": len(target_regions),
++        "covered_after_generation": len(set(region_counts) | set(by_region)),
++        "emitted": len(emitted),
++        "region_representatives": region_summary,
++    }
++
++
++def _cost_guided_mutations(parent: Config, spaces: Mapping[str, Sequence[int]], all_args: Mapping[str, Any],
++                           options: Mapping[str, Any], limit: int) -> List[Config]:
++    """Rank global single-axis mutations while guaranteeing coverage of every axis."""
++    if limit <= 0:
++        return []
++    by_axis: Dict[str, List[Config]] = {}
++    for name, values in spaces.items():
++        current = parent.kwargs.get(name)
++        if not isinstance(current, int):
++            continue
++        axis_children: List[Config] = []
++        for value in values:
++            if value == current:
++                continue
++            kwargs = dict(parent.kwargs)
++            kwargs[name] = value
++            axis_children.append(_clone(parent, kwargs))
++        axis_children = _dedupe(axis_children)
++        axis_children.sort(key=lambda c: _score(c, all_args, options))
++        if axis_children:
++            by_axis[name] = axis_children
++    if not by_axis:
++        return []
++
++    per_axis = max(1, limit // len(by_axis))
++    selected: List[Config] = []
++    residual: List[Config] = []
++    for name in sorted(by_axis):
++        children = by_axis[name]
++        selected.extend(children[:per_axis])
++        residual.extend(children[per_axis:])
++    residual.sort(key=lambda c: _score(c, all_args, options))
++    selected.extend(residual[:max(0, limit - len(selected))])
++    return _dedupe(selected)[:limit]
++
++
++@dataclass(frozen=True)
++class CostBreakdown:
++    score: float
++    compute: float
++    memory: float
++    ub_pressure: float
++    core_imbalance: float
++
++
++def analytic_cost_model(cfg: Config, all_args: Mapping[str, Any], options: Mapping[str, Any]) -> CostBreakdown:
++    """Lightweight white-box proxy. Lower is better.
++
++    An external callable can replace this through options['cost_model']. The
++    proxy deliberately ranks rather than hard-prunes candidates.
++    """
++    bm = int(cfg.kwargs.get("BLOCK_M", cfg.kwargs.get("BM", 1)))
++    bn = int(cfg.kwargs.get("BLOCK_N", cfg.kwargs.get("BN", 1)))
++    bk = int(cfg.kwargs.get("BLOCK_K", cfg.kwargs.get("BK", all_args.get("HEAD_DIM", all_args.get("QK_DIM", 1)))))
++    n = max(1, int(all_args.get("N_CTX", all_args.get("MAX_Q_LEN", all_args.get("N", 1)))))
++    h = max(1, int(all_args.get("H", 1)))
++    z = max(1, int(all_args.get("Z", 1)))
++    cores = max(1, int(options.get("num_cores", 20)))
++    dtype_bytes = max(1, int(options.get("dtype_bytes", 2)))
++
++    tiles = math.ceil(n / max(1, bm)) * math.ceil(n / max(1, bn)) * h * z
++    waves = math.ceil(tiles / cores)
++    core_imbalance = (waves * cores - tiles) / max(1, waves * cores)
++    compute = (bm * bn * max(1, bk)) / max(1.0, float(options.get("compute_scale", 65536.0)))
++    memory = dtype_bytes * (bm * bk + bn * bk + bm * bn) / max(1.0, float(options.get("memory_scale", 65536.0)))
++    ub_est = dtype_bytes * (bm * bk + 2 * bn * bk + 2 * bm * bn) + 8 * bm
++    ub_size = max(1, int(options.get("ub_size", 192 * 1024)))
++    ub_pressure = ub_est / ub_size
++    tiny_penalty = float(options.get("tiny_block_penalty", 0.0)) * (1.0 / max(1, bm) + 1.0 / max(1, bn))
++    score = (waves * max(compute, memory)
++             + float(options.get("ub_weight", 3.0)) * max(0.0, ub_pressure - 0.65) ** 2
++             + float(options.get("imbalance_weight", 1.0)) * core_imbalance
++             + tiny_penalty)
++    return CostBreakdown(score, compute, memory, ub_pressure, core_imbalance)
++
++
++def _score(cfg: Config, all_args: Mapping[str, Any], opts: Mapping[str, Any]) -> float:
++    external = opts.get("cost_model")
++    if callable(external):
++        value = external(cfg=cfg, all_args=all_args, options=opts)
++        if isinstance(value, Mapping):
++            value = value.get("score")
++        return float(value)
++    return analytic_cost_model(cfg, all_args, opts).score
++
++
++def _distance(a: Config, b: Config, names: Sequence[str]) -> float:
++    d = 0.0
++    for name in names:
++        x, y = a.kwargs.get(name), b.kwargs.get(name)
++        if isinstance(x, int) and isinstance(y, int) and x > 0 and y > 0:
++            d += abs(math.log2(x / y))
++    return d
++
++
++def _diverse_top_k(configs: Sequence[Config], scores: Mapping[Config, float], names: Sequence[str], k: int,
++                   diversity_weight: float) -> List[Config]:
++    if k <= 0 or len(configs) <= k:
++        return sorted(configs, key=lambda c: scores[c])
++    ranked = sorted(configs, key=lambda c: scores[c])
++    selected = [ranked.pop(0)]
++    score_span = max(scores.values()) - min(scores.values()) or 1.0
++    while ranked and len(selected) < k:
++        def key(c):
++            normalized_cost = (scores[c] - min(scores.values())) / score_span
++            diversity = min(_distance(c, s, names) for s in selected)
++            return normalized_cost - diversity_weight * diversity
++        chosen = min(ranked, key=key)
++        ranked.remove(chosen)
++        selected.append(chosen)
++    return selected
++
++
++def _objectives(cfg: Config, all_args: Mapping[str, Any], opts: Mapping[str, Any]) -> Tuple[float, ...]:
++    """Pareto objectives aligned with whole-kernel execution, not one-tile size.
++
++    Raw per-tile compute/memory values systematically favour tiny tiles and omit
++    the number of waves needed to execute the full workload. The primary
++    objective is therefore the complete predicted cost (external or analytic),
++    complemented by independent resource/tail objectives for diversity.
++    """
++    breakdown = analytic_cost_model(cfg, all_args, opts)
++    metrics = _resource_metrics(cfg, all_args, opts)
++    return (_score(cfg, all_args, opts), breakdown.ub_pressure,
++            breakdown.core_imbalance, metrics["tail_waste"])
++
++
++def _pareto_top_k(configs: Sequence[Config], all_args: Mapping[str, Any], opts: Mapping[str, Any],
++                  names: Sequence[str], k: int) -> List[Config]:
++    """NSGA-II-style non-dominated fronts with diversity tie breaking."""
++    if k <= 0 or len(configs) <= k:
++        return sorted(configs, key=lambda c: _score(c, all_args, opts))
++    objs = {c: _objectives(c, all_args, opts) for c in configs}
++    remaining = list(configs)
++    selected: List[Config] = []
++    while remaining and len(selected) < k:
++        front = []
++        for c in remaining:
++            dominated = any(all(a <= b for a, b in zip(objs[d], objs[c])) and
++                            any(a < b for a, b in zip(objs[d], objs[c]))
++                            for d in remaining if d is not c)
++            if not dominated:
++                front.append(c)
++        if len(selected) + len(front) <= k:
++            selected.extend(sorted(front, key=lambda c: objs[c][0]))
++        else:
++            scores = {c: objs[c][0] for c in front}
++            selected.extend(_diverse_top_k(front, scores, names, k - len(selected),
++                                           float(opts.get("diversity_weight", 0.08))))
++        fset = set(front)
++        remaining = [c for c in remaining if c not in fset]
++    return selected
++
++
++def _select(configs: Sequence[Config], scores: Mapping[Config, float], names: Sequence[str], k: int,
++            all_args: Mapping[str, Any], opts: Mapping[str, Any]) -> List[Config]:
++    mode = str(opts.get("selection_mode", "pareto")).lower()
++    if mode == "pareto":
++        return _pareto_top_k(configs, all_args, opts, names, k)
++    if mode == "random":
++        # Advance the deterministic random stream across repeated selection calls
++        # instead of restarting from the same seed every generation.
++        counter = int(opts.get("_random_select_counter", 0))
++        if isinstance(opts, dict):
++            opts["_random_select_counter"] = counter + 1
++        rng = random.Random(int(opts.get("random_seed", 20260710)) + counter)
++        items = list(configs); rng.shuffle(items)
++        return items[:k]
++    return _diverse_top_k(configs, scores, names, k, float(opts.get("diversity_weight", 0.08)))
++
++def expand_official_configs(official: Sequence[Config], all_args: Mapping[str, Any],
++                            options: Mapping[str, Any] | None = None):
++    """Build cumulative candidate pools only up to ``max_stage``.
++
++    This stage gate is intentionally inside candidate generation.  A B0/B1/B2
++    experiment therefore cannot accidentally pay for later-stage generation,
++    which is essential for valid end-to-end autotune and break-even metrics.
++    """
++    opts = dict(options or {})
++    stage_order = ("B0_official", "B1_plus_s1", "B2_plus_s2", "B3_plus_s3")
++    max_stage = str(opts.get("max_stage", "B3_plus_s3"))
++    if max_stage not in stage_order:
++        raise ValueError(f"Unknown max_stage={max_stage!r}; expected one of {stage_order}")
++    target_idx = stage_order.index(max_stage)
++
++    s1_limit = int(opts.get("s1_max_new", 48))
++    s2_limit = int(opts.get("s2_max_new", 64))
++    s3_limit = int(opts.get("s3_max_new", 64))
++    retain_all_generated = bool(opts.get("retain_all_generated", False))
++    parent_k = int(opts.get("evolution_parent_k", 8))
++    population_k = int(opts.get("evolution_population", max(32, parent_k * 2)))
++    generations = int(opts.get("evolution_generations", 2))
++    mutation_per_parent = int(opts.get("mutation_per_parent", 8))
++    seed = int(opts.get("random_seed", 20260710))
++    rng = random.Random(seed)
++    opts["_random_select_counter"] = 0
++    timings: Dict[str, float] = {}
++
++    t0 = time.perf_counter()
++    b0 = _dedupe(copy.deepcopy(list(official)))
++    requested_tunable = opts.get("tunable_parameter") or opts.get("tunable_parameters")
++    requested = {str(x) for x in requested_tunable} if requested_tunable else None
++    tunable = sorted({k for cfg in b0 for k, v in cfg.kwargs.items()
++                      if isinstance(v, int) and (requested is None or k in requested)})
++    spaces = {name: _legal_values(name, b0, all_args, opts) for name in tunable}
++    spaces = {name: vals for name, vals in spaces.items() if len(vals) > 1}
++    timings["official_capture_s"] = time.perf_counter() - t0
++
++    stages: Dict[str, List[Config]] = {"B0_official": b0}
++    stats: Dict[str, Any] = {
++        "requested_max_stage": max_stage,
++        "generated_through_stage": "B0_official",
++        "official": len(b0), "s1_generated": 0, "s1_new": 0,
++        "s2_generated": 0, "s2_new": 0, "s3_generated": 0, "s3_new": 0,
++        "b1": None, "b2": None, "b3": None,
++        "s3_no_op": None, "tunable_parameters": list(spaces),
++        "selection_mode": str(opts.get("selection_mode", "pareto")),
++        "retain_all_generated": retain_all_generated,
++        "parameter_domains": spaces,
++        "evolution": {"generations": generations, "parent_k": parent_k,
++                      "population": population_k, "generation_stats": [],
++                      "patience": int(opts.get("evolution_patience", 1)),
++                      "min_generations": int(opts.get("evolution_min_generations", 2)),
++                      "min_new_children": int(opts.get("evolution_min_new_children", 4)),
++                      "min_relative_improvement": float(opts.get("evolution_min_relative_improvement", 0.005)),
++                      "cost_model": "external" if callable(opts.get("cost_model")) else "analytic_white_box"},
++        "predicted_costs": {"s1": {}, "s2": {}, "s3": {}, "all": {}},
++        "timings_s": timings,
++    }
++
++    def finalize(final_pool: Sequence[Config]) -> Tuple[Dict[str, List[Config]], Dict[str, Any]]:
++        stats["covered_values"] = {
++            name: sorted({c.kwargs.get(name) for c in final_pool if isinstance(c.kwargs.get(name), int)})
++            for name in spaces
++        }
++        if target_idx > 0:
++            stats["predicted_costs"]["all"] = {
++                str(_sig(c)): float(_score(c, all_args, opts)) for c in final_pool
++            }
++        stats["executed_stage_names"] = list(stages)
++        return stages, stats
++
++    if target_idx == 0:
++        return finalize(b0)
++
++    t0 = time.perf_counter()
++    # S1: auditable local/multiscale families. Index offsets are local in the
++    # ordered legal domain; multiplicative and numeric steps are separate.
++    local_offsets = tuple(int(v) for v in opts.get("s1_local_offsets", (-1, 1)))
++    pair_offsets = tuple(int(v) for v in opts.get("s1_pair_offsets", (-1, 1)))
++    scale_factors = tuple(float(v) for v in opts.get("s1_scale_factors", (0.5, 0.75, 1.25, 1.5, 2.0)))
++    numeric_steps = tuple(int(v) for v in opts.get("s1_numeric_steps", (8, 16, 32)))
++    small_bm_budget = max(0, int(opts.get("s1_small_bm_budget", 8)))
++    s1_candidates: List[Config] = []
++    for cfg in b0:
++        s1_candidates.extend(_mutate_one(cfg, spaces, local_offsets, scale_factors, numeric_steps))
++        s1_candidates.extend(_pairwise_local(cfg, spaces, pair_offsets))
++    s1_candidates.extend(_small_block_anchors(b0, spaces, small_bm_budget))
++    s1_all = _novel(b0, s1_candidates, all_args)
++    s1_scores = {c: _score(c, all_args, opts) for c in s1_all}
++    s1_new = list(s1_all) if retain_all_generated else _select(
++        s1_all, s1_scores, list(spaces), s1_limit, all_args, opts
++    )
++    b1 = b0 + s1_new
++    stages["B1_plus_s1"] = b1
++    timings["s1_generation_s"] = time.perf_counter() - t0
++    stats.update({"s1_generated": len(s1_all), "s1_new": len(s1_new), "b1": len(b1),
++                  "generated_through_stage": "B1_plus_s1",
++                  "s1_strategy": {"type": "structured_multiscale_local",
++                                  "domain_index_offsets": list(local_offsets),
++                                  "scale_factors": list(scale_factors),
++                                  "numeric_steps": list(numeric_steps),
++                                  "pairwise_offsets": list(pair_offsets),
++                                  "small_block_m_anchors": [1, 2, 4, 8],
++                                  "small_block_m_budget": small_bm_budget}})
++    stats["predicted_costs"]["s1"] = {str(_sig(c)): float(s1_scores[c]) for c in s1_new}
++    if target_idx == 1:
++        return finalize(b1)
++
++    t0 = time.perf_counter()
++    # S2: resource-aware coverage expansion. Candidate construction is driven
++    # by missing/sparse UB/core/wave/tail/divisibility regions, not by a wider
++    # numeric offset from the seed.
++    s2_candidates, resource_stats = _resource_aware_candidates(b1, spaces, all_args, opts)
++    s2_all = _novel(b1, s2_candidates, all_args)
++    s2_scores = {c: _score(c, all_args, opts) for c in s2_all}
++    s2_new = list(s2_all) if retain_all_generated else _select(
++        s2_all, s2_scores, list(spaces), s2_limit, all_args, opts
++    )
++    b2 = b1 + s2_new
++    stages["B2_plus_s2"] = b2
++    timings["s2_generation_s"] = time.perf_counter() - t0
++    stats.update({"s2_generated": len(s2_all), "s2_new": len(s2_new), "b2": len(b2),
++                  "generated_through_stage": "B2_plus_s2", "s2_strategy": "resource_coverage",
++                  "s2_resource_coverage": resource_stats})
++    stats["predicted_costs"]["s2"] = {str(_sig(c)): float(s2_scores[c]) for c in s2_new}
++    if target_idx == 2:
++        return finalize(b2)
++
++    t0 = time.perf_counter()
++    population_scores = {c: _score(c, all_args, opts) for c in b2}
++    population = _select(b2, population_scores, list(spaces), population_k, all_args, opts)
++    generated_s3: List[Config] = []
++    generation_stats = []
++    patience = max(0, int(opts.get("evolution_patience", 1)))
++    min_generations = max(0, int(opts.get("evolution_min_generations", 2)))
++    min_new_children = max(0, int(opts.get("evolution_min_new_children", 4)))
++    min_relative_improvement = max(0.0, float(opts.get("evolution_min_relative_improvement", 0.005)))
++    stale_generations = 0
++    previous_best = min(population_scores.values()) if population_scores else math.inf
++    for generation in range(max(0, generations)):
++        scores = {c: _score(c, all_args, opts) for c in population}
++        parents = _select(population, scores, list(spaces), max(1, parent_k), all_args, opts)
++        children: List[Config] = []
++        for parent in parents:
++            # S3 no longer owns a fixed 卤1/卤2/卤3 radius. It explores the full
++            # explicit legal domain for one parameter at a time and retains the
++            # model-ranked mutations for each selected parent.
++            children.extend(_cost_guided_mutations(parent, spaces, all_args, opts, mutation_per_parent))
++        children.extend(_cross(parents, list(spaces), max_pairs=max(1, parent_k * 2), rng=rng,
++                               min_distance=float(opts.get("min_crossover_distance", 1.0))))
++        children = _novel(b2 + generated_s3, children, all_args)
++        generated_s3.extend(children)
++        union = _dedupe(population + children)
++        union_scores = {c: _score(c, all_args, opts) for c in union}
++        population = _select(union, union_scores, list(spaces), population_k, all_args, opts)
++        best_cost = min(union_scores.values()) if union_scores else math.inf
++        relative_improvement = ((previous_best - best_cost) / max(abs(previous_best), 1e-12)
++                                if math.isfinite(previous_best) else math.inf)
++        converged = len(children) < min_new_children or relative_improvement < min_relative_improvement
++        stale_generations = stale_generations + 1 if converged else 0
++        generation_stats.append({
++            "generation": generation + 1, "parents": len(parents),
++            "children": len(children), "survivors": len(population),
++            "best_predicted_cost": best_cost if math.isfinite(best_cost) else None,
++            "relative_improvement": relative_improvement if math.isfinite(relative_improvement) else None,
++            "stale_generations": stale_generations,
++        })
++        previous_best = min(previous_best, best_cost)
++        if patience > 0 and generation + 1 >= min_generations and stale_generations >= patience:
++            generation_stats[-1]["early_stop"] = True
++            break
++    s3_all = _novel(b2, generated_s3, all_args)
++    s3_scores = {c: _score(c, all_args, opts) for c in s3_all}
++    s3_new = list(s3_all) if retain_all_generated else _select(
++        s3_all, s3_scores, list(spaces), s3_limit, all_args, opts
++    )
++    b3 = b2 + s3_new
++    stages["B3_plus_s3"] = b3
++    timings["s3_evolution_s"] = time.perf_counter() - t0
++    stats.update({"s3_generated": len(s3_all), "s3_new": len(s3_new), "b3": len(b3),
++                  "s3_no_op": len(s3_new) == 0, "generated_through_stage": "B3_plus_s3",
++                  "s3_strategy": "pareto_analytic_objective_evolution_with_cost_ranked_mutation"})
++    stats["evolution"]["generation_stats"] = generation_stats
++    stats["predicted_costs"]["s3"] = {str(_sig(c)): float(s3_scores[c]) for c in s3_new}
++    return finalize(b3)
++
+diff --git a/third_party/ascend/backend/runtime/hardware_pruning.py b/third_party/ascend/backend/runtime/hardware_pruning.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa47b76d5ade163a3d7e9fadc9257c6d60636c8e
+--- /dev/null
++++ b/third_party/ascend/backend/runtime/hardware_pruning.py
+@@ -0,0 +1,90 @@
++"""Auditable hardware pruning for Ascend autotuning.
++
++Safe mode removes only explicit kernel/parameter legality violations.  The
++analytical capacity estimate is intentionally optional (``aggressive_capacity``)
++because an upper-bound estimate exceeding a capacity is not proof that the
++compiler's actual live allocation exceeds it.
++"""
++from __future__ import annotations
++from typing import Any, Dict, Mapping, Sequence, Tuple
++
++from .cv_autotune.hardware_consts import get_default_hardware_constraints
++
++
++def _ival(cfg, *names, default=1):
++    for name in names:
++        value = cfg.kwargs.get(name)
++        if isinstance(value, int):
++            return value
++    return default
++
++
++def check_hardware_constraints(cfg, all_args: Mapping[str, Any], dtype_bytes: int = 2,
++                               options: Mapping[str, Any] | None = None) -> Tuple[bool, str, Dict[str, int]]:
++    opts = dict(options or {})
++    hw = get_default_hardware_constraints()
++    bm = _ival(cfg, "BLOCK_M", "BM")
++    bn = _ival(cfg, "BLOCK_N", "BN")
++    bk = _ival(cfg, "BLOCK_K", "BK", default=int(all_args.get("HEAD_DIM", 1) or 1))
++    n_ctx = all_args.get("N_CTX")
++    head_dim = all_args.get("HEAD_DIM")
++
++    if min(bm, bn, bk) <= 0:
++        return False, "non_positive_tile", {}
++
++    # Tail tiles are legal for masked kernels. Enable divisibility only when the
++    # concrete kernel contract explicitly requires it.
++    if opts.get("require_n_ctx_divisible", False) and isinstance(n_ctx, int) and (n_ctx % bm or n_ctx % bn):
++        return False, "tile_does_not_divide_N_CTX", {}
++    if opts.get("require_head_dim_divisible", False) and isinstance(head_dim, int) and head_dim % bk:
++        return False, "BLOCK_K_does_not_divide_HEAD_DIM", {}
++    if opts.get("block_m_ge_block_n", False) and bm < bn:
++        return False, "kernel_constraint_BLOCK_M_lt_BLOCK_N", {}
++
++    # The concrete FA kernel uses NUM_BLOCKS_M = N_CTX // BLOCK_M and
++    # unmasked full-width K/V block loads. Therefore both tiling axes must
++    # divide N_CTX unless an explicitly different masked-tail kernel is used.
++    if opts.get("fa_requires_full_tiles", False) and isinstance(n_ctx, int):
++        if n_ctx % bm:
++            return False, "fa_kernel_BLOCK_M_must_divide_N_CTX", {}
++        if n_ctx % bn:
++            return False, "fa_kernel_BLOCK_N_must_divide_N_CTX", {}
++
++    # HEAD_DIM >= 256 follows the external-accumulator path and slices every
++    # BLOCK_M tile into four BLOCK_M//4 pieces. BM < 4 or BM % 4 != 0 is not
++    # a legal kernel shape for that path.
++    if opts.get("fa_head_dim_256_quarter_slices", False) and isinstance(head_dim, int) and head_dim >= 256:
++        if bm < 4 or bm % 4:
++            return False, "fa_kernel_HEAD_DIM256_requires_BLOCK_M_multiple_of_4", {}
++
++    allowed_small = {int(v) for v in opts.get("allowed_small_block_m", (1, 2, 4, 8))}
++    bm_multiple = max(1, int(opts.get("large_block_m_multiple_of", opts.get("block_m_multiple_of", 1))))
++    if bm not in allowed_small and bm % bm_multiple:
++        return False, f"kernel_constraint_BLOCK_M_not_multiple_of_{bm_multiple}", {}
++
++    stages = max(1, int(getattr(cfg, "num_stages", 1) or 1))
++    l0a = bm * bk * dtype_bytes * min(stages, 2)
++    l0b = bn * bk * dtype_bytes * min(stages, 2)
++    l0c = bm * bn * 4
++    l1 = (bm * bk + bn * bk) * dtype_bytes * min(stages, 2)
++    ub = ((bm * bk) + 2 * (bn * bk) + 2 * (bm * bn)) * dtype_bytes + 8 * bm
++    usage = {"l0a_bytes": l0a, "l0b_bytes": l0b, "l0c_bytes": l0c, "l1_bytes": l1, "ub_bytes": ub}
++
++    if opts.get("aggressive_capacity", False):
++        limits = {"l0a_bytes": hw.l0a_size, "l0b_bytes": hw.l0b_size, "l0c_bytes": hw.l0c_size,
++                  "l1_bytes": hw.max_l1_size, "ub_bytes": hw.ub_size}
++        for key, value in usage.items():
++            if value > limits[key]:
++                return False, f"analytical_{key}_exceeds_{limits[key]}", usage
++    return True, "kept_safe", usage
++
++
++def hard_prune_configs(configs: Sequence, all_args: Mapping[str, Any], dtype_bytes: int = 2,
++                       options: Mapping[str, Any] | None = None):
++    kept, records = [], {}
++    for cfg in configs:
++        valid, reason, usage = check_hardware_constraints(cfg, all_args, dtype_bytes, options)
++        records[cfg] = {"kept": valid, "reason": reason, **usage}
++        if valid:
++            kept.append(cfg)
++    return kept, records
+diff --git a/third_party/ascend/experiments/fa_official_auto_vs_three_stage.py b/third_party/ascend/experiments/fa_official_auto_vs_three_stage.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..33772c5614b87b2f6b1e998af13a94c36b7d4cbc
+--- /dev/null
++++ b/third_party/ascend/experiments/fa_official_auto_vs_three_stage.py
+@@ -0,0 +1,917 @@
++#!/usr/bin/env python3
++"""Official Ascend configs=[] auto generation plus cumulative S1/S2/S3 expansion.
++
++B0 is taken from the runtime AutoTilingTuner after the official
++TileGenerator/CVTileGenerator has generated configs.  The experiment reports
++all stages directly against B0 and writes candidate-level CSV/JSON evidence.
++"""
++from __future__ import annotations
++
++import argparse
++import csv
++import importlib.util
++import json
++import os
++import platform
++import subprocess
++import hashlib
++import time
++from pathlib import Path
++from typing import Any
++from statistics import median
++
++from operator_explanations import compare_configs, explain_config
++
++import torch
++import torch_npu
++import triton
++from triton.backends.ascend.runtime.autotuner import autotune as ascend_autotune
++from triton.backends.ascend.testing import do_bench_npu
++
++CASES = [
++    (1, 1, 128, 128, False, torch.float16),
++    (1, 1, 128, 128, False, torch.bfloat16),
++    (1, 2, 256, 256, False, torch.bfloat16),
++    (2, 2, 128, 256, False, torch.float16),
++    (4, 32, 64, 64, False, torch.float16),
++    (4, 32, 1024, 64, False, torch.bfloat16),
++    (4, 32, 4096, 64, False, torch.float16),
++    (1, 1, 128, 128, True, torch.float16),
++    (1, 2, 1024, 64, True, torch.bfloat16),
++    (1, 4, 96, 64, False, torch.float16),
++    (1, 4, 192, 64, False, torch.bfloat16),
++    (2, 8, 384, 64, False, torch.float16),
++    (2, 8, 768, 64, True, torch.bfloat16),
++    (1, 2, 1536, 128, True, torch.float16),
++]
++STAGE_ORDER = ["B0_official", "B1_plus_s1", "B2_plus_s2", "B3_plus_s3"]
++STAGE_ALIASES = {"B0": "B0_official", "B1": "B1_plus_s1", "B2": "B2_plus_s2", "B3": "B3_plus_s3"}
++ACTIVE_NUM_CORES = 20
++
++
++def reference_attention(q, k, v, heads: int, scale: float, causal: bool):
++    mask = None
++    sparse_mode = 0
++    pre_tokens = 65535
++    next_tokens = 65535
++    if causal:
++        n = q.shape[-2]
++        mask = torch.triu(torch.ones((n, n), dtype=torch.bool, device=q.device), diagonal=1)
++        next_tokens = 0
++    out = torch_npu.npu_fusion_attention(
++        q, k, v, heads, padding_mask=None, atten_mask=mask, scale=scale,
++        keep_prob=1.0, input_layout="BNSD", pre_tockens=pre_tokens,
++        next_tockens=next_tokens, sparse_mode=sparse_mode,
++    )[0]
++    return out, {"causal": causal, "atten_mask": "upper_triangular_bool" if causal else None,
++                 "sparse_mode": sparse_mode, "pre_tockens": pre_tokens, "next_tockens": next_tokens}
++
++
++def tolerances(dtype):
++    if dtype == torch.bfloat16:
++        return {"atol": 2e-2, "rtol": 2e-2}
++    return {"atol": 1e-2, "rtol": 1e-2}
++
++
++def load_external_cost_model(path_text):
++    if not path_text:
++        return None, None
++    path = Path(path_text).resolve()
++    spec = importlib.util.spec_from_file_location("external_ttir_cost_model", path)
++    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
++    fn = getattr(module, "predict", None) or getattr(module, "cost_model", None)
++    if not callable(fn):
++        raise ValueError(f"{path} must export predict(...) or cost_model(...)")
++    meta = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
++            "name": getattr(module, "MODEL_NAME", path.stem),
++            "version": getattr(module, "MODEL_VERSION", "unknown"),
++            "feature_schema_version": getattr(module, "FEATURE_SCHEMA_VERSION", "unknown")}
++    return fn, meta
++
++
++def load_fa_module(repo: Path):
++    path = repo / "third_party/ascend/unittest/pytest_ut/test_06_fused_attention.py"
++    spec = importlib.util.spec_from_file_location("official_ascend_fa", path)
++    module = importlib.util.module_from_spec(spec)
++    assert spec.loader is not None
++    spec.loader.exec_module(module)
++    return module
++
++
++def cfg_sig(cfg) -> tuple:
++    return (tuple(sorted(cfg.kwargs.items())), cfg.num_warps, cfg.num_stages, cfg.num_ctas, cfg.maxnreg)
++
++
++def cfg_dict(cfg) -> dict[str, Any]:
++    return {
++        "kwargs": dict(cfg.kwargs),
++        "num_warps": cfg.num_warps,
++        "num_stages": cfg.num_stages,
++        "num_ctas": cfg.num_ctas,
++        "maxnreg": cfg.maxnreg,
++    }
++
++
++def config_pool_sha256(configs) -> str:
++    canonical = [cfg_dict(cfg) for cfg in configs]
++    canonical.sort(key=lambda item: json.dumps(item, sort_keys=True, default=str))
++    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode()
++    return hashlib.sha256(blob).hexdigest()
++
++
++def first_origin(sig: tuple, stage_sigs: dict[str, set[tuple]]) -> str:
++    for stage in STAGE_ORDER:
++        if sig in stage_sigs.get(stage, set()):
++            if stage == "B0_official":
++                return "official"
++            return stage.replace("B1_plus_", "").replace("B2_plus_", "").replace("B3_plus_", "")
++    return "unknown"
++
++
++def launch_forced_config(mod, cfg, tensors, shape, sm_scale: float):
++    q, k, v, m, out, acc = tensors
++    Z, H, N_CTX, HEAD_DIM, stage = shape
++    out.zero_()
++    acc.zero_()
++    kwargs = dict(cfg.kwargs)
++    kwargs.update({
++        "Z": Z, "H": H, "N_CTX": N_CTX, "HEAD_DIM": HEAD_DIM, "STAGE": stage,
++        "NUM_CORES": ACTIVE_NUM_CORES,
++        "num_warps": cfg.num_warps, "num_stages": cfg.num_stages,
++        "num_ctas": cfg.num_ctas,
++    })
++    if cfg.maxnreg is not None:
++        kwargs["maxnreg"] = cfg.maxnreg
++    return mod._attn_fwd[(ACTIVE_NUM_CORES,)](
++        q, k, v, m, out, acc, sm_scale,
++        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
++        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
++        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
++        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
++        **kwargs,
++    )
++
++
++def run_forced_config(mod, cfg, tensors, shape, sm_scale: float, causal: bool, tol: dict) -> bool:
++    q, k, v, _m, out, _acc = tensors
++    launch_forced_config(mod, cfg, tensors, shape, sm_scale)
++    torch.npu.synchronize()
++    ref, _ = reference_attention(q, k, v, shape[1], sm_scale, causal)
++    return bool(torch.allclose(out, ref, atol=tol["atol"], rtol=tol["rtol"], equal_nan=True))
++
++
++def output_error_metrics(out, ref, tol):
++    diff = (out.float() - ref.float()).abs()
++    return {
++        "allclose": bool(torch.allclose(out, ref, atol=tol["atol"], rtol=tol["rtol"], equal_nan=True)),
++        "atol": tol["atol"], "rtol": tol["rtol"],
++        "nan_count": int(torch.isnan(out).sum().item()),
++        "inf_count": int(torch.isinf(out).sum().item()),
++        "max_abs_error": float(diff.max().item()),
++        "mean_abs_error": float(diff.mean().item()),
++        "relative_l2_error": float(torch.linalg.vector_norm(diff).item() /
++                                   max(torch.linalg.vector_norm(ref.float()).item(), 1e-12)),
++    }
++
++
++
++
++def _bench_scalar(result):
++    """Return the primary scalar latency from Triton benchmark output.
++
++    Triton-Ascend may return a scalar, a scalar tensor, a singleton nested
++    container, or a quantile sequence such as ``[p50, p20, p80]``.  The first
++    element is the primary statistic requested by the caller and is used for
++    ranking.  Containers are unwrapped recursively.
++    """
++    value = result
++    while isinstance(value, (list, tuple)):
++        if not value:
++            raise RuntimeError("Empty benchmark result")
++        value = value[0]
++
++    if hasattr(value, "numel") and callable(value.numel):
++        if int(value.numel()) != 1:
++            raise RuntimeError(f"Expected scalar benchmark tensor, got {value!r}")
++        value = value.item()
++    elif hasattr(value, "item") and callable(value.item):
++        try:
++            value = value.item()
++        except (TypeError, ValueError):
++            pass
++
++    return float(value)
++
++
++def _normalize_timing_map(raw_timings):
++    """Normalize every autotuner timing once at the data boundary."""
++    return {cfg: _bench_scalar(value) for cfg, value in dict(raw_timings).items()}
++
++def summarize_retest_rounds(round_ms: list[float], instability_ratio: float) -> dict[str, Any]:
++    if not round_ms:
++        raise ValueError("round_ms must not be empty")
++    score = float(median(round_ms))
++    max_ratio = float(max(round_ms) / max(score, 1e-12))
++    min_ratio = float(score / max(min(round_ms), 1e-12))
++    return {
++        "score_ms": score,
++        "round_medians_ms": [float(x) for x in round_ms],
++        "min_ms": float(min(round_ms)),
++        "max_ms": float(max(round_ms)),
++        "max_over_median": max_ratio,
++        "median_over_min": min_ratio,
++        "unstable": bool(max_ratio > instability_ratio or min_ratio > instability_ratio),
++    }
++
++
++def stable_retest_config(
++    mod, cfg, tensors, shape, sm_scale: float, *, rounds: int,
++    warmup_ms: int, rep_ms: int, instability_ratio: float,
++    max_extra_rounds: int,
++) -> dict[str, Any]:
++    """Independently remeasure one config without profiler involvement.
++
++    Each independent round uses Triton's repeated benchmark and contributes one
++    median. The final score is the median of those round medians. If the round
++    spread is implausibly large, extra rounds are collected before scoring.
++    """
++    if rounds < 3:
++        raise ValueError("stable retest requires at least 3 rounds")
++    round_ms: list[float] = []
++
++    def fn():
++        launch_forced_config(mod, cfg, tensors, shape, sm_scale)
++
++    target_rounds = rounds
++    while len(round_ms) < target_rounds:
++        torch.npu.synchronize()
++        result = triton.testing.do_bench(
++            fn, warmup=warmup_ms, rep=rep_ms, quantiles=[0.5]
++        )
++        torch.npu.synchronize()
++        round_ms.append(_bench_scalar(result))
++
++    summary = summarize_retest_rounds(round_ms, instability_ratio)
++    extras = 0
++    while summary["unstable"] and extras < max_extra_rounds:
++        torch.npu.synchronize()
++        result = triton.testing.do_bench(
++            fn, warmup=warmup_ms, rep=rep_ms, quantiles=[0.5]
++        )
++        torch.npu.synchronize()
++        round_ms.append(_bench_scalar(result))
++        extras += 1
++        summary = summarize_retest_rounds(round_ms, instability_ratio)
++
++    summary["base_rounds"] = rounds
++    summary["extra_rounds"] = extras
++    summary["warmup_ms"] = warmup_ms
++    summary["rep_ms"] = rep_ms
++    summary["instability_ratio_threshold"] = instability_ratio
++    return summary
++
++
++def rank_quality(candidate_rows, validation_mode="valid_only"):
++    if validation_mode == "valid_only":
++        accepted = lambda r: r.get("numerically_valid") is True
++    elif validation_mode == "validated":
++        accepted = lambda r: r.get("numerically_valid") is not None
++    else:
++        accepted = lambda r: True
++    pairs = [(float(r["predicted_cost"]), float(r["latency_ms"])) for r in candidate_rows
++             if r.get("predicted_cost") is not None and r.get("latency_ms") is not None
++             and accepted(r)]
++    if len(pairs) < 2:
++        return {"n": len(pairs), "spearman": None, "topk_recall": {}}
++    def ranks(vals):
++        order = sorted(range(len(vals)), key=lambda i: vals[i])
++        out = [0.0] * len(vals)
++        i = 0
++        while i < len(order):
++            j = i + 1
++            while j < len(order) and vals[order[j]] == vals[order[i]]:
++                j += 1
++            avg = (i + j - 1) / 2.0
++            for k in range(i, j): out[order[k]] = avg
++            i = j
++        return out
++    rp, rm = ranks([x for x, _ in pairs]), ranks([y for _, y in pairs])
++    mp, mm = sum(rp)/len(rp), sum(rm)/len(rm)
++    num = sum((a-mp)*(b-mm) for a,b in zip(rp,rm))
++    den = (sum((a-mp)**2 for a in rp) * sum((b-mm)**2 for b in rm)) ** 0.5
++    spearman = num / den if den else None
++    topk = {}
++    for k in (1, 3, 5, 10):
++        kk = min(k, len(pairs))
++        pred = set(sorted(range(len(pairs)), key=lambda i: pairs[i][0])[:kk])
++        real = set(sorted(range(len(pairs)), key=lambda i: pairs[i][1])[:kk])
++        topk[str(k)] = len(pred & real) / kk
++    measured_order = sorted(range(len(pairs)), key=lambda i: pairs[i][1])
++    predicted_order = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
++    best_measured_rank = predicted_order.index(measured_order[0]) + 1
++    return {"n": len(pairs), "spearman": spearman, "topk_recall": topk,
++            "best_measured_rank_by_cost_model": best_measured_rank}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[3])
++    ap.add_argument("--case-index", type=int, default=0)
++    ap.add_argument("--output", type=Path, default=Path("outputs/fa_official_auto_vs_three_stage.json"))
++    ap.add_argument("--candidate-csv", type=Path, default=None)
++    ap.add_argument("--profile-dir", type=Path, default=None,
++                    help="Directory for official auto_prof_dir output of the global best config.")
++    ap.add_argument("--bench-method", choices=("default", "npu"), default="default",
++                    help="Initial shortlist timing. Use default for ranking; npu is legacy diagnostic mode only. Final winner always uses independent stable retest without profiler.")
++    ap.add_argument("--max-stage", choices=tuple(STAGE_ALIASES), default="B3",
++                    help="Run this cumulative pool independently; use the matrix runner for strict B0-B3 comparison.")
++    ap.add_argument("--selection-mode", choices=("pareto", "cost_diversity", "random"), default="pareto")
++    ap.add_argument("--retain-all-generated", action="store_true",
++                    help="Keep every legal unique candidate produced by S1/S2/S3 in the cumulative pool; s1/s2/s3 max-new limits are ignored for final benchmarking.")
++    ap.add_argument("--uniform-hard-prune", action="store_true",
++                    help="Apply identical hard-prune rules to B0 and novel candidates (separate ablation).")
++    ap.add_argument("--external-cost-model", default=None,
++                    help="Python file exporting predict(...) or cost_model(...).")
++    ap.add_argument("--validate-candidates", choices=("best", "top10", "all"), default="all",
++                    help="Default 'all' guarantees that the reported winner is the fastest numerically valid candidate.")
++    ap.add_argument("--retest-top-k", type=int, default=5,
++                    help="Independently remeasure this many fastest valid candidates per cumulative stage; use 0 to remeasure all valid candidates.")
++    ap.add_argument("--retest-rounds", type=int, default=5,
++                    help="Independent do_bench rounds per Top-K candidate; final score is median-of-medians.")
++    ap.add_argument("--retest-warmup-ms", type=int, default=25)
++    ap.add_argument("--retest-rep-ms", type=int, default=100)
++    ap.add_argument("--retest-instability-ratio", type=float, default=2.0,
++                    help="Append extra rounds if max/median or median/min exceeds this ratio.")
++    ap.add_argument("--retest-max-extra-rounds", type=int, default=3)
++    ap.add_argument("--s1-max-new", type=int, default=48)
++    ap.add_argument("--s2-max-new", type=int, default=64)
++    ap.add_argument("--s3-max-new", type=int, default=64)
++    ap.add_argument("--parent-k", type=int, default=8)
++    ap.add_argument("--evolution-generations", type=int, default=2)
++    ap.add_argument("--evolution-population", type=int, default=32)
++    ap.add_argument("--random-seed", type=int, default=20260710)
++    ap.add_argument("--num-cores", type=int, default=20,
++                    help="Launch/core-stride value used consistently by grid, kernel loop and resource model.")
++    ap.add_argument("--aggressive-capacity-prune", action="store_true",
++                    help="Enable analytical capacity pruning as a separate ablation; disabled by default.")
++    ap.add_argument("--allow-n-ctx-tail", action="store_true",
++                    help="Diagnostic override only. The bundled FA kernel uses full BM/BN tiles and normally requires both to divide N_CTX.")
++    ap.add_argument("--disable-causal-bm-ge-bn", action="store_true",
++                    help="Disable the causal-only BLOCK_M >= BLOCK_N contract check.")
++    args = ap.parse_args()
++    if args.num_cores <= 0:
++        raise SystemExit("--num-cores must be positive")
++    global ACTIVE_NUM_CORES
++    ACTIVE_NUM_CORES = args.num_cores
++    pipeline_wall_start = time.perf_counter()
++    external_cost_model, external_cost_meta = load_external_cost_model(args.external_cost_model)
++
++    if not 0 <= args.case_index < len(CASES):
++        raise SystemExit(f"case-index must be in [0, {len(CASES)-1}]")
++
++    os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
++    os.environ["TRITON_BENCH_METHOD"] = args.bench_method
++    mod = load_fa_module(args.repo.resolve())
++    Z, H, N_CTX, HEAD_DIM, causal, dtype = CASES[args.case_index]
++    profile_dir = args.profile_dir or args.output.parent / f"profile_case{args.case_index}"
++    profile_dir.mkdir(parents=True, exist_ok=True)
++    raw_best_profile_dir = profile_dir / "raw_autotuner_best"
++    selected_best_profile_dir = profile_dir / "selected_valid_best"
++    raw_best_profile_dir.mkdir(parents=True, exist_ok=True)
++
++    tuned = ascend_autotune(
++        configs=[],
++        key=["N_CTX", "HEAD_DIM", "Z", "H", "STAGE"],
++        auto_prof_dir=str(raw_best_profile_dir),
++        hints={
++            "tunable_parameter": ["BLOCK_M", "BLOCK_N"],
++            "candidate_expansion": "three_stage",
++            "candidate_expansion_options": {
++                "operator_family": "flash_attention",
++                "s1_max_new": args.s1_max_new,
++                "s2_max_new": args.s2_max_new,
++                "s3_max_new": args.s3_max_new,
++                "evolution_parent_k": args.parent_k,
++                "evolution_generations": args.evolution_generations,
++                "evolution_population": args.evolution_population,
++                "random_seed": args.random_seed,
++                "num_cores": args.num_cores,
++                "max_stage": STAGE_ALIASES[args.max_stage],
++                "selection_mode": args.selection_mode,
++                "retain_all_generated": args.retain_all_generated,
++                "uniform_hard_prune": args.uniform_hard_prune,
++                "allow_tail_tiles": bool(args.allow_n_ctx_tail),
++                "cost_model": external_cost_model,
++                "cost_model_metadata": external_cost_meta,
++                "hard_prune": {
++                    "block_m_ge_block_n": bool(causal and not args.disable_causal_bm_ge_bn),
++                    "allowed_small_block_m": [1, 2, 4, 8],
++                    "large_block_m_multiple_of": 4,
++                    "require_n_ctx_divisible": not args.allow_n_ctx_tail,
++                    "require_head_dim_divisible": True,
++                    "fa_requires_full_tiles": not args.allow_n_ctx_tail,
++                    "fa_head_dim_256_quarter_slices": True,
++                    "aggressive_capacity": args.aggressive_capacity_prune,
++                },
++            },
++        },
++    )(mod._attn_fwd)
++
++    torch.manual_seed(20)
++    q = torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="npu").normal_(0.0, 0.5)
++    k = torch.empty_like(q).normal_(0.0, 0.5)
++    v = torch.empty_like(q).normal_(0.0, 0.5)
++    out = torch.empty_like(q)
++    acc = torch.zeros((Z, H, N_CTX, HEAD_DIM), dtype=torch.float32, device="npu")
++    m = torch.empty((Z, H, N_CTX), dtype=torch.float32, device="npu")
++    stage_value = 3 if causal else 1
++    sm_scale = 0.5
++
++    autotune_wall_start = time.perf_counter()
++    tuned[(args.num_cores,)](
++        q, k, v, m, out, acc, sm_scale,
++        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
++        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
++        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
++        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
++        Z=Z, H=H, N_CTX=N_CTX, HEAD_DIM=HEAD_DIM, STAGE=stage_value,
++        NUM_CORES=args.num_cores,
++    )
++    torch.npu.synchronize()
++    end_to_end_autotune_s = time.perf_counter() - autotune_wall_start
++
++    ref, reference_spec = reference_attention(q, k, v, H, sm_scale, causal)
++    tol = tolerances(dtype)
++    raw_autotuner_error_metrics = output_error_metrics(out, ref, tol)
++    raw_autotuner_correctness = raw_autotuner_error_metrics["allclose"]
++
++    def torch_npu_call():
++        reference_attention(q, k, v, H, sm_scale, causal)
++
++    torch_npu_bench_result = triton.testing.do_bench(torch_npu_call, quantiles=[0.5])
++    torch_npu_latency_ms = _bench_scalar(torch_npu_bench_result)
++
++    timings = _normalize_timing_map(getattr(tuned, "configs_timings", {}))
++    stages = getattr(tuned, "expansion_stage_configs", {})
++    pruned_sigs = {cfg_sig(cfg) for cfg in getattr(tuned, "last_pruned_configs", [])}
++    hard_records = getattr(tuned, "hardware_prune_records", {})
++    hard_kept_sigs = {cfg_sig(cfg) for cfg, rec in hard_records.items() if rec.get("kept")}
++    compile_failures = getattr(tuned, "compile_failure_records", {})
++    compile_failed_sigs = {cfg_sig(cfg) for cfg in compile_failures}
++    runtime_failures = getattr(tuned, "runtime_failure_records", {})
++    runtime_failed_sigs = {cfg_sig(cfg) for cfg in runtime_failures}
++    predicted_costs = getattr(tuned, "expansion_stats", {}).get("predicted_costs", {}).get("all", {})
++    benchmark_positions = {cfg_sig(cfg): pos for cfg, pos in getattr(tuned, "candidate_benchmark_positions", {}).items()}
++    stage_sigs = {name: {cfg_sig(c) for c in cfgs} for name, cfgs in stages.items()}
++    official_sigs = stage_sigs.get("B0_official", set())
++    official_configs = stages.get("B0_official", [])
++    official_pool_hash = config_pool_sha256(official_configs)
++
++    rows = []
++    best_by_stage = {}
++    for stage_name in STAGE_ORDER:
++        configs = stages.get(stage_name, [])
++        available = [(cfg, timings[cfg]) for cfg in configs if cfg in timings]
++        row = {
++            "stage": stage_name,
++            "pool_size": len(configs),
++            "after_hard_prune": sum(cfg_sig(c) in hard_kept_sigs for c in configs),
++            "after_runtime_prune": sum(cfg_sig(c) in pruned_sigs for c in configs),
++            "benchmarked": len(available),
++            "coverage_pct": (100.0 * len(available) / len(configs)) if configs else 0.0,
++        }
++        if available:
++            best_cfg, best_timing = min(available, key=lambda item: item[1])
++            sig = cfg_sig(best_cfg)
++            best_by_stage[stage_name] = (best_cfg, best_timing)
++            row.update({
++                "best_config": cfg_dict(best_cfg),
++                "best_timing_ms": _bench_scalar(best_timing),
++                "best_origin": first_origin(sig, stage_sigs),
++                "best_is_novel_vs_official": sig not in official_sigs,
++            })
++        rows.append(row)
++
++    base_item = best_by_stage.get("B0_official")
++    if base_item:
++        base = _bench_scalar(base_item[1])
++        for row in rows:
++            if row.get("best_timing_ms") is not None:
++                row["gain_vs_B0_official_pct"] = (base / row["best_timing_ms"] - 1.0) * 100.0
++
++    previous_best = None
++    for idx, row in enumerate(rows):
++        current = best_by_stage.get(row["stage"])
++        if current and previous_best:
++            row["gain_vs_previous_stage_pct"] = (_bench_scalar(previous_best[1]) / _bench_scalar(current[1]) - 1.0) * 100.0
++            row["incremental_best_changed"] = cfg_sig(previous_best[0]) != cfg_sig(current[0])
++        if current:
++            previous_best = current
++        if idx > 0:
++            prev_stage = STAGE_ORDER[idx - 1]
++            prev_sigs = stage_sigs.get(prev_stage, set())
++            novel_configs = [c for c in stages.get(row["stage"], []) if cfg_sig(c) not in prev_sigs]
++            novel_available = [(c, timings[c]) for c in novel_configs if c in timings]
++            row["novel_generated"] = len(novel_configs)
++            row["novel_after_hard_prune"] = sum(cfg_sig(c) in hard_kept_sigs for c in novel_configs)
++            row["novel_benchmarked"] = len(novel_available)
++            if novel_available:
++                nc, nt = min(novel_available, key=lambda item: item[1])
++                row["novel_best_timing_ms"] = _bench_scalar(nt)
++                row["novel_best_config"] = cfg_dict(nc)
++                if previous_best and idx > 0 and best_by_stage.get(prev_stage):
++                    row["novel_gain_vs_previous_best_pct"] = (_bench_scalar(best_by_stage[prev_stage][1]) / _bench_scalar(nt) - 1.0) * 100.0
++
++    # Validate each cumulative stage's measured best, not only the global B3 best.
++    tensors = (q, k, v, m, out, acc)
++    shape = (Z, H, N_CTX, HEAD_DIM, stage_value)
++    for row in rows:
++        item = best_by_stage.get(row["stage"])
++        if item:
++            try:
++                row["best_correctness"] = run_forced_config(mod, item[0], tensors, shape, sm_scale, causal, tol)
++            except Exception as exc:  # preserve evidence instead of hiding a failed config
++                row["best_correctness"] = False
++                row["correctness_error"] = repr(exc)
++
++    all_configs = []
++    seen = set()
++    for stage_name in STAGE_ORDER:
++        for cfg in stages.get(stage_name, []):
++            sig = cfg_sig(cfg)
++            if sig in seen:
++                continue
++            seen.add(sig)
++            all_configs.append(cfg)
++
++    candidate_rows = []
++    for cfg in all_configs:
++        sig = cfg_sig(cfg)
++        timing = timings.get(cfg)
++        candidate_rows.append({
++            "case_index": args.case_index,
++            "origin_stage": first_origin(sig, stage_sigs),
++            "in_B0": sig in stage_sigs.get("B0_official", set()),
++            "in_B1": sig in stage_sigs.get("B1_plus_s1", set()),
++            "in_B2": sig in stage_sigs.get("B2_plus_s2", set()),
++            "in_B3": sig in stage_sigs.get("B3_plus_s3", set()),
++            "after_hard_prune": sig in hard_kept_sigs,
++            "hard_prune_reason": hard_records.get(cfg, {}).get("reason", "not_evaluated"),
++            "after_runtime_prune": sig in pruned_sigs,
++            "benchmarked": timing is not None,
++            "candidate_execution_position": benchmark_positions.get(sig),
++            "candidate_execution_order_seed": args.random_seed,
++            "predicted_cost": predicted_costs.get(str(sig)),
++            "status": ("benchmarked" if timing is not None else
++                       "hard_pruned" if sig not in hard_kept_sigs else
++                       "compile_failed" if sig in compile_failed_sigs else
++                       "runtime_failed" if sig in runtime_failed_sigs else
++                       "runtime_pruned_not_benchmarked" if sig not in pruned_sigs else
++                       "benchmark_failed"),
++            "failure_type": (compile_failures.get(cfg, {}) or runtime_failures.get(cfg, {})).get("type"),
++            "failure_message": (compile_failures.get(cfg, {}) or runtime_failures.get(cfg, {})).get("message"),
++            "latency_ms": _bench_scalar(timing) if timing is not None else None,
++            "config": cfg_dict(cfg),
++        })
++
++    # Correctness sampling is independent of winner selection. Invalid measured
++    # candidates are explicitly marked and excluded by downstream rank analysis.
++    measured_cfgs = [c for c in all_configs if c in timings]
++    measured_cfgs.sort(key=lambda c: timings[c])
++    if args.validate_candidates == "all":
++        to_validate = measured_cfgs
++    elif args.validate_candidates == "top10":
++        to_validate = measured_cfgs[:10]
++    else:
++        to_validate = [item[0] for item in best_by_stage.values()]
++    validation = {}
++    validation_wall_start = time.perf_counter()
++    for cfg in dict.fromkeys(to_validate):
++        try:
++            validation[cfg_sig(cfg)] = run_forced_config(mod, cfg, tensors, shape, sm_scale, causal, tol)
++        except Exception as exc:
++            validation[cfg_sig(cfg)] = False
++            runtime_failures.setdefault(cfg, {"type": type(exc).__name__, "message": str(exc)})
++    validation_s = time.perf_counter() - validation_wall_start
++    for row in candidate_rows:
++        sig = (tuple(sorted(row["config"]["kwargs"].items())), row["config"]["num_warps"],
++               row["config"]["num_stages"], row["config"]["num_ctas"], row["config"]["maxnreg"])
++        row["numerically_valid"] = validation.get(sig)
++        if row["benchmarked"] and row["numerically_valid"] is False:
++            row["status"] = "benchmarked_numerically_invalid"
++        elif row["benchmarked"] and row["numerically_valid"] is True:
++            row["status"] = "benchmarked_numerically_valid"
++        cfg = next((c for c in all_configs if cfg_sig(c) == sig), None)
++        if cfg is not None and cfg in runtime_failures:
++            row["status"] = "runtime_failed"
++            row["failure_type"] = runtime_failures[cfg].get("type")
++            row["failure_message"] = runtime_failures[cfg].get("message")
++
++    # Stable Top-K remeasurement is deliberately separated from autotune and
++    # profiler collection. Initial timings only shortlist candidates; final
++    # winners are selected from independent median-of-medians measurements.
++    stable_retest_wall_start = time.perf_counter()
++    stage_retest_candidates = {}
++    retest_union = []
++    retest_seen = set()
++    for stage_name in STAGE_ORDER:
++        valid_initial = [c for c in stages.get(stage_name, [])
++                         if c in timings and validation.get(cfg_sig(c)) is True]
++        valid_initial.sort(key=lambda c: timings[c])
++        shortlisted = valid_initial if args.retest_top_k == 0 else valid_initial[:max(args.retest_top_k, 1)]
++        stage_retest_candidates[stage_name] = shortlisted
++        for cfg in shortlisted:
++            sig = cfg_sig(cfg)
++            if sig not in retest_seen:
++                retest_seen.add(sig)
++                retest_union.append(cfg)
++
++    stable_retests = {}
++    for cfg in retest_union:
++        stable_retests[cfg_sig(cfg)] = stable_retest_config(
++            mod, cfg, tensors, shape, sm_scale,
++            rounds=args.retest_rounds,
++            warmup_ms=args.retest_warmup_ms,
++            rep_ms=args.retest_rep_ms,
++            instability_ratio=args.retest_instability_ratio,
++            max_extra_rounds=args.retest_max_extra_rounds,
++        )
++    stable_retest_s = time.perf_counter() - stable_retest_wall_start
++
++    for row in candidate_rows:
++        sig = (tuple(sorted(row["config"]["kwargs"].items())), row["config"]["num_warps"],
++               row["config"]["num_stages"], row["config"]["num_ctas"], row["config"]["maxnreg"])
++        retest = stable_retests.get(sig)
++        row["retested"] = retest is not None
++        row["stable_latency_ms"] = retest.get("score_ms") if retest else None
++        row["retest_round_medians_ms"] = retest.get("round_medians_ms") if retest else None
++        row["retest_unstable"] = retest.get("unstable") if retest else None
++        row["retest_max_over_median"] = retest.get("max_over_median") if retest else None
++        row["retest_extra_rounds"] = retest.get("extra_rounds") if retest else None
++
++    # Re-select every reported stage winner from independently remeasured,
++    # numerically valid Top-K candidates. Preserve initial timing evidence.
++    valid_best_by_stage = {}
++    for row in rows:
++        stage_name = row["stage"]
++        configs = stages.get(stage_name, [])
++        raw_cfg = best_by_stage.get(stage_name, (None, None))[0]
++        raw_timing = best_by_stage.get(stage_name, (None, None))[1]
++        row["raw_fastest_config"] = cfg_dict(raw_cfg) if raw_cfg is not None else None
++        row["raw_fastest_timing_ms"] = _bench_scalar(raw_timing) if raw_timing is not None else None
++        row["raw_fastest_correctness"] = validation.get(cfg_sig(raw_cfg)) if raw_cfg is not None else None
++        valid_available = [(cfg, stable_retests[cfg_sig(cfg)]["score_ms"])
++                           for cfg in stage_retest_candidates.get(stage_name, [])
++                           if cfg_sig(cfg) in stable_retests]
++        row["validated_benchmarked"] = sum(1 for cfg in configs
++                                             if cfg in timings and validation.get(cfg_sig(cfg)) is not None)
++        row["valid_benchmarked"] = sum(1 for cfg in configs
++                                         if cfg in timings and validation.get(cfg_sig(cfg)) is True)
++        row["retested_valid_candidates"] = len(valid_available)
++        row["invalid_benchmarked"] = sum(1 for cfg in configs
++                                           if cfg in timings and validation.get(cfg_sig(cfg)) is False)
++        if valid_available:
++            best_cfg, best_timing = min(valid_available, key=lambda item: item[1])
++            valid_best_by_stage[stage_name] = (best_cfg, best_timing)
++            sig = cfg_sig(best_cfg)
++            row.update({"best_config": cfg_dict(best_cfg), "best_timing_ms": _bench_scalar(best_timing),
++                        "best_origin": first_origin(sig, stage_sigs),
++                        "best_is_novel_vs_official": sig not in official_sigs,
++                        "best_correctness": True,
++                        "winner_selection": "stable_retest_topk_median_of_medians"})
++        else:
++            row.update({"best_config": None, "best_timing_ms": None,
++                        "best_correctness": False,
++                        "winner_selection": "no_numerically_valid_candidate"})
++    best_by_stage = valid_best_by_stage
++
++    # Recompute gains after validity-aware winner selection.
++    base_item = best_by_stage.get("B0_official")
++    for row in rows:
++        row.pop("gain_vs_B0_official_pct", None)
++        row.pop("gain_vs_previous_stage_pct", None)
++    if base_item:
++        base = _bench_scalar(base_item[1])
++        for row in rows:
++            if row.get("best_timing_ms") is not None:
++                row["gain_vs_B0_official_pct"] = (base / row["best_timing_ms"] - 1.0) * 100.0
++    previous = None
++    for row in rows:
++        current = best_by_stage.get(row["stage"])
++        if current and previous:
++            row["gain_vs_previous_stage_pct"] = (_bench_scalar(previous[1]) / _bench_scalar(current[1]) - 1.0) * 100.0
++            row["incremental_best_changed"] = cfg_sig(previous[0]) != cfg_sig(current[0])
++        if current:
++            previous = current
++
++    # Recompute novel-best metrics using only numerically valid candidates.
++    for idx, row in enumerate(rows):
++        for key in ("novel_best_timing_ms", "novel_best_config", "novel_gain_vs_previous_best_pct"):
++            row.pop(key, None)
++        if idx == 0:
++            continue
++        prev_stage = STAGE_ORDER[idx - 1]
++        prev_sigs = stage_sigs.get(prev_stage, set())
++        novel_configs = [c for c in stages.get(row["stage"], []) if cfg_sig(c) not in prev_sigs]
++        raw_novel = [(c, timings[c]) for c in novel_configs if c in timings]
++        valid_novel = [(c, stable_retests[cfg_sig(c)]["score_ms"]) for c in novel_configs
++                       if validation.get(cfg_sig(c)) is True and cfg_sig(c) in stable_retests]
++        if raw_novel:
++            rc, rt = min(raw_novel, key=lambda x: x[1])
++            row["raw_novel_fastest_config"] = cfg_dict(rc)
++            row["raw_novel_fastest_timing_ms"] = _bench_scalar(rt)
++            row["raw_novel_fastest_correctness"] = validation.get(cfg_sig(rc))
++        else:
++            row["raw_novel_fastest_config"] = None
++            row["raw_novel_fastest_timing_ms"] = None
++            row["raw_novel_fastest_correctness"] = None
++        if valid_novel:
++            nc, nt = min(valid_novel, key=lambda x: x[1])
++            row["novel_valid_best_config"] = cfg_dict(nc)
++            row["novel_valid_best_timing_ms"] = _bench_scalar(nt)
++            prev = best_by_stage.get(prev_stage)
++            row["novel_valid_gain_vs_previous_valid_best_pct"] = (
++                (_bench_scalar(prev[1]) / _bench_scalar(nt) - 1.0) * 100.0 if prev else None
++            )
++        else:
++            row["novel_valid_best_config"] = None
++            row["novel_valid_best_timing_ms"] = None
++            row["novel_valid_gain_vs_previous_valid_best_pct"] = None
++
++    selected_stage_name = STAGE_ALIASES[args.max_stage]
++    selected_valid_best = best_by_stage.get(selected_stage_name)
++    if selected_valid_best is None:
++        raise SystemExit(f"No numerically valid benchmarked candidate for {selected_stage_name}")
++    selected_best_cfg, selected_best_timing = selected_valid_best
++    # Re-run the validity-aware selected winner so its reported metrics refer to
++    # exactly the same config as selected_valid_best_config.
++    run_forced_config(mod, selected_best_cfg, tensors, shape, sm_scale, causal, tol)
++    selected_ref, _ = reference_attention(q, k, v, H, sm_scale, causal)
++    selected_best_error_metrics = output_error_metrics(out, selected_ref, tol)
++    if not selected_best_error_metrics["allclose"]:
++        raise SystemExit("Selected validity-aware winner failed deterministic final correctness rerun")
++
++    selected_best_profile_dir.mkdir(parents=True, exist_ok=True)
++    selected_profile_wall_start = time.perf_counter()
++    do_bench_npu(
++        lambda: launch_forced_config(mod, selected_best_cfg, tensors, shape, sm_scale),
++        prof_dir=str(selected_best_profile_dir),
++        keep_res=True,
++    )
++    selected_profile_s = time.perf_counter() - selected_profile_wall_start
++    validated_selection_pipeline_s = end_to_end_autotune_s + validation_s
++    total_pipeline_s = time.perf_counter() - pipeline_wall_start
++
++    csv_path = args.candidate_csv or args.output.with_suffix(".candidates.csv")
++    csv_path.parent.mkdir(parents=True, exist_ok=True)
++    with csv_path.open("w", newline="") as f:
++        fieldnames = ["case_index", "origin_stage", "in_B0", "in_B1", "in_B2", "in_B3",
++                      "after_hard_prune", "hard_prune_reason", "after_runtime_prune", "benchmarked",
++                      "candidate_execution_position", "candidate_execution_order_seed",
++                      "predicted_cost", "status", "failure_type", "failure_message",
++                      "latency_ms", "numerically_valid", "retested", "stable_latency_ms",
++                      "retest_round_medians_ms", "retest_unstable",
++                      "retest_max_over_median", "retest_extra_rounds", "config"]
++        writer = csv.DictWriter(f, fieldnames=fieldnames)
++        writer.writeheader()
++        for r in candidate_rows:
++            rr = dict(r)
++            rr["config"] = json.dumps(rr["config"], sort_keys=True)
++            rr["retest_round_medians_ms"] = json.dumps(rr.get("retest_round_medians_ms"))
++            writer.writerow(rr)
++
++    failure_reason_counts = {}
++    status_counts = {}
++    for record in candidate_rows:
++        status = record.get("status", "unknown")
++        status_counts[status] = status_counts.get(status, 0) + 1
++        reason = record.get("hard_prune_reason")
++        if reason and reason != "not_evaluated":
++            failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
++        if record.get("failure_type"):
++            key = f"{record.get('failure_type')}: {record.get('failure_message') or ''}"
++            failure_reason_counts[key] = failure_reason_counts.get(key, 0) + 1
++
++    stage_diagnostics = {row["stage"]: {
++        "pool_size": row.get("pool_size", 0),
++        "after_hard_prune": row.get("after_hard_prune", 0),
++        "after_runtime_prune": row.get("after_runtime_prune", 0),
++        "benchmarked": row.get("benchmarked", 0),
++        "valid_benchmarked": row.get("valid_benchmarked", 0),
++        "invalid_benchmarked": row.get("invalid_benchmarked", 0),
++        "retested_valid_candidates": row.get("retested_valid_candidates", 0),
++    } for row in rows}
++
++    winner_explanation = None
++    if base_item and selected_best_cfg is not None:
++        winner_explanation = compare_configs(
++            "flash_attention",
++            cfg_dict(base_item[0]),
++            cfg_dict(selected_best_cfg),
++            {"Z": Z, "H": H, "N_CTX": N_CTX, "HEAD_DIM": HEAD_DIM,
++             "causal": causal, "dtype": str(dtype)},
++            args.num_cores,
++        )
++        winner_explanation["baseline_latency_ms"] = _bench_scalar(base_item[1])
++        winner_explanation["winner_latency_ms"] = _bench_scalar(selected_best_timing)
++        winner_explanation["measured_gain_pct"] = (
++            _bench_scalar(base_item[1]) / _bench_scalar(selected_best_timing) - 1.0
++        ) * 100.0
++
++    for record in candidate_rows:
++        record["analytical_features"] = explain_config(
++            "flash_attention", record["config"],
++            {"Z": Z, "H": H, "N_CTX": N_CTX, "HEAD_DIM": HEAD_DIM},
++            args.num_cores,
++        )
++
++    payload = {
++        "case_index": args.case_index,
++        "shape": {"Z": Z, "H": H, "N_CTX": N_CTX, "HEAD_DIM": HEAD_DIM,
++                  "causal": causal, "dtype": str(dtype)},
++        "run_stage": args.max_stage,
++        "num_cores": args.num_cores,
++        "baseline_definition": "This file is one independent cumulative-stage run. Strict comparison requires separately launched B0/B1/B2/B3 processes.",
++        "comparison_definition": "Use run_fa_stage_matrix.py outputs for independent end-to-end comparison; rows here are within-run audit evidence.",
++        "hard_prune_definition": "Concrete FA legality checks require full BM/BN tiles and, for HEAD_DIM>=256, BLOCK_M divisible by four. Analytical capacity pruning remains opt-in; cost model is ranking-only.",
++        "candidate_status_counts": status_counts,
++        "candidate_failure_reason_counts": failure_reason_counts,
++        "stage_diagnostics": stage_diagnostics,
++        "selected_valid_best_correctness": selected_best_error_metrics["allclose"],
++        "selected_valid_best_error_metrics": selected_best_error_metrics,
++        "torch_npu_reference_latency_ms": torch_npu_latency_ms,
++        "requested_bench_method": args.bench_method,
++        "effective_bench_method": getattr(tuned, "effective_bench_method", args.bench_method),
++        "profiler_fallback": bool(getattr(tuned, "profiler_fallback", False)),
++        "reference_spec": reference_spec,
++        "external_cost_model": external_cost_meta,
++        "profile_dir": str(profile_dir),
++        "raw_autotuner_best_profile_dir": str(raw_best_profile_dir),
++        "selected_valid_best_profile_dir": str(selected_best_profile_dir),
++        "candidate_csv": str(csv_path),
++        "end_to_end_autotune_s": end_to_end_autotune_s,
++        "validation_s": validation_s,
++        "stable_retest_s": stable_retest_s,
++        "stable_retest_protocol": {
++            "top_k_per_stage": None if args.retest_top_k == 0 else args.retest_top_k,
++            "retest_all_valid": args.retest_top_k == 0,
++            "rounds": args.retest_rounds,
++            "warmup_ms": args.retest_warmup_ms,
++            "rep_ms": args.retest_rep_ms,
++            "instability_ratio": args.retest_instability_ratio,
++            "max_extra_rounds": args.retest_max_extra_rounds,
++            "score": "median_of_independent_round_medians",
++            "profiler_used_for_ranking": False,
++        },
++        "stable_retest_records": {str(sig): rec for sig, rec in stable_retests.items()},
++        "selected_valid_best_profile_s": selected_profile_s,
++        "validated_selection_pipeline_s": validated_selection_pipeline_s + stable_retest_s,
++        "total_pipeline_s": total_pipeline_s,
++        "candidate_benchmark_s": float(getattr(tuned, "bench_time", 0.0) or 0.0),
++        "expansion_stats": getattr(tuned, "expansion_stats", {}),
++        "raw_autotuner_best_config": cfg_dict(tuned.best_config),
++        "raw_autotuner_best_correctness": raw_autotuner_correctness,
++        "raw_autotuner_best_error_metrics": raw_autotuner_error_metrics,
++        "selected_valid_best_config": cfg_dict(selected_best_cfg),
++        "selected_valid_best_timing_ms": _bench_scalar(selected_best_timing),
++        "selected_valid_best_origin": first_origin(cfg_sig(selected_best_cfg), stage_sigs),
++        "official_B0_best_config": cfg_dict(best_by_stage["B0_official"][0]) if "B0_official" in best_by_stage else None,
++        "official_candidate_count": len(official_configs),
++        "official_candidate_pool_sha256": official_pool_hash,
++        "official_candidate_signatures": [cfg_dict(c) for c in official_configs],
++        "stages": rows,
++        "candidate_records": candidate_rows,
++        "winner_explanation": winner_explanation,
++        "explanation_method": {
++            "type": "operator-aware analytical proxy",
++            "profiler_required_for_causal_claim": True,
++            "module": "third_party/ascend/experiments/operator_explanations.py",
++        },
++        "cost_model_rank_quality": {
++            "all_measured": rank_quality(candidate_rows, "all"),
++            "validated_only": rank_quality(candidate_rows, "validated"),
++            "valid_only": rank_quality(candidate_rows, "valid_only"),
++        },
++        "environment": {
++            "python": platform.python_version(),
++            "torch": getattr(torch, "__version__", "unknown"),
++            "torch_npu": getattr(torch_npu, "__version__", "unknown"),
++            "triton": getattr(triton, "__version__", "unknown"),
++            "cann_install_path": os.getenv("ASCEND_HOME_PATH") or os.getenv("ASCEND_TOOLKIT_HOME"),
++            "soc_version": os.getenv("SOC_VERSION"),
++            "device_id": os.getenv("ASCEND_DEVICE_ID") or os.getenv("DEVICE_ID"),
++            "os": platform.platform(), "machine": platform.machine(), "processor": platform.processor(),
++            "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.repo, text=True, capture_output=True).stdout.strip(),
++            "git_dirty": bool(subprocess.run(["git", "status", "--porcelain"], cwd=args.repo, text=True, capture_output=True).stdout.strip()),
++        },
++    }
++    args.output.parent.mkdir(parents=True, exist_ok=True)
++    args.output.write_text(json.dumps(payload, indent=2, default=str))
++    print(json.dumps(payload, indent=2, default=str))
++    generated_stage_names = {name for name, configs in stages.items() if configs}
++    if any(r.get("best_config") is None for r in rows if r["stage"] in generated_stage_names):
++        raise SystemExit("No numerically valid stable-retested winner exists for at least one generated stage")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/third_party/ascend/experiments/operator_explanations.py b/third_party/ascend/experiments/operator_explanations.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8bcf5837b9b10a9c8f69d84e6dd4c53c8eba00df
+--- /dev/null
++++ b/third_party/ascend/experiments/operator_explanations.py
+@@ -0,0 +1,186 @@
++#!/usr/bin/env python3
++"""Operator-aware analytical explanations for autotuning winners.
++
++These features are *proxies*, not hardware-counter measurements.  They are
++intended to explain how a tiling change alters scheduling, loop counts, tail
++waste and approximate on-chip footprint.  Hardware profiler evidence should
++be used to validate the resulting hypotheses.
++"""
++from __future__ import annotations
++
++from math import ceil
++from typing import Any, Mapping
++
++
++def _kwargs(config: Mapping[str, Any] | None) -> dict[str, Any]:
++    if not config:
++        return {}
++    raw = config.get("kwargs", config)
++    return dict(raw) if isinstance(raw, Mapping) else {}
++
++
++def _get(kw: Mapping[str, Any], *names: str, default: int = 1) -> int:
++    for name in names:
++        if name in kw and kw[name] is not None:
++            return int(kw[name])
++    return int(default)
++
++
++def _waves(programs: int, cores: int) -> dict[str, Any]:
++    cores = max(int(cores), 1)
++    programs = max(int(programs), 0)
++    waves = ceil(programs / cores) if programs else 0
++    last = programs - (waves - 1) * cores if waves else 0
++    return {
++        "program_count_proxy": programs,
++        "wave_count_proxy": waves,
++        "last_wave_programs_proxy": last,
++        "last_wave_core_utilization_proxy": (last / cores) if waves else 0.0,
++    }
++
++
++def _tail(total: int, block: int) -> dict[str, Any]:
++    block = max(int(block), 1)
++    padded = ceil(int(total) / block) * block
++    waste = padded - int(total)
++    return {
++        "padded_elements_proxy": padded,
++        "tail_waste_elements_proxy": waste,
++        "tail_waste_ratio_proxy": waste / max(padded, 1),
++    }
++
++
++def flash_attention_features(config, shape: Mapping[str, Any], num_cores: int = 20) -> dict[str, Any]:
++    kw = _kwargs(config)
++    bm = _get(kw, "BLOCK_M", "BM")
++    bn = _get(kw, "BLOCK_N", "BN")
++    z, h = int(shape["Z"]), int(shape["H"])
++    n_ctx, d = int(shape["N_CTX"]), int(shape["HEAD_DIM"])
++    dtype_bytes = 2
++    acc_bytes = 4
++    programs = z * h * ceil(n_ctx / bm)
++    result = {"operator_family": "cube_vector_mix", "BLOCK_M": bm, "BLOCK_N": bn}
++    result.update(_waves(programs, num_cores))
++    result.update({f"query_{k}": v for k, v in _tail(n_ctx, bm).items()})
++    result.update({f"kv_{k}": v for k, v in _tail(n_ctx, bn).items()})
++    result.update({
++        "kv_iterations_proxy": ceil(n_ctx / bn),
++        "q_tile_bytes_proxy": bm * d * dtype_bytes,
++        "k_tile_bytes_proxy": bn * d * dtype_bytes,
++        "v_tile_bytes_proxy": bn * d * dtype_bytes,
++        "qk_tile_bytes_proxy": bm * bn * acc_bytes,
++        "acc_tile_bytes_proxy": bm * d * acc_bytes,
++        "total_live_footprint_proxy_bytes": (
++            bm * d * dtype_bytes + 2 * bn * d * dtype_bytes
++            + bm * bn * acc_bytes + bm * d * acc_bytes
++        ),
++        "tile_aspect_ratio_proxy": bn / max(bm, 1),
++    })
++    return result
++
++
++def vector_add_features(config, shape: Mapping[str, Any], num_cores: int = 20) -> dict[str, Any]:
++    kw = _kwargs(config)
++    block = _get(kw, "BLOCK_SIZE", "XBLOCK", "XBLOCK_SIZE")
++    n = int(shape.get("N", shape.get("numel", 1)))
++    result = {"operator_family": "vector", "BLOCK_SIZE": block}
++    result.update(_waves(ceil(n / block), num_cores))
++    result.update(_tail(n, block))
++    result["bytes_per_program_proxy"] = block * 2 * 3  # two loads + one store, fp16/bf16
++    return result
++
++
++def softmax_features(config, shape: Mapping[str, Any], num_cores: int = 20) -> dict[str, Any]:
++    kw = _kwargs(config)
++    block = _get(kw, "BLOCK_SIZE", "RBLOCK_SIZE")
++    xblock = _get(kw, "XBLOCK", "XBLOCK_SIZE", default=1)
++    rows = int(shape.get("M", shape.get("n_rows", 1)))
++    cols = int(shape.get("N", shape.get("n_cols", 1)))
++    programs = ceil(rows / xblock)
++    result = {"operator_family": "vector_reduction", "BLOCK_SIZE": block, "XBLOCK": xblock}
++    result.update(_waves(programs, num_cores))
++    result.update({f"reduction_{k}": v for k, v in _tail(cols, block).items()})
++    result.update({
++        "reduction_iterations_proxy": ceil(cols / block),
++        "rows_per_program_proxy": xblock,
++        "live_vector_bytes_proxy": xblock * block * 4,
++    })
++    return result
++
++
++def layer_norm_features(config, shape: Mapping[str, Any], num_cores: int = 20) -> dict[str, Any]:
++    result = softmax_features(config, shape, num_cores)
++    result["operator_family"] = "vector_multi_reduction"
++    result["full_row_passes_proxy"] = 3
++    result["total_reduction_chunks_proxy"] = 3 * result["reduction_iterations_proxy"]
++    return result
++
++
++def matmul_features(config, shape: Mapping[str, Any], num_cores: int = 20) -> dict[str, Any]:
++    kw = _kwargs(config)
++    bm = _get(kw, "BLOCK_M", "BLOCK_SIZE_M")
++    bn = _get(kw, "BLOCK_N", "BLOCK_SIZE_N")
++    bk = _get(kw, "BLOCK_K", "BLOCK_SIZE_K")
++    m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
++    programs = ceil(m / bm) * ceil(n / bn)
++    result = {"operator_family": "cube_dominant_mix", "BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}
++    result.update(_waves(programs, num_cores))
++    result.update({f"m_{key}": value for key, value in _tail(m, bm).items()})
++    result.update({f"n_{key}": value for key, value in _tail(n, bn).items()})
++    result.update({f"k_{key}": value for key, value in _tail(k, bk).items()})
++    result.update({
++        "k_iterations_proxy": ceil(k / bk),
++        "l0a_tile_bytes_proxy": bm * bk * 2,
++        "l0b_tile_bytes_proxy": bk * bn * 2,
++        "l0c_tile_bytes_proxy": bm * bn * 4,
++        "cube_tile_ops_proxy": 2 * bm * bn * bk,
++    })
++    return result
++
++
++FEATURE_BUILDERS = {
++    "flash_attention": flash_attention_features,
++    "vector_add": vector_add_features,
++    "softmax": softmax_features,
++    "layer_norm": layer_norm_features,
++    "matmul_bias": matmul_features,
++}
++
++
++def explain_config(operator: str, config, shape: Mapping[str, Any], num_cores: int = 20) -> dict[str, Any]:
++    try:
++        builder = FEATURE_BUILDERS[operator]
++    except KeyError as exc:
++        raise ValueError(f"Unsupported operator {operator!r}; choose from {sorted(FEATURE_BUILDERS)}") from exc
++    return builder(config, shape, num_cores)
++
++
++def compare_configs(operator: str, baseline, winner, shape: Mapping[str, Any], num_cores: int = 20) -> dict[str, Any]:
++    base = explain_config(operator, baseline, shape, num_cores)
++    new = explain_config(operator, winner, shape, num_cores)
++    delta = {}
++    for key in sorted(set(base) | set(new)):
++        a, b = base.get(key), new.get(key)
++        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
++            delta[key] = b - a
++    hypotheses = []
++    if delta.get("wave_count_proxy", 0) < 0:
++        hypotheses.append("fewer scheduling waves")
++    if delta.get("last_wave_core_utilization_proxy", 0) > 0:
++        hypotheses.append("better last-wave core utilization")
++    for key in ("kv_iterations_proxy", "reduction_iterations_proxy", "total_reduction_chunks_proxy", "k_iterations_proxy"):
++        if delta.get(key, 0) < 0:
++            hypotheses.append(f"fewer {key.replace('_proxy', '').replace('_', ' ')}")
++    tail_keys = [k for k in delta if k.endswith("tail_waste_ratio_proxy")]
++    if any(delta[k] < 0 for k in tail_keys):
++        hypotheses.append("less masked/padded tail work")
++    if delta.get("total_live_footprint_proxy_bytes", 0) > 0:
++        hypotheses.append("larger tiles trade higher on-chip footprint for less loop/scheduling overhead")
++    return {
++        "operator": operator,
++        "baseline_features": base,
++        "winner_features": new,
++        "winner_minus_baseline": delta,
++        "analytical_hypotheses": hypotheses,
++        "evidence_warning": "Analytical proxies only; validate with stable retest and Ascend profiler counters.",
++    }
+diff --git a/third_party/ascend/unittest/autotune_ut/test_candidate_expansion.py b/third_party/ascend/unittest/autotune_ut/test_candidate_expansion.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d849f5d638ca1236c0535df29d0e892211756f7
+--- /dev/null
++++ b/third_party/ascend/unittest/autotune_ut/test_candidate_expansion.py
+@@ -0,0 +1,142 @@
++from triton.runtime.autotuner import Config
++from triton.backends.ascend.runtime.candidate_expansion import expand_official_configs
++
++
++def sigs(configs):
++    return {tuple(sorted(c.kwargs.items())) for c in configs}
++
++
++def test_three_stage_is_cumulative_and_preserves_official():
++    official = [Config({"BLOCK_M": 32, "BLOCK_N": 64}), Config({"BLOCK_M": 64, "BLOCK_N": 128})]
++    stages, stats = expand_official_configs(official, {"N_CTX": 128, "HEAD_DIM": 128},
++                                            {"s1_max_new": 8, "s2_max_new": 8, "s3_max_new": 8})
++    b0, b1, b2, b3 = (stages[k] for k in ("B0_official", "B1_plus_s1", "B2_plus_s2", "B3_plus_s3"))
++    assert sigs(b0) <= sigs(b1) <= sigs(b2) <= sigs(b3)
++    assert sigs(official) == sigs(b0)
++    assert stats["official"] == 2
++
++
++def test_expansion_is_seed_dependent_not_global_cartesian_product():
++    a, _ = expand_official_configs([Config({"BLOCK_M": 16, "BLOCK_N": 16})], {"N_CTX": 128},
++                                    {"s1_max_new": 4, "s2_max_new": 4, "s3_max_new": 0})
++    b, _ = expand_official_configs([Config({"BLOCK_M": 128, "BLOCK_N": 128})], {"N_CTX": 128},
++                                    {"s1_max_new": 4, "s2_max_new": 4, "s3_max_new": 0})
++    assert sigs(a["B2_plus_s2"]) != sigs(b["B2_plus_s2"])
++
++
++def test_s3_is_multi_generation_cost_model_guided():
++    official = [Config({"BLOCK_M": 32, "BLOCK_N": 16}), Config({"BLOCK_M": 64, "BLOCK_N": 32})]
++    stages, stats = expand_official_configs(
++        official, {"N_CTX": 128, "HEAD_DIM": 64, "Z": 1, "H": 1},
++        {"s1_max_new": 8, "s2_max_new": 8, "s3_max_new": 12,
++         "evolution_generations": 3, "evolution_parent_k": 4, "evolution_population": 8,
++         "evolution_patience": 0})
++    assert len(stats["evolution"]["generation_stats"]) == 3
++    assert stats["evolution"]["cost_model"] == "analytic_white_box"
++    assert sigs(stages["B2_plus_s2"]) <= sigs(stages["B3_plus_s3"])
++
++def test_explicit_tail_domain_contains_non_divisor():
++    cfg = Config({'BLOCK_M': 32, 'BLOCK_N': 64}, num_warps=4, num_stages=2)
++    stages, stats = expand_official_configs([cfg], {'N_CTX': 128, 'HEAD_DIM': 64}, {
++        'tunable_parameter': ['BLOCK_M', 'BLOCK_N'],
++        'default_tile_values': [24, 32, 48, 64, 80, 128],
++        'allow_tail_tiles': True,
++        's1_max_new': 64, 's2_max_new': 64, 's3_max_new': 0,
++    })
++    assert 48 in stats['parameter_domains']['BLOCK_M']
++
++
++def test_pareto_selection_metadata():
++    cfg = Config({'BLOCK_M': 32, 'BLOCK_N': 64}, num_warps=4, num_stages=2)
++    _, stats = expand_official_configs([cfg], {'N_CTX': 128, 'HEAD_DIM': 64}, {
++        'tunable_parameter': ['BLOCK_M', 'BLOCK_N'], 'selection_mode': 'pareto',
++        's1_max_new': 8, 's2_max_new': 8, 's3_max_new': 8,
++    })
++    assert stats['selection_mode'] == 'pareto'
++
++
++def test_s1_unifies_multi_radius_local_expansion():
++    official = [Config({"BLOCK_M": 32, "BLOCK_N": 32})]
++    stages, stats = expand_official_configs(
++        official, {"N_CTX": 128, "HEAD_DIM": 64},
++        {"max_stage": "B1_plus_s1", "tunable_parameter": ["BLOCK_M", "BLOCK_N"],
++         "default_tile_values": [8, 16, 24, 32, 48, 64, 96, 128], "s1_max_new": 64})
++    assert stats["s1_strategy"]["type"] == "structured_multiscale_local"
++    assert stats["s1_strategy"]["domain_index_offsets"] == [-1, 1]
++    assert stats["s1_strategy"]["scale_factors"] == [0.5, 0.75, 1.25, 1.5, 2.0]
++    assert len(stages["B1_plus_s1"]) > len(stages["B0_official"])
++
++
++def test_s2_is_resource_coverage_not_numeric_radius():
++    official = [Config({"BLOCK_M": 64, "BLOCK_N": 64})]
++    stages, stats = expand_official_configs(
++        official, {"N_CTX": 128, "HEAD_DIM": 64, "H": 1, "Z": 1},
++        {"max_stage": "B2_plus_s2", "tunable_parameter": ["BLOCK_M", "BLOCK_N"],
++         "default_tile_values": [8, 16, 24, 32, 48, 64, 96, 128],
++         "s1_max_new": 8, "s2_max_new": 24, "s2_candidates_per_region": 2})
++    assert stats["s2_strategy"] == "resource_coverage"
++    coverage = stats["s2_resource_coverage"]
++    assert coverage["reservoir"] >= coverage["emitted"]
++    assert coverage["covered_after_generation"] >= coverage["covered_before"]
++    assert sigs(stages["B1_plus_s1"]) <= sigs(stages["B2_plus_s2"])
++
++
++def test_s3_uses_cost_guided_global_domain_mutation():
++    official = [Config({"BLOCK_M": 32, "BLOCK_N": 64})]
++    _, stats = expand_official_configs(
++        official, {"N_CTX": 128, "HEAD_DIM": 64},
++        {"max_stage": "B3_plus_s3", "tunable_parameter": ["BLOCK_M", "BLOCK_N"],
++         "default_tile_values": [8, 16, 24, 32, 48, 64, 96, 128],
++         "s1_max_new": 8, "s2_max_new": 8, "s3_max_new": 8,
++         "evolution_generations": 2, "evolution_parent_k": 4, "evolution_population": 8})
++    assert stats["s3_strategy"] == "pareto_analytic_objective_evolution_with_cost_ranked_mutation"
++
++
++def test_s2_region_tracks_ratio_and_program_density():
++    from triton.backends.ascend.runtime.candidate_expansion import _resource_region
++    args = {"N_CTX": 128, "HEAD_DIM": 64, "H": 1, "Z": 1}
++    opts = {"num_cores": 20}
++    narrow = Config({"BLOCK_M": 32, "BLOCK_N": 32})
++    wide = Config({"BLOCK_M": 16, "BLOCK_N": 128})
++    assert _resource_region(narrow, args, opts) != _resource_region(wide, args, opts)
++
++
++def test_pareto_primary_objective_is_full_predicted_cost():
++    from triton.backends.ascend.runtime.candidate_expansion import _objectives, analytic_cost_model
++    args = {"N_CTX": 128, "HEAD_DIM": 64, "H": 1, "Z": 1}
++    opts = {"num_cores": 20}
++    cfg = Config({"BLOCK_M": 16, "BLOCK_N": 128})
++    assert _objectives(cfg, args, opts)[0] == analytic_cost_model(cfg, args, opts).score
++
++
++def test_s3_axis_balanced_mutation_and_early_stop_metadata():
++    official = [Config({"BLOCK_M": 32, "BLOCK_N": 64})]
++    _, stats = expand_official_configs(
++        official, {"N_CTX": 128, "HEAD_DIM": 64},
++        {"tunable_parameter": ["BLOCK_M", "BLOCK_N"],
++         "default_tile_values": [8, 16, 32, 64, 128],
++         "s1_max_new": 4, "s2_max_new": 4, "s3_max_new": 8,
++         "evolution_generations": 4, "evolution_parent_k": 4,
++         "evolution_population": 8, "evolution_patience": 1})
++    generation_stats = stats["evolution"]["generation_stats"]
++    assert generation_stats
++    assert len(generation_stats) <= 4
++    assert "relative_improvement" in generation_stats[0]
++
++
++def test_retain_all_generated_ignores_stage_topk_limits():
++    official = [Config({"BLOCK_M": 32, "BLOCK_N": 64})]
++    _, limited = expand_official_configs(
++        official, {"N_CTX": 128, "HEAD_DIM": 64, "H": 1, "Z": 1},
++        {"max_stage": "B2_plus_s2", "tunable_parameter": ["BLOCK_M", "BLOCK_N"],
++         "default_tile_values": [8, 16, 24, 32, 48, 64, 96, 128],
++         "s1_max_new": 1, "s2_max_new": 1})
++    stages_all, all_stats = expand_official_configs(
++        official, {"N_CTX": 128, "HEAD_DIM": 64, "H": 1, "Z": 1},
++        {"max_stage": "B2_plus_s2", "tunable_parameter": ["BLOCK_M", "BLOCK_N"],
++         "default_tile_values": [8, 16, 24, 32, 48, 64, 96, 128],
++         "s1_max_new": 1, "s2_max_new": 1, "retain_all_generated": True})
++    assert all_stats["retain_all_generated"] is True
++    assert all_stats["s1_new"] == all_stats["s1_generated"]
++    assert all_stats["s2_new"] == all_stats["s2_generated"]
++    assert len(stages_all["B2_plus_s2"]) > limited["b2"]
+diff --git a/third_party/ascend/unittest/autotune_ut/test_hardware_pruning.py b/third_party/ascend/unittest/autotune_ut/test_hardware_pruning.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e028db84f52fc42438531faf5b8e31c2eca2aeb7
+--- /dev/null
++++ b/third_party/ascend/unittest/autotune_ut/test_hardware_pruning.py
+@@ -0,0 +1,31 @@
++from triton.runtime.autotuner import Config
++from triton.backends.ascend.runtime.hardware_pruning import check_hardware_constraints, hard_prune_configs
++
++
++def test_small_block_m_values_are_preserved():
++    configs = [Config({"BLOCK_M": v, "BLOCK_N": 2}) for v in (1, 2, 4, 8)]
++    kept, _ = hard_prune_configs(configs, {"N_CTX": 128, "HEAD_DIM": 64}, 2,
++                                 {"allowed_small_block_m": [1, 2, 4, 8], "large_block_m_multiple_of": 4})
++    assert kept == configs
++
++
++def test_causal_order_constraint_is_explicit_not_global():
++    cfg = Config({"BLOCK_M": 32, "BLOCK_N": 64})
++    assert check_hardware_constraints(cfg, {"N_CTX": 128}, 2, {"block_m_ge_block_n": False})[0]
++    valid, reason, _ = check_hardware_constraints(cfg, {"N_CTX": 128}, 2, {"block_m_ge_block_n": True})
++    assert not valid and "BLOCK_M_lt_BLOCK_N" in reason
++
++
++def test_tail_tiles_are_safe_by_default():
++    cfg = Config({"BLOCK_M": 48, "BLOCK_N": 80})
++    assert check_hardware_constraints(cfg, {"N_CTX": 130, "HEAD_DIM": 64}, 2)[0]
++    assert not check_hardware_constraints(cfg, {"N_CTX": 130, "HEAD_DIM": 64}, 2,
++                                          {"require_n_ctx_divisible": True})[0]
++
++
++def test_capacity_estimate_is_only_aggressive_prune():
++    cfg = Config({"BLOCK_M": 4096, "BLOCK_N": 4096, "BLOCK_K": 4096})
++    assert check_hardware_constraints(cfg, {"N_CTX": 4096, "HEAD_DIM": 4096}, 2)[0]
++    valid, reason, usage = check_hardware_constraints(cfg, {"N_CTX": 4096, "HEAD_DIM": 4096}, 2,
++                                                      {"aggressive_capacity": True})
++    assert not valid and reason.startswith("analytical_") and usage
