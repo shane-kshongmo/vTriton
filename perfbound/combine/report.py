@@ -70,6 +70,13 @@ class KernelReport:
     calibration_warnings: list[str] = field(default_factory=list)
     calibration_fallbacks: list[str] = field(default_factory=list)
 
+    # Loop-resolution diagnostics (visibility into how loose t_bound_us may
+    # be due to unresolved, data-dependent scf.for trip counts). None when
+    # the DES JSON predates this feature or the kernel has no loops.
+    # t_bound_worst_case_us is diagnostic-only — NOT a sound lower bound —
+    # and must never be conflated with the primary t_bound_us.
+    loop_resolution: Optional[dict] = None
+
     # Profile diagnosis (from profile_utilization)
     profile_diagnosis: Optional[str] = None
     profile_dominant_component: Optional[str] = None
@@ -144,6 +151,7 @@ class KernelReport:
                 "method": self.headroom_method,
                 "potential_speedup_upper": self.potential_speedup_upper,
             },
+            "loop_resolution": self.loop_resolution,
             "recommended_action": self.recommended_action,
         }
         # A.6.1 reachability block
@@ -218,6 +226,21 @@ class KernelReport:
                 lines.append(f"  warning: {warning}")
             for fallback in self.calibration_fallbacks:
                 lines.append(f"  diagnostic fallback: {fallback}")
+
+        if self.loop_resolution and self.loop_resolution.get("unresolved", 0) > 0:
+            lines.extend([
+                "",
+                "Loop resolution:",
+                f"  {self.loop_resolution['unresolved']}/{self.loop_resolution['total']} "
+                "loop(s) have data-dependent trip counts (loop_multiplier=1, "
+                "the sound minimum, applied to t_bound_us)",
+            ])
+            worst = self.loop_resolution.get("t_bound_worst_case_us")
+            if worst is not None:
+                lines.append(
+                    f"  diagnostic worst-case T_bound (NOT sound, NOT the "
+                    f"primary bound): {worst:.2f} us"
+                )
 
         lines.append(f"")
         lines.append(f"Attribution (absolute and fraction of T_bound):")

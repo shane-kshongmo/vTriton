@@ -301,6 +301,94 @@ def bound_from_extract(
     )
 
 
+def worst_case_bound_us(
+    extract: HIVMExtract,
+    loop_diagnostics: Optional[dict],
+    grid_info,
+    calib_db: CalibrationDB,
+    kernel_name: str = "unknown",
+    n_cores: int = 20,
+    total_programs: int = 1,
+) -> Optional[float]:
+    """Diagnostic-only companion bound using each unresolved loop's sound
+    structural upper-bound trip-count estimate in place of the primary
+    (sound, minimum-trip-count) multiplier=1 default.
+
+    This is NOT a lower bound — a program whose true trip count is below
+    the estimate would run faster than this number predicts — so it must
+    never be used as, or confused with, the primary ``t_bound_us``. It
+    exists purely to make loop-affecting compile-time parameters (like a
+    kernel's sub-chunk size) visible in the report even when the primary
+    bound is — correctly — insensitive to them.
+
+    Reuses the exact same ``compute_bounds``/``combine`` aggregation path as
+    the primary bound (not reimplemented) on a duplicated op list with
+    ``loop_multiplier`` overridden for ops whose source ``line`` falls
+    inside an unresolved loop's body range.
+
+    Returns:
+        The worst-case T_bound in microseconds, or None if no unresolved
+        loop in ``loop_diagnostics`` has a derivable upper-bound estimate
+        (including when ``loop_diagnostics`` itself is None — e.g. the DES
+        JSON predates this feature).
+    """
+    if not loop_diagnostics:
+        return None
+    loops = loop_diagnostics.get("loops", [])
+    ranges = [
+        (
+            loop["body_first_line"],
+            loop["body_last_line"],
+            loop["upper_bound_trip_count_estimate"],
+        )
+        for loop in loops
+        if not loop.get("resolved", True)
+        and loop.get("upper_bound_trip_count_estimate", -1) > 0
+        and loop.get("body_first_line", 0) > 0
+        and loop.get("body_last_line", 0) >= loop.get("body_first_line", 0)
+    ]
+    if not ranges:
+        return None
+
+    import copy
+
+    from ..model.bounds import compute_bounds
+
+    worst_ops = []
+    for op in extract.operations:
+        override = op.loop_multiplier
+        for first, last, estimate in ranges:
+            if first <= op.line <= last:
+                override = max(override, estimate)
+                break
+        if override != op.loop_multiplier:
+            new_op = copy.copy(op)
+            new_op.loop_multiplier = override
+            worst_ops.append(new_op)
+        else:
+            worst_ops.append(op)
+
+    worst_extract = HIVMExtract(
+        operations=worst_ops,
+        handoffs=extract.handoffs,
+        o_prec=extract.o_prec,
+        total_flops=extract.total_flops,
+        total_bytes=extract.total_bytes,
+        transfer_sizes=extract.transfer_sizes,
+        transfer_alignments=extract.transfer_alignments,
+        unit_assignment=extract.unit_assignment,
+    )
+    pieces = compute_bounds(
+        grid_info, worst_extract, calib_db,
+        n_cores=n_cores, total_programs=total_programs,
+    )
+    result = combine(
+        pieces.grid, pieces.component, pieces.serial,
+        kernel_name=kernel_name, extract=worst_extract, calibration=calib_db,
+    )
+    return result.t_bound_us
+
+
 # ── Gap helpers (diagnostic only — not part of the bound) ──────────────────
 
 # Op-name prefixes for eligibility category lookup

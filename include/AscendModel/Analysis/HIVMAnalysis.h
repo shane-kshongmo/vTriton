@@ -104,6 +104,19 @@ struct HIVMLoopDiagnostic {
   int64_t tripCount = 1;
   int64_t multiplier = 1;
   bool resolved = false;
+  // Structural upper bound on trip count derived when the exact trip count
+  // is unresolvable (e.g. program-id-dependent bounds clamped by a
+  // resolvable compile-time constant, `upper = min(X, lower + CONST)`).
+  // -1 means no such bound could be derived. This is NOT a sound lower
+  // bound and must never feed the primary (sound) op.loopMultiplier — it
+  // is diagnostic-only, consumed downstream to compute a companion
+  // worst-case estimate.
+  int64_t upperBoundTripCountEstimate = -1;
+  // Source line range spanning this loop's body (min/max line of ops
+  // emitted while analyzing its region), so downstream consumers can
+  // attribute individual ops to this loop without re-parsing the IR.
+  int bodyFirstLine = 0;
+  int bodyLastLine = 0;
 };
 
 struct HIVMCostStat {

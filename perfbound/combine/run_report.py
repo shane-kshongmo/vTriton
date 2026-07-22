@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from ..extract.hivm_extractor import extract_hivm, HIVMExtract
+from ..extract.hivm_extractor import extract_hivm, load_loop_diagnostics, HIVMExtract
 from ..extract.dsl_extractor import GridInfo
 from ..calibration.calib_loader import (
     DEFAULT_CALIB_PATH,
@@ -33,7 +33,7 @@ from ..calibration.calib_loader import (
 )
 from ..calibration.constants import CalibrationDB
 from ..model.bounds import compute_bounds
-from .bound_combiner import combine, BoundResult
+from .bound_combiner import combine, worst_case_bound_us, BoundResult
 from .report import KernelReport
 from .two_limit import compute_two_limit, TwoLimitResult
 
@@ -127,6 +127,38 @@ def report_from_desgraph(
 
     report = KernelReport.from_bound(result, two_limit=two_limit)
     report.merge_calibration(calib_db, str(calibration_source))
+
+    # Loop-resolution diagnostics: surface whether t_bound_us may be loose
+    # due to unresolved (data-dependent) scf.for trip counts, and — when a
+    # sound structural upper-bound estimate is derivable — a clearly
+    # non-primary companion worst-case number. merge_calibration() above
+    # *overwrites* calibration_warnings, so this must run after it.
+    loop_diagnostics = load_loop_diagnostics(des_json)
+    if loop_diagnostics:
+        t_worst_us = worst_case_bound_us(
+            extract, loop_diagnostics, grid_info, calib_db,
+            kernel_name=kernel_name, n_cores=n_cores,
+            total_programs=total_programs,
+        )
+        report.loop_resolution = {
+            "total": loop_diagnostics.get("total", 0),
+            "resolved": loop_diagnostics.get("resolved", 0),
+            "unresolved": loop_diagnostics.get("unresolved", 0),
+            "unresolved_lines": [
+                loop["line"] for loop in loop_diagnostics.get("loops", [])
+                if not loop.get("resolved", True)
+            ],
+            "t_bound_worst_case_us": t_worst_us,
+        }
+        if loop_diagnostics.get("unresolved", 0) > 0:
+            report.calibration_warnings.append(
+                f"{loop_diagnostics.get('unresolved', 0)}/"
+                f"{loop_diagnostics.get('total', 0)} loop(s) have "
+                "data-dependent trip counts that default to "
+                "loop_multiplier=1 (the loop's minimum possible trip "
+                "count) — T_bound may be significantly loose "
+                f"(lines: {report.loop_resolution['unresolved_lines']})."
+            )
 
     if op_summary_csv is not None:
         _apply_csv_analysis(

@@ -72,6 +72,9 @@ class OpRecord:
     depends_on: List[int] = field(default_factory=list)
     src_space: str = ""
     dst_space: str = ""
+    # Source line in the analyzed NPUIR, for attributing ops to a containing
+    # loop's body line range (loop_diagnostics[].body_first_line/last_line).
+    line: int = 0
 
     # Repeat/mask/SIMD-lane params (for Gap 4 intra-unit attribution).
     # C++ emitDESGraph now emits repeat/mask per op (Task 4a).
@@ -213,8 +216,27 @@ def load_hivm_desgraph(path: Path | str) -> List[OpRecord]:
             mask=node.get("mask", 0),
             start_cycle=node.get("start_cycle", 0),
             end_cycle=node.get("end_cycle", 0),
+            line=node.get("line", 0),
         ))
     return ops
+
+
+def load_loop_diagnostics(path: Path | str) -> Optional[dict]:
+    """Load the C++ ``loop_diagnostics`` block from a DES graph JSON, if present.
+
+    This block (``{"total","resolved","unresolved","max_trip_count","loops":
+    [{"line","lower","upper","step","trip_count","multiplier","resolved",
+    "upper_bound_trip_count_estimate","body_first_line","body_last_line"}]}``)
+    is emitted by ``HIVMAnalysisReport::emitDESGraph`` (added in commit
+    ``aba4a2c``; the ``upper_bound_trip_count_estimate``/``body_first_line``/
+    ``body_last_line`` fields were added alongside the perf_bound loop-
+    visibility work). Returns ``None`` — not an error — when the DES JSON
+    predates either addition or the key is otherwise absent; callers must
+    treat that as "no diagnostic data available".
+    """
+    with open(path) as f:
+        data = json.load(f)
+    return data.get("loop_diagnostics")
 
 
 def load_pipeline_depgraph(path: Path | str) -> List[OpRecord]:

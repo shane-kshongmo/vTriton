@@ -1551,6 +1551,87 @@ static bool parseForTripCount(mlir::scf::ForOp forOp, const AnalysisState &state
   return true;
 }
 
+// Derive a sound STRUCTURAL upper bound on an scf.for's trip count even when
+// the exact trip count is unresolvable (e.g. a program-id-dependent bound).
+// Recognizes the common "clamped by a constant" shape: an upper-bound
+// expression built from arith.minsi(...) with at least one branch of the
+// form `arith.addi(lowerBound, CONST)` (in either operand order), where
+// `lowerBound` is the SAME SSA value as the loop's own lower bound and
+// CONST resolves to a compile-time constant. That branch alone proves
+// `trip_count <= CONST`, regardless of whether the other minsi operand (or
+// the lower bound's own numeric value) ever resolves — unlike
+// resolveMLIRValueImpl's arith.MinSIOp handling, which requires BOTH
+// operands to fully resolve to reason about anything.
+//
+// This is NOT a sound lower bound (a real program can have a smaller trip
+// count than this) and must never feed the primary op.loopMultiplier used
+// for T_bound — it is diagnostic-only, consumed to compute a clearly-labeled
+// companion worst-case estimate.
+static bool estimateForTripCountUpperBoundImpl(
+    mlir::Value upperValue, mlir::Value lowerBoundValue,
+    const AnalysisState &state, int64_t &bound,
+    llvm::SmallDenseSet<mlir::Value, 8> &visited) {
+  if (!visited.insert(upperValue).second)
+    return false;
+  auto finish = [&](bool ok) {
+    visited.erase(upperValue);
+    return ok;
+  };
+
+  mlir::Operation *defOp = upperValue.getDefiningOp();
+  if (!defOp || defOp->getNumResults() != 1)
+    return finish(false);
+
+  if (auto minOp = llvm::dyn_cast<mlir::arith::MinSIOp>(defOp)) {
+    int64_t lhsBound = 0, rhsBound = 0;
+    bool lhsOk = estimateForTripCountUpperBoundImpl(
+        minOp.getLhs(), lowerBoundValue, state, lhsBound, visited);
+    bool rhsOk = estimateForTripCountUpperBoundImpl(
+        minOp.getRhs(), lowerBoundValue, state, rhsBound, visited);
+    if (!lhsOk && !rhsOk)
+      return finish(false);
+    bound = (lhsOk && rhsOk) ? std::min(lhsBound, rhsBound)
+                             : (lhsOk ? lhsBound : rhsBound);
+    return finish(true);
+  }
+
+  if (auto addOp = llvm::dyn_cast<mlir::arith::AddIOp>(defOp)) {
+    mlir::Value constOperand;
+    if (addOp.getLhs() == lowerBoundValue)
+      constOperand = addOp.getRhs();
+    else if (addOp.getRhs() == lowerBoundValue)
+      constOperand = addOp.getLhs();
+    else
+      return finish(false);
+    int64_t constValue = 0;
+    if (!resolveMLIRValue(constOperand, state, constValue) || constValue < 0)
+      return finish(false);
+    bound = constValue;
+    return finish(true);
+  }
+
+  // Not a recognized "clamped by constant" shape from this branch — no
+  // constraint derivable here (the min-combination above still lets a
+  // sibling branch supply the bound).
+  return finish(false);
+}
+
+static bool estimateForTripCountUpperBound(mlir::scf::ForOp forOp,
+                                            const AnalysisState &state,
+                                            int64_t &upperBoundTripCount) {
+  int64_t step = 0;
+  if (!resolveMLIRValue(forOp.getStep(), state, step) || step <= 0)
+    return false;
+  int64_t bound = 0;
+  llvm::SmallDenseSet<mlir::Value, 8> visited;
+  if (!estimateForTripCountUpperBoundImpl(forOp.getUpperBound(),
+                                          forOp.getLowerBound(), state, bound,
+                                          visited))
+    return false;
+  upperBoundTripCount = std::max<int64_t>(1, ceilDiv(bound, step));
+  return true;
+}
+
 static bool captureConstant(mlir::Operation *op, AnalysisState &state) {
   auto constantOp = llvm::dyn_cast<mlir::arith::ConstantOp>(op);
   if (!constantOp || op->getNumResults() != 1)
@@ -2581,15 +2662,43 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
         std::max<int64_t>(report.maxLoopTripCount, tripCount);
     report.maxLoopMultiplier =
         std::max<int64_t>(report.maxLoopMultiplier, nestedMultiplier);
-    report.loopDiagnostics.push_back(HIVMLoopDiagnostic{
-        getLineNumberFromLocation(forOp.getLoc()),
-        hasLower ? lowerBound : 0,
-        hasUpper ? upperBound : 0,
-        hasStep ? step : 0,
-        tripCount,
-        nestedMultiplier,
-        hasConcreteTripCount,
+
+    // Diagnostic-only structural upper bound for unresolved loops (e.g.
+    // program-id-dependent bounds clamped by a resolvable constant like a
+    // sub-chunk size). Never feeds nestedMultiplier/loopMultiplier above.
+    int64_t upperBoundTripCountEstimate = -1;
+    if (!hasConcreteTripCount)
+      estimateForTripCountUpperBound(forOp, state, upperBoundTripCountEstimate);
+
+    // Source line range spanning the loop body, so downstream (Python)
+    // consumers can attribute individual ops to this loop by line number
+    // without re-parsing the IR.
+    int bodyFirstLine = 0;
+    int bodyLastLine = 0;
+    forOp.getOperation()->walk([&](mlir::Operation *innerOp) {
+      if (innerOp == forOp.getOperation())
+        return;
+      int line = getLineNumberFromLocation(innerOp->getLoc());
+      if (line <= 0)
+        return;
+      if (bodyFirstLine == 0 || line < bodyFirstLine)
+        bodyFirstLine = line;
+      if (line > bodyLastLine)
+        bodyLastLine = line;
     });
+
+    HIVMLoopDiagnostic diag;
+    diag.lineNumber = getLineNumberFromLocation(forOp.getLoc());
+    diag.lowerBound = hasLower ? lowerBound : 0;
+    diag.upperBound = hasUpper ? upperBound : 0;
+    diag.step = hasStep ? step : 0;
+    diag.tripCount = tripCount;
+    diag.multiplier = nestedMultiplier;
+    diag.resolved = hasConcreteTripCount;
+    diag.upperBoundTripCountEstimate = upperBoundTripCountEstimate;
+    diag.bodyFirstLine = bodyFirstLine;
+    diag.bodyLastLine = bodyLastLine;
+    report.loopDiagnostics.push_back(diag);
     AnalysisState loopState = state;
     seedLoopCarriedState(forOp, state, loopState);
     if (replayIterations && hasConcreteTripCount && tripCount > 1) {
@@ -4460,6 +4569,9 @@ void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
        << ",\"trip_count\":" << loop.tripCount
        << ",\"multiplier\":" << loop.multiplier
        << ",\"resolved\":" << (loop.resolved ? "true" : "false")
+       << ",\"upper_bound_trip_count_estimate\":" << loop.upperBoundTripCountEstimate
+       << ",\"body_first_line\":" << loop.bodyFirstLine
+       << ",\"body_last_line\":" << loop.bodyLastLine
        << "}";
   }
   os << "]\n";

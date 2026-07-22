@@ -231,6 +231,92 @@ class TestTritonsimHivmCLI:
         assert data.get("loop_diagnostics", {}).get("resolved", 0) >= 1
         assert "Loops:" in result.stdout
 
+    def test_unresolvable_loop_gets_sound_upper_bound_estimate(self, tmp_path):
+        """A program-id/data-dependent scf.for bound (unresolvable to an
+        exact constant) should still get a diagnostic-only structural upper
+        bound when clamped by a resolvable compile-time constant — without
+        that estimate ever leaking into the primary (sound) loop_multiplier
+        actually applied to ops.
+        """
+        source = HIVM_ADD_KERNEL.read_text()
+        # Add an unbound scalar arg standing in for a program-id-derived
+        # value that can never resolve to a compile-time constant.
+        source = source.replace(
+            "                      %arg2: memref<?xf32, #hivm.address_space<gm>>) {",
+            "                      %arg2: memref<?xf32, #hivm.address_space<gm>>,\n"
+            "                      %arg3: i32) {",
+            1,
+        )
+        source = source.replace(
+            "  %c0 = arith.constant 0 : index\n",
+            (
+                "  %c0 = arith.constant 0 : index\n"
+                "  %c1_i32 = arith.constant 1 : i32\n"
+                "  %c0_i32 = arith.constant 0 : i32\n"
+                "  %c16_i32 = arith.constant 16 : i32\n"
+                "  %clamp_i32 = arith.addi %c0_i32, %c16_i32 : i32\n"
+                "  %upper_i32 = arith.minsi %arg3, %clamp_i32 : i32\n"
+            ),
+            1,
+        )
+        loop_start = (
+            "  hivm.hir.vadd ins(%ub0, %ub1 : memref<1024xf32, #hivm.address_space<ub>>,"
+        )
+        source = source.replace(
+            loop_start,
+            "  scf.for %i = %c0_i32 to %upper_i32 step %c1_i32 : i32 {\n" + loop_start,
+            1,
+        )
+        loop_end = (
+            "      outs(%ub2 : memref<1024xf32, #hivm.address_space<ub>>)\n"
+        )
+        source = source.replace(loop_end, loop_end + "  }\n", 1)
+
+        npuir_file = tmp_path / "hivm_add_unresolvable_loop.npuir.mlir"
+        npuir_file.write_text(source)
+        out_file = tmp_path / "hivm_add_unresolvable_loop_des.json"
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(npuir_file),
+            "--scheduler", "des",
+            "--des-graph-file", str(out_file),
+        ]
+        if CALIBRATED_HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(CALIBRATED_HW_CONFIG)])
+        elif HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(HW_CONFIG)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (
+            f"tritonsim-hivm failed (returncode={result.returncode}): "
+            f"{result.stderr[:300]}"
+        )
+
+        data = json.loads(out_file.read_text())
+        loop_diag = data.get("loop_diagnostics", {})
+        assert loop_diag.get("unresolved", 0) >= 1, (
+            "the arg3-clamped loop must NOT resolve to an exact trip count"
+        )
+        loops = loop_diag.get("loops", [])
+        matching = [l for l in loops if not l.get("resolved", True)]
+        assert matching, "expected at least one unresolved loop entry"
+        loop = matching[0]
+        assert loop["upper_bound_trip_count_estimate"] == 16, (
+            "structural min(unresolvable, lower+16) should yield a sound "
+            f"upper-bound estimate of 16, got {loop}"
+        )
+        assert loop["body_first_line"] > 0 and loop["body_last_line"] >= loop["body_first_line"]
+
+        # Soundness check: the estimate must NOT leak into the primary
+        # multiplier actually applied to ops inside the loop.
+        ops = data.get("operations", data.get("nodes", []))
+        vadds = [op for op in ops if op.get("name") == "vadd"]
+        assert vadds, "expected the vadd op to be present in the schedule"
+        assert all(op.get("loop_multiplier", 1) == 1 for op in vadds), (
+            "the diagnostic upper-bound estimate must never feed the "
+            "primary (sound) loop_multiplier"
+        )
+
     def test_direct_semantic_scalar_like_ops_are_modeled(self, tmp_path):
         """Text fallback should not drop arith/affine/memref scalar work."""
         source = HIVM_ADD_KERNEL.read_text()
