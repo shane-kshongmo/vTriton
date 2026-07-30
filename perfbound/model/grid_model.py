@@ -50,6 +50,7 @@ def compute_grid_floor(
     i_binding: float,
     total_work: float,
     is_cube_kernel: bool = True,
+    n_cores_override: int | None = None,
 ) -> GridBound:
     """Compute T_grid_floor from Tier 1 grid information.
 
@@ -75,11 +76,17 @@ def compute_grid_floor(
                     internally.
         is_cube_kernel: If True, use Cube core count (20 AIC); if False,
                         use Vector-only count (40 AIV).
+        n_cores_override: If given, use this core count directly (ignores
+                        is_cube_kernel). Callers pass the SAME resolved count
+                        they used for Tier-2 wave scaling so both tiers agree.
 
     Returns:
         GridBound with T_grid_floor and all decomposed terms.
     """
-    n_cores = core.n_cores_cube if is_cube_kernel else core.n_cores_vector_only
+    n_cores = (
+        n_cores_override if n_cores_override is not None
+        else (core.n_cores_cube if is_cube_kernel else core.n_cores_vector_only)
+    )
 
     # Use occupancy and load_balance from GridInfo if available,
     # otherwise compute from grid geometry

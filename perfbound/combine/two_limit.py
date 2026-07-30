@@ -25,7 +25,7 @@ from typing import Optional, TYPE_CHECKING
 
 from ..extract.hivm_extractor import HIVMExtract, OpRecord, HandoffRecord
 from ..extract.op_classifier import Component
-from ..extract.eligibility_oracle import get_eligibility
+from ..extract.eligibility_oracle import get_eligibility, op_category_for_name
 
 if TYPE_CHECKING:
     from ..calibration.constants import CalibrationDB
@@ -59,22 +59,7 @@ class TwoLimitResult:
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
-
-_MATMUL_KEYWORDS = ("matmul", "mm", "bmm")
-_REDUCTION_KEYWORDS = ("reduce", "sum", "max", "min", "arg")
-_COMPARE_KEYWORDS = ("cmp", "compare")
-
-
-def _op_category(op_name: str) -> str:
-    """Map an op name to an eligibility-oracle category."""
-    lower = op_name.lower()
-    if any(k in lower for k in _MATMUL_KEYWORDS):
-        return "matmul"
-    if any(k in lower for k in _REDUCTION_KEYWORDS):
-        return "reduction"
-    if any(k in lower for k in _COMPARE_KEYWORDS):
-        return "compare"
-    return "elementwise"
+# Op-name → eligibility category lives in eligibility_oracle.op_category_for_name.
 
 
 def _build_idealized_extract(extract: HIVMExtract) -> HIVMExtract:
@@ -120,7 +105,7 @@ def _build_idealized_extract(extract: HIVMExtract) -> HIVMExtract:
             continue
 
         # Check if this op is mis-placed (Gap 1)
-        category = _op_category(op.op_name)
+        category = op_category_for_name(op.op_name)
         prec_str = op.precision.value if op.precision else None
         eligible = get_eligibility(category, prec_str)
 

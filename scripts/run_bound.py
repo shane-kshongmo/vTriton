@@ -115,13 +115,22 @@ def build_tritonsim_command(
     des_json: str | Path,
     hardware_config: str | Path | None = None,
     python_path: str | Path | None = None,
+    scheduler: str = "des",
 ) -> list[str]:
+    # scheduler="des" (aligned with hivm_runner's default) so the emitted graph
+    # carries a populated critical path / per-op event-wait cycles for the
+    # Gap-3 diagnostic. It is bound-invariant vs "static": DES replays each op
+    # loop_multiplier times with multiplier=1 while static keeps one op with
+    # multiplier=N, so Σ(duration×loop_multiplier) — and thus T_bound — is
+    # identical; DES merely adds the critical-path attribution.
     cmd = [
         str(tritonsim_hivm),
         "--npuir-file",
         str(npuir_path),
         "--des-graph-file",
         str(des_json),
+        "--scheduler",
+        str(scheduler),
     ]
     if hardware_config:
         cmd.extend(["--hardware-config", str(hardware_config)])

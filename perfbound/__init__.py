@@ -3,8 +3,11 @@
 # Computes a provably-conservative lower bound on execution time for
 # Triton kernels on Ascend NPU (910B3).
 #
-# Two-tier bound:
-#   T_bound = max(T_grid_floor, T_core_floor) + T_serial_irreducible
+# Two-tier bound (sound form — see bound_combiner.py and spec §4.1/§A.5):
+#   T_bound = max(T_grid_floor, T_core_floor + T_serial_irreducible)
+# T_serial attaches INSIDE the max (it is intra-core). The additive shorthand
+# max(grid, core) + serial is non-conservative (max(a,b)+c >= max(a, b+c)) and
+# must not be used.
 #
 # Modules:
 #   calibration/  — M1: hardware constant calibration database

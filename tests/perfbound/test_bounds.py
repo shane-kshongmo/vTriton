@@ -29,6 +29,81 @@ def _make_grid(n_cores=20, occupancy=1.0, load_balance=1.0, total_programs=1) ->
     )
 
 
+class TestIsCubeKernelDerivation:
+    """Spec §1.1: vector-only kernels parallelize across 40 AIV; cube-bearing
+    kernels across 20 AIC. compute_bounds derives this from the op mix when
+    n_cores is not pinned, and keeps BOTH tiers on the same count."""
+
+    def _vector_only(self) -> HIVMExtract:
+        ops = [
+            OpRecord(op_id=1, op_name="mul", component=Component.VECTOR,
+                     precision=Precision.FP16, pipe="Vector",
+                     bytes_transferred=0, elements=4096, flops=4096,
+                     loop_multiplier=1, depends_on=[]),
+            OpRecord(op_id=2, op_name="load", component=Component.MTE_GM,
+                     precision=Precision.FP16, pipe="VecMTE2",
+                     bytes_transferred=8192, elements=0,
+                     loop_multiplier=1, depends_on=[]),
+        ]
+        return HIVMExtract(operations=ops, handoffs=[],
+                           unit_assignment={1: "vector", 2: "mte_gm"})
+
+    def _cube_bearing(self) -> HIVMExtract:
+        ops = [
+            OpRecord(op_id=1, op_name="matmul", component=Component.CUBE,
+                     precision=Precision.FP16, pipe="Cube",
+                     bytes_transferred=0, elements=4096, flops=2 * 4096 * 64,
+                     loop_multiplier=1, depends_on=[]),
+            OpRecord(op_id=2, op_name="mul", component=Component.VECTOR,
+                     precision=Precision.FP16, pipe="Vector",
+                     bytes_transferred=0, elements=4096, flops=4096,
+                     loop_multiplier=1, depends_on=[]),
+        ]
+        return HIVMExtract(operations=ops, handoffs=[],
+                           unit_assignment={1: "cube", 2: "vector"})
+
+    def test_vector_only_derives_40_cores(self):
+        db = load_default_calib_db()
+        r = compute_bounds(_make_grid(total_programs=100), self._vector_only(),
+                           db, total_programs=100)
+        assert r.grid.n_cores == 40
+
+    def test_cube_bearing_derives_20_cores(self):
+        db = load_default_calib_db()
+        r = compute_bounds(_make_grid(total_programs=100), self._cube_bearing(),
+                           db, total_programs=100)
+        assert r.grid.n_cores == 20
+
+    def test_mte_l1_alone_counts_as_cube_bearing(self):
+        """PIPE_MTE1 (L1→L0A/B) is cube-exclusive, so an op on MTE_L1 marks the
+        kernel cube-bearing (→20) even if the Cube compute op weren't classified
+        as CUBE — mirrors the C++ inferKernelModeForLaunch hasAIC signal."""
+        ops = [
+            OpRecord(op_id=1, op_name="load_l0a", component=Component.MTE_L1,
+                     precision=Precision.FP16, pipe="MTE1",
+                     bytes_transferred=4096, elements=0,
+                     loop_multiplier=1, depends_on=[]),
+            OpRecord(op_id=2, op_name="mul", component=Component.VECTOR,
+                     precision=Precision.FP16, pipe="Vector",
+                     bytes_transferred=0, elements=4096, flops=4096,
+                     loop_multiplier=1, depends_on=[]),
+        ]
+        extract = HIVMExtract(operations=ops, handoffs=[],
+                              unit_assignment={1: "mte_l1", 2: "vector"})
+        db = load_default_calib_db()
+        r = compute_bounds(_make_grid(total_programs=100), extract, db,
+                           total_programs=100)
+        assert r.grid.n_cores == 20
+
+    def test_explicit_n_cores_pins_both_tiers_no_desync(self):
+        """An explicit n_cores overrides the derivation, and the grid tier uses
+        the SAME count as Tier-2 wave scaling (no Tier-1/Tier-2 desync)."""
+        db = load_default_calib_db()
+        r = compute_bounds(_make_grid(total_programs=100), self._vector_only(),
+                           db, n_cores=20, total_programs=100)
+        assert r.grid.n_cores == 20  # pinned, not the derived 40
+
+
 class TestComputeBoundsMemoryBound:
     """MTE-bound kernel: grid must use BW (B/us) and total bytes."""
 

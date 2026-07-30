@@ -77,6 +77,14 @@ class KernelReport:
     # and must never be conflated with the primary t_bound_us.
     loop_resolution: Optional[dict] = None
 
+    # DES critical-path event-wait attribution (from des_event_wait_analyzer).
+    # This is Gap-3 (avoidable serialization) attribution *inside* the elapsed
+    # DES critical path — it is NEVER added to t_bound (spec §2.2/§3: event
+    # waits explain where elapsed time went, they are not an extra bound term).
+    # None when the DES graph was static-scheduled (empty critical path) or
+    # predates the critical-path feature; check des_event_wait["populated"].
+    des_event_wait: Optional[dict] = None
+
     # Profile diagnosis (from profile_utilization)
     profile_diagnosis: Optional[str] = None
     profile_dominant_component: Optional[str] = None
@@ -152,6 +160,7 @@ class KernelReport:
                 "potential_speedup_upper": self.potential_speedup_upper,
             },
             "loop_resolution": self.loop_resolution,
+            "des_event_wait": self.des_event_wait,
             "recommended_action": self.recommended_action,
         }
         # A.6.1 reachability block
@@ -241,6 +250,30 @@ class KernelReport:
                     f"  diagnostic worst-case T_bound (NOT sound, NOT the "
                     f"primary bound): {worst:.2f} us"
                 )
+
+        if self.des_event_wait is not None:
+            dew = self.des_event_wait
+            lines.append(f"")
+            lines.append(f"DES critical-path serialization (Gap-3 attribution, "
+                         f"NOT added to T_bound):")
+            if not dew.get("populated"):
+                lines.append(
+                    "  critical path not populated — regenerate the DES graph "
+                    "with --scheduler des for event-wait attribution"
+                )
+            else:
+                lines.append(
+                    f"  critical path: {dew['critical_path_cycles']} cyc "
+                    f"({dew['critical_path_us']:.2f} us); "
+                    f"issue {dew['critical_path_issue_cycles']} cyc, "
+                    f"event-wait {dew['critical_path_event_wait_cycles']} cyc "
+                    f"({dew['critical_path_event_wait_us']:.2f} us)"
+                )
+                for grp in dew.get("top_wait_groups", [])[:5]:
+                    lines.append(
+                        f"    wait {grp['wait_us']:.2f} us  "
+                        f"({grp['wait_cycles']} cyc, {grp['ops']} ops)  {grp['key']}"
+                    )
 
         lines.append(f"")
         lines.append(f"Attribution (absolute and fraction of T_bound):")

@@ -6,15 +6,13 @@
 # time).  T_serial_irreducible attaches to the Tier-2 term because
 # serialization is intra-core (Cube↔Vector on the same core).
 #
-# **SPEC DIVERGENCE (intentional):** The spec (performance_bound_model.md §4.1,
-# §7) literally writes max(T_grid_floor, T_core_floor) + T_serial_irreducible.
-# This additive form is UNSOUND: max(a,b)+c ≥ max(a, b+c) for c≥0, which can
-# overstate a lower bound and risk T_bound > T_measured (violating the
-# conservatism theorem T_bound ≤ T_measured from spec §4.0).
-#
-# The implemented form (max(grid, core+serial)) is the tightest provable lower
-# bound and matches the spec's own prose (§4.0: "+T_serial attaches to the
-# Tier-2 term"). Recommendation: Update spec §4.1/§7 formulas to match this.
+# **Sound composition (spec §4.1 formula box + §A.5 NOTE):**
+# T_serial_irreducible attaches to the Tier-2 term INSIDE the max —
+# max(grid, core+serial) — not outside it. The additive form
+# max(grid, core) + serial is non-conservative (max(a,b)+c ≥ max(a, b+c) for
+# c≥0) and can overstate a lower bound, risking T_bound > T_measured (violating
+# the §4.0 conservatism theorem T_bound ≤ T_measured). The spec §4.1/§7
+# formulas already use this sound form; this implementation matches them.
 #
 # Five-way attribution decomposes the gap between T_bound and a hypothetical
 # zero-overhead kernel.  This is diagnostic output, NOT part of the bound.
@@ -32,7 +30,7 @@ from ..model.component_model import ComponentBound, compute_component_floor
 from ..model.serialization import SerializationSplit, classify_handoffs
 from ..extract.op_classifier import Component
 from ..extract.hivm_extractor import HIVMExtract
-from ..extract.eligibility_oracle import get_eligibility
+from ..extract.eligibility_oracle import get_eligibility, op_category_for_name
 from ..calibration.constants import CalibrationDB
 
 
@@ -123,9 +121,9 @@ def combine(
 
     T_bound = max(T_grid_floor, T_core_floor + T_serial_irreducible)
 
-    NOTE: This deliberately differs from the spec's written formula
-    max(T_grid_floor, T_core_floor) + T_serial_irreducible, which is
-    unsound (can overstate the bound). See module header for details.
+    NOTE: T_serial attaches INSIDE the max (spec §4.1 + §A.5). The additive
+    form max(grid, core) + serial is unsound (can overstate the bound). See
+    module header for details.
 
     The binding tier is determined by which floor is higher:
     - Grid binds when occupancy/load_balance constrain more than per-component BW
@@ -202,7 +200,7 @@ def bound_from_extract(
     extract: HIVMExtract,
     calib_db: Optional[CalibrationDB] = None,
     kernel_name: str = "unknown",
-    n_cores: int = 20,
+    n_cores: int | None = None,
     occupancy: float = 1.0,
     load_balance: float = 1.0,
     total_programs: int | None = None,
@@ -229,6 +227,20 @@ def bound_from_extract(
     from ..calibration.calib_loader import load_default_calib_db
     from ..model.bounds import compute_bounds
     from ..extract.dsl_extractor import GridInfo
+
+    # Resolve the core count from the op mix when unset (spec §1.1: 20 AIC for
+    # cube-bearing kernels, 40 AIV for vector-only) so grid_dims and both bound
+    # tiers use a consistent count instead of a blanket 20.
+    if n_cores is None:
+        from ..calibration.constants import CoreConfig
+        _core_cfg = CoreConfig()
+        _is_cube = any(
+            op.component in (Component.CUBE, Component.MTE_L1)
+            for op in extract.operations
+        )
+        n_cores = (
+            _core_cfg.n_cores_cube if _is_cube else _core_cfg.n_cores_vector_only
+        )
 
     if calib_db is None:
         try:
@@ -307,7 +319,7 @@ def worst_case_bound_us(
     grid_info,
     calib_db: CalibrationDB,
     kernel_name: str = "unknown",
-    n_cores: int = 20,
+    n_cores: int | None = None,
     total_programs: int = 1,
 ) -> Optional[float]:
     """Diagnostic-only companion bound using each unresolved loop's sound
@@ -390,23 +402,7 @@ def worst_case_bound_us(
 
 
 # ── Gap helpers (diagnostic only — not part of the bound) ──────────────────
-
-# Op-name prefixes for eligibility category lookup
-_MATMUL_KEYWORDS = ("matmul", "mm", "bmm")
-_REDUCTION_KEYWORDS = ("reduce", "sum", "max", "min", "arg")
-_COMPARE_KEYWORDS = ("cmp", "compare")
-
-
-def _op_category(op_name: str) -> str:
-    """Map an op name to an eligibility-oracle category."""
-    lower = op_name.lower()
-    if any(k in lower for k in _MATMUL_KEYWORDS):
-        return "matmul"
-    if any(k in lower for k in _REDUCTION_KEYWORDS):
-        return "reduction"
-    if any(k in lower for k in _COMPARE_KEYWORDS):
-        return "compare"
-    return "elementwise"
+# Op-name → eligibility category lives in eligibility_oracle.op_category_for_name.
 
 
 def _compute_gap1(
@@ -436,7 +432,7 @@ def _compute_gap1(
         # The eligibility oracle correctly returns {Scalar} for true
         # Scalar-only ops (i32 compare), so those won't trigger a false Gap 1.
 
-        category = _op_category(op.op_name)
+        category = op_category_for_name(op.op_name)
         prec_str = op.precision.value if op.precision else None
         eligible = get_eligibility(category, prec_str)
 

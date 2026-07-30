@@ -45,7 +45,7 @@ def compute_bounds(
     grid_info: GridInfo,
     extract: HIVMExtract,
     calib_db: "CalibrationDB",
-    is_cube_kernel: bool = True,
+    is_cube_kernel: bool | None = None,
     n_cores: int | None = None,
     total_programs: int | None = None,
 ) -> BoundPieces:
@@ -59,7 +59,9 @@ def compute_bounds(
         grid_info: M2-extracted grid quantities.
         extract: M3 HIVM extraction result.
         calib_db: Calibration database with sustained rates.
-        is_cube_kernel: True for Cube-bearing kernels (20 AIC).
+        is_cube_kernel: True for Cube-bearing kernels (20 AIC), False for
+                        vector-only (40 AIV). None (default) derives it from
+                        the extract: any Cube op ⇒ cube-bearing (spec §1.1).
         n_cores: Number of cores.  Defaults to core config value if None.
         total_programs: Total program instances.  Defaults to grid_info
                         total_programs if None.
@@ -71,6 +73,24 @@ def compute_bounds(
     cube = calib_db.cube
     vector = calib_db.vector
     memory = calib_db.memory
+
+    # Spec §1.1: Cube-bearing kernels are capped at 20 AIC (each drags its 2
+    # AIV); vector-only kernels (no Cube ops) parallelize across all 40 AIV.
+    # Derive from the realized op mix so BOTH tiers (wave scaling + grid
+    # denominator) use the correct count — the default is no longer a blanket 20.
+    from ..extract.op_classifier import Component
+    if is_cube_kernel is None:
+        # Cube-bearing signal = any op on the Cube compute pipe (PIPE_M →
+        # Component.CUBE) OR the cube-exclusive L1→L0A/B staging path
+        # (PIPE_MTE1 → Component.MTE_L1; a vector kernel never touches L0A/B).
+        # Mirrors the C++ inferKernelModeForLaunch hasAIC test. MIX kernels
+        # merge both _mix_aic and _mix_aiv funcs into one op list (verified:
+        # the backward wy_dqkg_fused DES carries PIPE_M + PIPE_MTE1), so the
+        # cube ops are visible here — the AIC/AIV func split does not hide them.
+        is_cube_kernel = any(
+            op.component in (Component.CUBE, Component.MTE_L1)
+            for op in extract.operations
+        )
 
     # Wave scaling: busiest core runs `waves` programs
     _n_cores = n_cores if n_cores is not None else (
@@ -106,7 +126,6 @@ def compute_bounds(
 
     # Pick i_binding and total_work to match the binding component's unit
     binding = comp.binding_component
-    from ..extract.op_classifier import Component
 
     if binding in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB):
         # Memory-bound: i_binding = per-core BW in B/us, total_work = bytes.
@@ -157,7 +176,8 @@ def compute_bounds(
     total_work = max(total_work, 1.0)  # avoid division by zero
 
     grid = compute_grid_floor(grid_info, core, i_binding, total_work,
-                              is_cube_kernel=is_cube_kernel)
+                              is_cube_kernel=is_cube_kernel,
+                              n_cores_override=_n_cores)
 
     serial = classify_handoffs(
         extract.handoffs,

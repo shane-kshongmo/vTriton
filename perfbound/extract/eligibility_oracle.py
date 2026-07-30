@@ -60,6 +60,30 @@ _ELIGIBILITY_RULES: Dict[str, Dict[str, FrozenSet[Component]]] = {
 }
 
 
+# Op-name keyword → eligibility category.  Shared by the Gap-1 attribution
+# (bound_combiner) and the two-limit idealized-extract reassignment so the
+# name→category mapping has a single source of truth.
+_MATMUL_KEYWORDS = ("matmul", "mm", "bmm")
+_REDUCTION_KEYWORDS = ("reduce", "sum", "max", "min", "arg")
+_COMPARE_KEYWORDS = ("cmp", "compare")
+
+
+def op_category_for_name(op_name: str) -> str:
+    """Map an op name to an eligibility-oracle category.
+
+    Returns one of the _ELIGIBILITY_RULES keys that get_eligibility consumes:
+    "matmul", "reduction", "compare", else "elementwise".
+    """
+    lower = op_name.lower()
+    if any(k in lower for k in _MATMUL_KEYWORDS):
+        return "matmul"
+    if any(k in lower for k in _REDUCTION_KEYWORDS):
+        return "reduction"
+    if any(k in lower for k in _COMPARE_KEYWORDS):
+        return "compare"
+    return "elementwise"
+
+
 def get_eligibility(
     op_category: str,
     precision: str | None = None,
