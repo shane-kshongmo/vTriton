@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -65,7 +66,38 @@ struct TileMixParams {
 
 struct WorkspaceMultibufferParams {
   bool present = false;
+  bool workspacePresent = false;
+  bool localAutoPresent = false;
+  bool localAutoEnabled = true;
+  bool workspaceOnlyLocal = false;
   int64_t requestedSlots = 1;
+  int64_t numStages = 2;
+  std::string localScope = "no-limit";
+  std::string limitedBuffer;
+};
+
+struct DynamicCVParams {
+  bool present = false;
+  bool enabled = false;
+  bool targetSupported = false;
+  bool compilerStatusPresent = false;
+  bool compilerApplied = false;
+  bool bufferInsertionOptimization = false;
+  bool ubRefine = false;
+  bool cubeBlockMerge = false;
+  int64_t intraCacheCount = 2;
+  int64_t interCacheCount = 1;
+  int64_t loadCacheCount = 1;
+  std::string compilerSkipReason = "not_reported";
+  std::string statusSource = "ttir_static_inference";
+};
+
+enum class CVFeatureMode {
+  Base,
+  OrdinaryMultibuffer,
+  DynamicCVLegacyMax,
+  DynamicCV,
+  OrdinaryMultibufferFallback,
 };
 
 struct TileMixModelConfig {
@@ -170,6 +202,44 @@ struct WorkspaceMultibufferStats {
   int64_t overlapReliefCycles = 0;
   int64_t queueDeltaCycles = 0;
   int64_t netDeltaCycles = 0;
+  std::string skipReason = "none";
+};
+
+struct DynamicCVStats {
+  bool used = false;
+  bool eligible = false;
+  bool segmentModelValid = false;
+  bool compilerStatusPresent = false;
+  bool compilerApplied = false;
+  bool adjustmentApplied = false;
+  int64_t segmentCount = 0;
+  int64_t dataDependencyEdges = 0;
+  int64_t segmentOrderEdges = 0;
+  int64_t workItemCount = 0;
+  int64_t crossCoreEdges = 0;
+  int64_t intraCapacityEdges = 0;
+  int64_t interCapacityEdges = 0;
+  int64_t loadCapacityEdges = 0;
+  int64_t intraBlockingCycles = 0;
+  int64_t interBlockingCycles = 0;
+  int64_t loadBlockingCycles = 0;
+  int64_t iterationCount = 1;
+  int64_t intraCacheCount = 2;
+  int64_t interCacheCount = 1;
+  int64_t loadCacheCount = 1;
+  int64_t cacheBytes = 0;
+  int64_t originalMakespanCycles = 0;
+  int64_t transformedMakespanCycles = 0;
+  int64_t offMakespanCycles = 0;
+  int64_t onMakespanCycles = 0;
+  int64_t offTotalCycles = 0;
+  int64_t onTotalCycles = 0;
+  int64_t referenceDeltaCycles = 0;
+  int64_t syncCycles = 0;
+  int64_t controlCycles = 0;
+  int64_t netDeltaCycles = 0;
+  std::string skipReason = "disabled";
+  std::string statusSource = "ttir_static_inference";
 };
 
 enum class TileMixPath { None = 0, Cube = 1, Vector = 2 };
@@ -185,6 +255,21 @@ bool parsePositiveInt(llvm::StringRef value, int64_t &result) {
     return false;
   result = parsed;
   return true;
+}
+
+bool parseBool(llvm::StringRef value, bool &result) {
+  value = value.trim();
+  if (value.equals_insensitive("1") || value.equals_insensitive("true") ||
+      value.equals_insensitive("on")) {
+    result = true;
+    return true;
+  }
+  if (value.equals_insensitive("0") || value.equals_insensitive("false") ||
+      value.equals_insensitive("off")) {
+    result = false;
+    return true;
+  }
+  return false;
 }
 
 bool parseNonNegativeInt(llvm::StringRef value, int64_t &result) {
@@ -266,13 +351,95 @@ parseWorkspaceMultibufferParams(llvm::StringRef compileParamsStr) {
     llvm::StringRef key = kv.first.trim();
     llvm::StringRef value = kv.second.trim();
     int64_t parsed = 0;
+    bool parsedBool = false;
     if (key == "set_workspace_multibuffer" &&
         parsePositiveInt(value, parsed)) {
       params.requestedSlots = parsed;
       params.present = true;
+      params.workspacePresent = true;
+    } else if (key == "multibuffer" && parseBool(value, parsedBool)) {
+      params.localAutoPresent = true;
+      params.localAutoEnabled = parsedBool;
+      params.present = true;
+    } else if (key == "num_stages" && parsePositiveInt(value, parsed)) {
+      params.numStages = parsed;
+      params.localAutoPresent = true;
+      params.localAutoEnabled = parsed > 1;
+      params.present = true;
+    } else if (key == "limit_auto_multi_buffer_only_for_local_buffer" &&
+               parseBool(value, parsedBool)) {
+      params.workspaceOnlyLocal = parsedBool;
+    } else if (key == "limit_auto_multi_buffer_of_local_buffer" &&
+               !value.empty()) {
+      params.localScope = value.str();
+    } else if (key == "limit_auto_multi_buffer_buffer" && !value.empty()) {
+      params.limitedBuffer = value.str();
     }
   }
   return params;
+}
+
+DynamicCVParams parseDynamicCVParams(llvm::StringRef compileParamsStr) {
+  DynamicCVParams params;
+  llvm::SmallVector<llvm::StringRef, 16> items;
+  compileParamsStr.split(items, ',', -1, false);
+  for (llvm::StringRef item : items) {
+    item = item.trim();
+    if (item.empty())
+      continue;
+    auto kv = item.split('=');
+    llvm::StringRef key = kv.first.trim();
+    llvm::StringRef value = kv.second.trim();
+    int64_t parsed = 0;
+    bool parsedBool = false;
+    if (key == "enable_dynamic_cv_pipeline" && parseBool(value, parsedBool)) {
+      params.present = true;
+      params.enabled = parsedBool;
+    } else if (key == "dynamic_cv_applied" &&
+               parseBool(value, parsedBool)) {
+      params.compilerStatusPresent = true;
+      params.compilerApplied = parsedBool;
+    } else if (key == "dynamic_cv_skip_reason" && !value.empty()) {
+      params.compilerSkipReason = value.str();
+    } else if (key == "dynamic_cv_status_source" && !value.empty()) {
+      params.statusSource = value.str();
+    } else if (key == "compile_on_910_95" &&
+               parseBool(value, parsedBool)) {
+      params.targetSupported = parsedBool;
+    } else if (key == "intra_cache_num" && parsePositiveInt(value, parsed)) {
+      params.intraCacheCount = parsed;
+    } else if (key == "inter_cache_num" && parsePositiveInt(value, parsed)) {
+      params.interCacheCount = parsed;
+    } else if (key == "load_cache_num" && parsePositiveInt(value, parsed)) {
+      params.loadCacheCount = parsed;
+    } else if (key == "enable_buffer_insert_optimization" &&
+               parseBool(value, parsedBool)) {
+      params.bufferInsertionOptimization = parsedBool;
+    } else if (key == "enable_ub_refine_opt" &&
+               parseBool(value, parsedBool)) {
+      params.ubRefine = parsedBool;
+    } else if (key == "enable_cube_block_merge" &&
+               parseBool(value, parsedBool)) {
+      params.cubeBlockMerge = parsedBool;
+    }
+  }
+  return params;
+}
+
+llvm::StringRef cvFeatureModeName(CVFeatureMode mode) {
+  switch (mode) {
+  case CVFeatureMode::Base:
+    return "base";
+  case CVFeatureMode::OrdinaryMultibuffer:
+    return "ordinary_multibuffer";
+  case CVFeatureMode::DynamicCVLegacyMax:
+    return "dynamic_cv_legacy_max";
+  case CVFeatureMode::DynamicCV:
+    return "dynamic_cv";
+  case CVFeatureMode::OrdinaryMultibufferFallback:
+    return "ordinary_multibuffer_fallback";
+  }
+  llvm_unreachable("unknown CV feature mode");
 }
 
 bool isTileMixDagModelEnabled() {
@@ -588,23 +755,53 @@ struct WorkspaceMultibufferEvidence {
   int64_t vectorProducerTailCycles = 0;
 };
 
+struct TransferFamilyEndpoint {
+  int64_t bytes = 0;
+  int64_t iterations = 0;
+  int64_t endCycle = 0;
+};
+
+std::optional<int64_t> getBufferFamilyId(Operation *op) {
+  if (!op)
+    return std::nullopt;
+  auto attr = op->getAttrOfType<IntegerAttr>("ascend.buffer_family_id");
+  if (!attr)
+    return std::nullopt;
+  return attr.getInt();
+}
+
+bool isDynamicCVSegmentDagModelEnabled() {
+  const char *mode =
+      std::getenv("ASCEND_COSTMODEL_DYNAMIC_CV_SEGMENT_DAG_MODEL");
+  // Compatibility gate: uploading the new binary must preserve the previous
+  // max(Cube path, Vector path) result until the caller explicitly opts in.
+  if (!mode)
+    return false;
+  llvm::StringRef value(mode);
+  return !(value.equals_insensitive("0") || value.equals_insensitive("off") ||
+           value.equals_insensitive("false") || value.equals_insensitive("none"));
+}
+
 WorkspaceMultibufferEvidence inferWorkspaceMultibufferEvidence(
     const PipelineScheduler &scheduler) {
-  std::map<int64_t, int64_t> cubeLoadIterations;
-  std::map<int64_t, int64_t> cubeStoreIterations;
-  std::map<int64_t, int64_t> vectorLoadIterations;
-  std::map<int64_t, int64_t> vectorStoreIterations;
-  std::map<int64_t, int64_t> cubeStoreEndCycles;
-  std::map<int64_t, int64_t> vectorStoreEndCycles;
+  std::map<int64_t, TransferFamilyEndpoint> cubeLoads;
+  std::map<int64_t, TransferFamilyEndpoint> cubeStores;
+  std::map<int64_t, TransferFamilyEndpoint> vectorLoads;
+  std::map<int64_t, TransferFamilyEndpoint> vectorStores;
   int64_t cubePathEndCycle = 0;
   int64_t vectorPathEndCycle = 0;
 
-  auto recordTransfer = [](std::map<int64_t, int64_t> &transfers,
-                           int64_t bytes, int64_t iterations) {
-    if (bytes <= 0)
+  auto recordTransfer = [](std::map<int64_t, TransferFamilyEndpoint> &map,
+                           Operation *op, int64_t bytes, int64_t iterations,
+                           int64_t endCycle) {
+    auto familyId = getBufferFamilyId(op);
+    if (!familyId || bytes <= 0)
       return;
-    transfers[bytes] =
-        std::max(transfers[bytes], std::max<int64_t>(iterations, 1));
+    auto &endpoint = map[*familyId];
+    endpoint.bytes = endpoint.bytes == 0 ? bytes : std::min(endpoint.bytes, bytes);
+    endpoint.iterations =
+        std::max(endpoint.iterations, std::max<int64_t>(iterations, 1));
+    endpoint.endCycle = std::max(endpoint.endCycle, endCycle);
   };
 
   for (const auto &op : scheduler.getAllOps()) {
@@ -616,41 +813,40 @@ WorkspaceMultibufferEvidence inferWorkspaceMultibufferEvidence(
     if (!op.mlirOp)
       continue;
     if (auto loadOp = dyn_cast<CubeLoadOp>(op.mlirOp)) {
-      recordTransfer(cubeLoadIterations, loadOp.getTransferBytes(),
-                     op.loopMultiplier);
+      recordTransfer(cubeLoads, op.mlirOp, loadOp.getTransferBytes(),
+                     op.loopMultiplier, op.endCycle);
     } else if (auto storeOp = dyn_cast<CubeStoreOp>(op.mlirOp)) {
-      recordTransfer(cubeStoreIterations, storeOp.getTransferBytes(),
-                     op.loopMultiplier);
-      cubeStoreEndCycles[storeOp.getTransferBytes()] = std::max(
-          cubeStoreEndCycles[storeOp.getTransferBytes()], op.endCycle);
+      recordTransfer(cubeStores, op.mlirOp, storeOp.getTransferBytes(),
+                     op.loopMultiplier, op.endCycle);
     } else if (auto loadOp = dyn_cast<VectorLoadOp>(op.mlirOp)) {
-      recordTransfer(vectorLoadIterations, loadOp.getTransferBytes(),
-                     op.loopMultiplier);
+      recordTransfer(vectorLoads, op.mlirOp, loadOp.getTransferBytes(),
+                     op.loopMultiplier, op.endCycle);
     } else if (auto storeOp = dyn_cast<VectorStoreOp>(op.mlirOp)) {
-      recordTransfer(vectorStoreIterations, storeOp.getTransferBytes(),
-                     op.loopMultiplier);
-      vectorStoreEndCycles[storeOp.getTransferBytes()] = std::max(
-          vectorStoreEndCycles[storeOp.getTransferBytes()], op.endCycle);
+      recordTransfer(vectorStores, op.mlirOp, storeOp.getTransferBytes(),
+                     op.loopMultiplier, op.endCycle);
     }
   }
 
   WorkspaceMultibufferEvidence evidence;
-  auto addMatchedFamilies = [&](const std::map<int64_t, int64_t> &producers,
-                                const std::map<int64_t, int64_t> &consumers,
-                                const std::map<int64_t, int64_t> &producerEnds,
-                                int64_t producerPathEnd,
-                                int64_t &directionFamilyCount,
-                                int64_t &directionIterations,
-                                int64_t &producerTailCycles) {
-    for (const auto &[bytes, producerIterations] : producers) {
-      auto consumer = consumers.find(bytes);
+  auto addMatchedFamilies = [&evidence](
+                                 const std::map<int64_t, TransferFamilyEndpoint> &producers,
+                                 const std::map<int64_t, TransferFamilyEndpoint> &consumers,
+                                 int64_t producerPathEnd,
+                                 int64_t &directionFamilyCount,
+                                 int64_t &directionIterations,
+                                 int64_t &producerTailCycles) {
+    for (const auto &[familyId, producer] : producers) {
+      auto consumer = consumers.find(familyId);
       if (consumer == consumers.end())
+        continue;
+      if (producer.bytes <= 0 || consumer->second.bytes <= 0 ||
+          producer.bytes != consumer->second.bytes)
         continue;
       ++evidence.familyCount;
       ++directionFamilyCount;
-      evidence.bytesPerSlot += bytes;
+      evidence.bytesPerSlot += producer.bytes;
       int64_t commonIterations =
-          std::min(producerIterations, consumer->second);
+          std::min(producer.iterations, consumer->second.iterations);
       if (evidence.iterationCount == 0)
         evidence.iterationCount = commonIterations;
       else
@@ -660,10 +856,8 @@ WorkspaceMultibufferEvidence inferWorkspaceMultibufferEvidence(
         directionIterations = commonIterations;
       else
         directionIterations = std::min(directionIterations, commonIterations);
-      auto producerEnd = producerEnds.find(bytes);
-      int64_t tail = producerEnd == producerEnds.end()
-          ? 0
-          : std::max<int64_t>(0, producerPathEnd - producerEnd->second);
+      int64_t tail =
+          std::max<int64_t>(0, producerPathEnd - producer.endCycle);
       if (directionFamilyCount == 1)
         producerTailCycles = tail;
       else
@@ -673,12 +867,12 @@ WorkspaceMultibufferEvidence inferWorkspaceMultibufferEvidence(
   // Direction is part of the family identity: equally sized Cube->Vector and
   // Vector->Cube workspaces have independent version/synchronization state.
   addMatchedFamilies(
-      cubeStoreIterations, vectorLoadIterations, cubeStoreEndCycles,
-      cubePathEndCycle, evidence.cubeToVectorFamilyCount,
+      cubeStores, vectorLoads, cubePathEndCycle,
+      evidence.cubeToVectorFamilyCount,
       evidence.cubeToVectorIterations, evidence.cubeProducerTailCycles);
   addMatchedFamilies(
-      vectorStoreIterations, cubeLoadIterations, vectorStoreEndCycles,
-      vectorPathEndCycle, evidence.vectorToCubeFamilyCount,
+      vectorStores, cubeLoads, vectorPathEndCycle,
+      evidence.vectorToCubeFamilyCount,
       evidence.vectorToCubeIterations, evidence.vectorProducerTailCycles);
   return evidence;
 }
@@ -735,12 +929,23 @@ BoundedBufferSchedule scheduleFiniteWorkspaceBuffer(
 WorkspaceMultibufferStats estimateWorkspaceMultibuffer(
     const WorkspaceMultibufferParams &params,
     const PipelineScheduler &scheduler, const HardwareConfig &config,
-    int64_t cubePathCycles, int64_t vectorPathCycles) {
+    int64_t cubePathCycles, int64_t vectorPathCycles,
+    int64_t baseRooflineTotalCycles) {
   WorkspaceMultibufferStats stats;
   if (!params.present || !isWorkspaceMultibufferModelEnabled())
     return stats;
 
   stats.used = true;
+  if (!params.workspacePresent || params.workspaceOnlyLocal) {
+    // This pass can prove cross-core workspace handoffs, but optimized TTIR no
+    // longer exposes enough local-buffer lifetime information to charge or
+    // credit local-only multibuffering safely. Keep that branch fail-closed.
+    stats.valid = true;
+    stats.skipReason = params.workspaceOnlyLocal
+                           ? "local_buffer_only_not_proven_in_ttir"
+                           : "local_multibuffer_lifetime_not_proven_in_ttir";
+    return stats;
+  }
   stats.requestedSlots = std::max<int64_t>(1, params.requestedSlots);
   WorkspaceMultibufferEvidence evidence =
       inferWorkspaceMultibufferEvidence(scheduler);
@@ -754,16 +959,19 @@ WorkspaceMultibufferStats estimateWorkspaceMultibuffer(
   stats.cubeProducerTailCycles = evidence.cubeProducerTailCycles;
   stats.vectorProducerTailCycles = evidence.vectorProducerTailCycles;
 
-  // The roofline base already assumes simultaneous producer/consumer paths.
-  // A proven cross-path handoff therefore has a two-slot ping-pong reference
-  // depth. With no proven family, one slot is the neutral reference.
-  stats.referenceSlots = stats.workspaceFamilyCount > 0 ? 2 : 1;
+  // One physical version is the feature-off reference. Extra versions do not
+  // create extra synchronization events; they only delay slot reuse and can
+  // therefore remove producer waits in the finite FIFO schedule.
+  stats.referenceSlots = 1;
   stats.slotDelta = stats.requestedSlots - stats.referenceSlots;
   stats.extraSlots = std::max<int64_t>(0, stats.slotDelta);
   stats.syncPairCycles = config.getSyncOpCycles("set_flag", 1) +
                          config.getSyncOpCycles("wait_flag", 2);
   if (stats.workspaceFamilyCount > 0) {
-    stats.syncDeltaCycles = stats.extraSlots * stats.workspaceFamilyCount *
+    // One set/wait handoff is required for each produced version. Increasing
+    // the number of reusable slots changes waiting, not token count.
+    stats.syncDeltaCycles = stats.workspaceFamilyCount *
+                            std::max<int64_t>(stats.iterationCount, 1) *
                             stats.syncPairCycles;
 
     auto accumulateDirection = [&](int64_t familyCount, int64_t iterations,
@@ -778,19 +986,17 @@ WorkspaceMultibufferStats estimateWorkspaceMultibuffer(
       BoundedBufferSchedule reference = scheduleFiniteWorkspaceBuffer(
           producerCycles, consumerCycles, iterations, stats.referenceSlots,
           producerTailCycles);
-      BoundedBufferSchedule ideal = scheduleFiniteWorkspaceBuffer(
-          producerCycles, consumerCycles, iterations, iterations,
-          producerTailCycles);
       stats.blockingCycles =
           std::max(stats.blockingCycles, requested.producerBlockingCycles);
       stats.referenceBlockingCycles = std::max(
           stats.referenceBlockingCycles, reference.producerBlockingCycles);
-      stats.queueDeltaCycles = std::max(
-          stats.queueDeltaCycles,
-          std::max<int64_t>(0, requested.makespanCycles - ideal.makespanCycles));
+      stats.queueDeltaCycles = std::max(stats.queueDeltaCycles,
+          std::max<int64_t>(0, requested.makespanCycles -
+                                   baseRooflineTotalCycles));
       stats.referenceQueuePenaltyCycles = std::max(
           stats.referenceQueuePenaltyCycles,
-          std::max<int64_t>(0, reference.makespanCycles - ideal.makespanCycles));
+          std::max<int64_t>(0, reference.makespanCycles -
+                                   baseRooflineTotalCycles));
     };
     accumulateDirection(stats.cubeToVectorFamilyCount,
                         stats.cubeToVectorIterations, cubePathCycles,
@@ -807,6 +1013,452 @@ WorkspaceMultibufferStats estimateWorkspaceMultibuffer(
   stats.netDeltaCycles = stats.syncDeltaCycles + stats.queueDeltaCycles;
   stats.valid = true;
   stats.adjustmentApplied = stats.netDeltaCycles != 0;
+  return stats;
+}
+
+struct DynamicCVSegment {
+  int64_t id = -1;
+  TileMixPath path = TileMixPath::None;
+  HWUnit resource = HWUnit::Scalar;
+  int64_t durationCycles = 0;
+  int64_t tripCount = 1;
+  std::set<int64_t> intraDependencies;
+  std::set<int64_t> interDependencies;
+  std::set<int64_t> loadDependencies;
+  std::set<int64_t> orderDependencies;
+};
+
+struct DynamicCVSegmentGraph {
+  std::vector<DynamicCVSegment> segments;
+  int64_t dataDependencyEdges = 0;
+  int64_t crossPathOrderEdges = 0;
+  int64_t iterationCount = 1;
+};
+
+struct DynamicCVExpandedNode {
+  TileMixPath path = TileMixPath::None;
+  HWUnit resource = HWUnit::Scalar;
+  int64_t durationCycles = 0;
+  std::set<int64_t> dependencies;
+  std::set<int64_t> intraCapacityDependencies;
+  std::set<int64_t> interCapacityDependencies;
+  std::set<int64_t> loadCapacityDependencies;
+};
+
+struct DynamicCVSegmentSchedule {
+  bool valid = false;
+  int64_t makespanCycles = 0;
+  int64_t nodeCount = 0;
+  int64_t intraCapacityEdges = 0;
+  int64_t interCapacityEdges = 0;
+  int64_t loadCapacityEdges = 0;
+  int64_t intraBlockingCycles = 0;
+  int64_t interBlockingCycles = 0;
+  int64_t loadBlockingCycles = 0;
+};
+
+enum class DynamicCVQueue { Intra, Inter, Load };
+
+struct DynamicCVCacheDepths {
+  int64_t intra = 1;
+  int64_t inter = 1;
+  int64_t load = 1;
+};
+
+bool isDynamicCVLoadResource(HWUnit unit) {
+  return unit == HWUnit::CubeMTE2 || unit == HWUnit::VecMTE2;
+}
+
+DynamicCVQueue classifyDynamicCVQueue(const DynamicCVSegment &producer,
+                                      const DynamicCVSegment &consumer) {
+  if (producer.path != consumer.path)
+    return DynamicCVQueue::Inter;
+  if (isDynamicCVLoadResource(producer.resource))
+    return DynamicCVQueue::Load;
+  return DynamicCVQueue::Intra;
+}
+
+bool addDynamicCVDataDependency(DynamicCVSegmentGraph &graph,
+                                int64_t producerId, int64_t consumerId,
+                                DynamicCVQueue queue) {
+  DynamicCVSegment &consumer = graph.segments[consumerId];
+  std::set<int64_t> *dependencies = nullptr;
+  switch (queue) {
+  case DynamicCVQueue::Intra:
+    dependencies = &consumer.intraDependencies;
+    break;
+  case DynamicCVQueue::Inter:
+    dependencies = &consumer.interDependencies;
+    break;
+  case DynamicCVQueue::Load:
+    dependencies = &consumer.loadDependencies;
+    break;
+  }
+  if (!dependencies->insert(producerId).second)
+    return false;
+  ++graph.dataDependencyEdges;
+  return true;
+}
+
+DynamicCVSegmentGraph
+buildDynamicCVSegmentGraph(const PipelineScheduler &scheduler) {
+  DynamicCVSegmentGraph graph;
+  std::map<int64_t, int64_t> opToSegment;
+  int64_t currentSegment = -1;
+
+  // A segment is a maximal contiguous run on one CV hardware resource with one
+  // static trip count.  Keeping MTE, compute, and store resources separate is
+  // required for load/compute overlap and for assigning each dependency to the
+  // correct bounded Dynamic-CV queue.
+  for (const auto &op : scheduler.getAllOps()) {
+    TileMixPath path = getTileMixPath(op.hwUnit);
+    if (path == TileMixPath::None) {
+      currentSegment = -1;
+      continue;
+    }
+    int64_t tripCount = std::max<int64_t>(1, op.loopMultiplier);
+    if (currentSegment < 0 ||
+        graph.segments[currentSegment].path != path ||
+        graph.segments[currentSegment].resource != op.hwUnit ||
+        graph.segments[currentSegment].tripCount != tripCount) {
+      DynamicCVSegment segment;
+      segment.id = graph.segments.size();
+      segment.path = path;
+      segment.resource = op.hwUnit;
+      segment.tripCount = tripCount;
+      graph.segments.push_back(segment);
+      currentSegment = segment.id;
+    }
+    DynamicCVSegment &segment = graph.segments[currentSegment];
+    segment.durationCycles += std::max<int64_t>(1, op.duration);
+    graph.iterationCount = std::max(graph.iterationCount, tripCount);
+    opToSegment[op.opId] = currentSegment;
+  }
+
+  // Lift actual SSA producer/consumer edges from PipelineOp to segments.
+  for (const auto &op : scheduler.getAllOps()) {
+    auto targetIt = opToSegment.find(op.opId);
+    if (targetIt == opToSegment.end())
+      continue;
+    DynamicCVSegment &target = graph.segments[targetIt->second];
+    for (int64_t depOpId : op.dependsOn) {
+      auto sourceIt = opToSegment.find(depOpId);
+      if (sourceIt == opToSegment.end() || sourceIt->second == target.id)
+        continue;
+      const DynamicCVSegment &source = graph.segments[sourceIt->second];
+      addDynamicCVDataDependency(
+          graph, source.id, target.id, classifyDynamicCVQueue(source, target));
+    }
+  }
+  // The TTIR-to-model conversion materializes cross-core transfers through
+  // HBM placeholders, so their producer/consumer relationship is not always
+  // an SSA edge anymore. `ascend.buffer_family_id` preserves that logical
+  // identity; lift matched Store->Load families into real segment DAG edges.
+  std::map<int64_t, int64_t> cubeStores;
+  std::map<int64_t, int64_t> vectorStores;
+  std::map<int64_t, int64_t> cubeLoads;
+  std::map<int64_t, int64_t> vectorLoads;
+  for (const auto &op : scheduler.getAllOps()) {
+    auto segmentIt = opToSegment.find(op.opId);
+    auto familyId = getBufferFamilyId(op.mlirOp);
+    if (segmentIt == opToSegment.end() || !familyId)
+      continue;
+    if (isa<CubeStoreOp>(op.mlirOp))
+      cubeStores[*familyId] = segmentIt->second;
+    else if (isa<VectorStoreOp>(op.mlirOp))
+      vectorStores[*familyId] = segmentIt->second;
+    else if (isa<CubeLoadOp>(op.mlirOp))
+      cubeLoads[*familyId] = segmentIt->second;
+    else if (isa<VectorLoadOp>(op.mlirOp))
+      vectorLoads[*familyId] = segmentIt->second;
+  }
+  auto addFamilyEdges = [&](const std::map<int64_t, int64_t> &producers,
+                            const std::map<int64_t, int64_t> &consumers) {
+    for (const auto &[familyId, producerSegment] : producers) {
+      auto consumer = consumers.find(familyId);
+      if (consumer == consumers.end() ||
+          consumer->second == producerSegment)
+        continue;
+      addDynamicCVDataDependency(graph, producerSegment, consumer->second,
+                                 DynamicCVQueue::Inter);
+    }
+  };
+  addFamilyEdges(vectorStores, cubeLoads);
+  addFamilyEdges(cubeStores, vectorLoads);
+  // Consecutive Cube/Vector segments are distinct work items in the original
+  // control order. Keep this edge inside one iteration; Dynamic CV may overlap
+  // the next iteration, but it may not reverse the work-item order of the
+  // current iteration.
+  for (size_t i = 1; i < graph.segments.size(); ++i) {
+    if (graph.segments[i - 1].path == graph.segments[i].path)
+      continue;
+    graph.segments[i].orderDependencies.insert(i - 1);
+    ++graph.crossPathOrderEdges;
+  }
+  return graph;
+}
+
+DynamicCVSegmentSchedule scheduleDynamicCVSegmentGraph(
+    const DynamicCVSegmentGraph &graph, bool featureEnabled,
+    DynamicCVCacheDepths cacheDepths) {
+  DynamicCVSegmentSchedule result;
+  if (graph.segments.empty())
+    return result;
+
+  cacheDepths.intra = std::max<int64_t>(1, cacheDepths.intra);
+  cacheDepths.inter = std::max<int64_t>(1, cacheDepths.inter);
+  cacheDepths.load = std::max<int64_t>(1, cacheDepths.load);
+  std::vector<std::vector<int64_t>> nodeIds(graph.segments.size());
+  std::vector<DynamicCVExpandedNode> nodes;
+  std::vector<int64_t> previousIterationNodes;
+  std::map<HWUnit, int64_t> lastResourceNode;
+
+  for (int64_t iteration = 0; iteration < graph.iterationCount; ++iteration) {
+    std::vector<int64_t> currentIterationNodes;
+    for (const DynamicCVSegment &segment : graph.segments) {
+      if (iteration >= segment.tripCount)
+        continue;
+      DynamicCVExpandedNode node;
+      node.path = segment.path;
+      node.resource = segment.resource;
+      node.durationCycles = segment.durationCycles;
+      int64_t nodeId = nodes.size();
+      nodes.push_back(node);
+      nodeIds[segment.id].push_back(nodeId);
+      currentIterationNodes.push_back(nodeId);
+
+      auto previousResourceIt = lastResourceNode.find(segment.resource);
+      if (previousResourceIt != lastResourceNode.end())
+        nodes[nodeId].dependencies.insert(previousResourceIt->second);
+      lastResourceNode[segment.resource] = nodeId;
+
+      if (!featureEnabled && iteration > 0) {
+        // Feature Off preserves the original per-iteration barrier. This is
+        // the waiting that max(Cube, Vector) previously erased completely.
+        nodes[nodeId].dependencies.insert(previousIterationNodes.begin(),
+                                          previousIterationNodes.end());
+      }
+    }
+    previousIterationNodes = std::move(currentIterationNodes);
+  }
+
+  auto nodeForIteration = [&](int64_t segmentId, int64_t iteration) {
+    const auto &ids = nodeIds[segmentId];
+    if (ids.empty())
+      return int64_t{-1};
+    return ids[std::min<int64_t>(iteration, ids.size() - 1)];
+  };
+
+  // Add the true segment data edges for each concrete static iteration.
+  for (const DynamicCVSegment &target : graph.segments) {
+    for (int64_t iteration = 0; iteration < target.tripCount; ++iteration) {
+      int64_t targetNode = nodeForIteration(target.id, iteration);
+      auto addDependencies = [&](const std::set<int64_t> &dependencies) {
+        for (int64_t sourceId : dependencies) {
+        const DynamicCVSegment &source = graph.segments[sourceId];
+        int64_t sourceNode = nodeForIteration(
+            sourceId, std::min<int64_t>(iteration, source.tripCount - 1));
+        if (sourceNode >= 0 && sourceNode != targetNode)
+          nodes[targetNode].dependencies.insert(sourceNode);
+        }
+      };
+      addDependencies(target.intraDependencies);
+      addDependencies(target.interDependencies);
+      addDependencies(target.loadDependencies);
+      for (int64_t sourceId : target.orderDependencies) {
+        int64_t sourceNode = nodeForIteration(
+            sourceId, std::min<int64_t>(
+                          iteration, graph.segments[sourceId].tripCount - 1));
+        if (sourceNode >= 0 && sourceNode != targetNode)
+          nodes[targetNode].dependencies.insert(sourceNode);
+      }
+    }
+  }
+
+  if (featureEnabled) {
+    // A produced value occupies one slot in its queue until the corresponding
+    // consumer releases it.  Reusing slot i%B therefore depends on completion
+    // of consumer i-B.  The three queue depths come directly from compiler
+    // parameters; no fitted benefit or penalty is added.
+    auto addCapacityEdges = [&](const DynamicCVSegment &consumer,
+                                const std::set<int64_t> &producerIds,
+                                int64_t slots, DynamicCVQueue queue,
+                                int64_t &edgeCount) {
+      for (int64_t producerId : producerIds) {
+        const DynamicCVSegment &producer = graph.segments[producerId];
+        for (int64_t iteration = slots;
+             iteration < producer.tripCount; ++iteration) {
+          int64_t producerNode = nodeForIteration(producerId, iteration);
+          int64_t releaseNode = nodeForIteration(
+              consumer.id, std::min<int64_t>(iteration - slots,
+                                             consumer.tripCount - 1));
+          if (producerNode < 0 || releaseNode < 0 ||
+              producerNode == releaseNode)
+            continue;
+          std::set<int64_t> *capacityDependencies = nullptr;
+          switch (queue) {
+          case DynamicCVQueue::Intra:
+            capacityDependencies =
+                &nodes[producerNode].intraCapacityDependencies;
+            break;
+          case DynamicCVQueue::Inter:
+            capacityDependencies =
+                &nodes[producerNode].interCapacityDependencies;
+            break;
+          case DynamicCVQueue::Load:
+            capacityDependencies =
+                &nodes[producerNode].loadCapacityDependencies;
+            break;
+          }
+          if (capacityDependencies->insert(releaseNode).second)
+            ++edgeCount;
+        }
+      }
+    };
+    for (const DynamicCVSegment &consumer : graph.segments) {
+      addCapacityEdges(consumer, consumer.intraDependencies,
+                       cacheDepths.intra, DynamicCVQueue::Intra,
+                       result.intraCapacityEdges);
+      addCapacityEdges(consumer, consumer.interDependencies,
+                       cacheDepths.inter, DynamicCVQueue::Inter,
+                       result.interCapacityEdges);
+      addCapacityEdges(consumer, consumer.loadDependencies,
+                       cacheDepths.load, DynamicCVQueue::Load,
+                       result.loadCapacityEdges);
+    }
+  }
+
+  std::vector<int64_t> endCycles(nodes.size(), 0);
+  std::map<HWUnit, int64_t> resourceAvailable;
+  for (size_t nodeId = 0; nodeId < nodes.size(); ++nodeId) {
+    const DynamicCVExpandedNode &node = nodes[nodeId];
+    int64_t startCycle = resourceAvailable[node.resource];
+    for (int64_t dependency : node.dependencies) {
+      if (dependency < 0 || dependency >= static_cast<int64_t>(nodeId))
+        return result;
+      startCycle = std::max(startCycle, endCycles[dependency]);
+    }
+    const int64_t startWithoutCapacity = startCycle;
+    auto applyCapacityDependencies = [&](const std::set<int64_t> &dependencies,
+                                         int64_t &blockingCycles) {
+      int64_t queueReadyCycle = startWithoutCapacity;
+      for (int64_t dependency : dependencies) {
+        if (dependency < 0 || dependency >= static_cast<int64_t>(nodeId)) {
+          startCycle = -1;
+          return;
+        }
+        queueReadyCycle = std::max(queueReadyCycle, endCycles[dependency]);
+      }
+      blockingCycles +=
+          std::max<int64_t>(0, queueReadyCycle - startWithoutCapacity);
+      startCycle = std::max(startCycle, queueReadyCycle);
+    };
+    applyCapacityDependencies(node.intraCapacityDependencies,
+                              result.intraBlockingCycles);
+    applyCapacityDependencies(node.interCapacityDependencies,
+                              result.interBlockingCycles);
+    applyCapacityDependencies(node.loadCapacityDependencies,
+                              result.loadBlockingCycles);
+    if (startCycle < 0)
+      return result;
+    endCycles[nodeId] = startCycle + node.durationCycles;
+    resourceAvailable[node.resource] = endCycles[nodeId];
+    result.makespanCycles =
+        std::max(result.makespanCycles, endCycles[nodeId]);
+  }
+  result.valid = true;
+  result.nodeCount = nodes.size();
+  return result;
+}
+
+DynamicCVStats estimateDynamicCV(
+    const DynamicCVParams &params, const PipelineScheduler &scheduler,
+    const HardwareConfig &config, int64_t cubePathCycles,
+    int64_t vectorPathCycles, int64_t baseRooflineTotalCycles) {
+  DynamicCVStats stats;
+  if (!params.present)
+    return stats;
+
+  stats.used = true;
+  stats.compilerStatusPresent = params.compilerStatusPresent;
+  stats.compilerApplied = params.compilerApplied;
+  stats.statusSource = params.compilerStatusPresent
+                           ? "compiler_final"
+                           : params.statusSource;
+  stats.intraCacheCount = std::max<int64_t>(1, params.intraCacheCount);
+  stats.interCacheCount = std::max<int64_t>(1, params.interCacheCount);
+  stats.loadCacheCount = std::max<int64_t>(1, params.loadCacheCount);
+
+  DynamicCVSegmentGraph graph = buildDynamicCVSegmentGraph(scheduler);
+  stats.segmentCount = graph.segments.size();
+  stats.workItemCount = stats.segmentCount;
+  stats.dataDependencyEdges = graph.dataDependencyEdges;
+  stats.segmentOrderEdges = graph.crossPathOrderEdges;
+  stats.iterationCount = graph.iterationCount;
+  bool hasCube = false;
+  bool hasVector = false;
+  for (const DynamicCVSegment &segment : graph.segments) {
+    hasCube |= segment.path == TileMixPath::Cube;
+    hasVector |= segment.path == TileMixPath::Vector;
+    stats.crossCoreEdges += segment.interDependencies.size();
+  }
+
+  DynamicCVSegmentSchedule off =
+      scheduleDynamicCVSegmentGraph(graph, false, {1, 1, 1});
+  DynamicCVSegmentSchedule on = scheduleDynamicCVSegmentGraph(
+      graph, true,
+      {stats.intraCacheCount, stats.interCacheCount, stats.loadCacheCount});
+  if (!off.valid || !on.valid || !hasCube || !hasVector ||
+      cubePathCycles <= 0 || vectorPathCycles <= 0) {
+    stats.skipReason = "mixed_cube_vector_segment_dag_not_proven";
+    return stats;
+  }
+
+  stats.segmentModelValid = true;
+  stats.offMakespanCycles = off.makespanCycles;
+  stats.onMakespanCycles = on.makespanCycles;
+  stats.intraCapacityEdges = on.intraCapacityEdges;
+  stats.interCapacityEdges = on.interCapacityEdges;
+  stats.loadCapacityEdges = on.loadCapacityEdges;
+  stats.intraBlockingCycles = on.intraBlockingCycles;
+  stats.interBlockingCycles = on.interBlockingCycles;
+  stats.loadBlockingCycles = on.loadBlockingCycles;
+  stats.originalMakespanCycles = stats.offMakespanCycles;
+  stats.transformedMakespanCycles = stats.onMakespanCycles;
+  stats.referenceDeltaCycles =
+      stats.offMakespanCycles - baseRooflineTotalCycles;
+
+  WorkspaceMultibufferEvidence evidence =
+      inferWorkspaceMultibufferEvidence(scheduler);
+  stats.cacheBytes = evidence.bytesPerSlot *
+      (stats.intraCacheCount + stats.interCacheCount + stats.loadCacheCount);
+  stats.syncCycles = stats.crossCoreEdges * stats.iterationCount *
+      (config.getSyncOpCycles("set_flag", 1) +
+       config.getSyncOpCycles("wait_flag", 2));
+  stats.controlCycles = on.nodeCount;
+  stats.offTotalCycles = stats.offMakespanCycles;
+  stats.onTotalCycles =
+      stats.onMakespanCycles + stats.syncCycles + stats.controlCycles;
+
+  if (!params.enabled) {
+    stats.skipReason = "disabled";
+    return stats;
+  }
+  if (!params.targetSupported) {
+    stats.skipReason = "target_not_supported";
+    return stats;
+  }
+  if (params.compilerStatusPresent && !params.compilerApplied) {
+    stats.skipReason = params.compilerSkipReason.empty()
+                           ? "compiler_rejected"
+                           : params.compilerSkipReason;
+    return stats;
+  }
+
+  stats.netDeltaCycles = stats.onTotalCycles - stats.offTotalCycles;
+  stats.eligible = true;
+  stats.adjustmentApplied = stats.netDeltaCycles != 0;
+  stats.skipReason = "none";
   return stats;
 }
 
@@ -1301,6 +1953,8 @@ struct PipelineAnalysisPass
     TileMixParams tileMixParams = parseTileMixParams(compileParamsStr);
     WorkspaceMultibufferParams workspaceMultibufferParams =
         parseWorkspaceMultibufferParams(compileParamsStr);
+    DynamicCVParams dynamicCVParams =
+        parseDynamicCVParams(compileParamsStr);
     
     // Collect loops and ensure trip counts are set
     SmallVector<scf::ForOp> allLoops;
@@ -1421,20 +2075,67 @@ struct PipelineAnalysisPass
     TileMixStats tileMixStats = estimateTileMix(
         tileMixParams, scheduler, config, cubePathCycles, vectorPathCycles,
         cubeTransferCycles, vectorTransferCycles, baseRooflineTotalCycles);
-    WorkspaceMultibufferStats workspaceMultibufferStats =
-        estimateWorkspaceMultibuffer(workspaceMultibufferParams, scheduler,
-                                     config, cubePathCycles,
-                                     vectorPathCycles);
+    bool dynamicCVSegmentDagModelEnabled =
+        isDynamicCVSegmentDagModelEnabled();
+    DynamicCVStats dynamicCVStats;
+    if (dynamicCVSegmentDagModelEnabled) {
+      dynamicCVStats = estimateDynamicCV(
+          dynamicCVParams, scheduler, config, cubePathCycles, vectorPathCycles,
+          baseRooflineTotalCycles);
+    } else {
+      // Keep enough metadata for diagnostics, but do not build the segment DAG
+      // or add any Dynamic-CV/Multibuffer delta in legacy-max mode.
+      dynamicCVStats.used = dynamicCVParams.present;
+      dynamicCVStats.compilerStatusPresent =
+          dynamicCVParams.compilerStatusPresent;
+      dynamicCVStats.compilerApplied = dynamicCVParams.compilerApplied;
+      dynamicCVStats.intraCacheCount = dynamicCVParams.intraCacheCount;
+      dynamicCVStats.interCacheCount = dynamicCVParams.interCacheCount;
+      dynamicCVStats.loadCacheCount = dynamicCVParams.loadCacheCount;
+      dynamicCVStats.statusSource = dynamicCVParams.statusSource;
+      dynamicCVStats.skipReason = dynamicCVParams.enabled
+                                      ? "segment_dag_model_disabled"
+                                      : "disabled";
+    }
+    CVFeatureMode cvFeatureMode = CVFeatureMode::Base;
+    WorkspaceMultibufferStats workspaceMultibufferStats;
+    if (dynamicCVParams.present && dynamicCVParams.enabled &&
+        !dynamicCVSegmentDagModelEnabled) {
+      cvFeatureMode = CVFeatureMode::DynamicCVLegacyMax;
+    } else if (dynamicCVStats.eligible) {
+      // The compiler selects Dynamic CV instead of ordinary Multibuffer. Do
+      // not add both deltas for one config.
+      cvFeatureMode = CVFeatureMode::DynamicCV;
+    } else if (dynamicCVParams.present && dynamicCVParams.enabled) {
+      if (workspaceMultibufferParams.present) {
+        cvFeatureMode = CVFeatureMode::OrdinaryMultibufferFallback;
+        workspaceMultibufferStats = estimateWorkspaceMultibuffer(
+            workspaceMultibufferParams, scheduler, config, cubePathCycles,
+            vectorPathCycles, baseRooflineTotalCycles);
+      }
+    } else if (workspaceMultibufferParams.present) {
+      cvFeatureMode = CVFeatureMode::OrdinaryMultibuffer;
+      workspaceMultibufferStats = estimateWorkspaceMultibuffer(
+          workspaceMultibufferParams, scheduler, config, cubePathCycles,
+          vectorPathCycles, baseRooflineTotalCycles);
+    }
     int64_t tileMixDeltaCycles =
         tileMixStats.valid ? tileMixStats.netDeltaCycles : 0;
     int64_t workspaceMultibufferDeltaCycles =
         workspaceMultibufferStats.valid
             ? workspaceMultibufferStats.netDeltaCycles
             : 0;
+    int64_t dynamicCVDeltaCycles =
+        dynamicCVStats.eligible ? dynamicCVStats.netDeltaCycles : 0;
+    int64_t dynamicCVReferenceDeltaCycles =
+        dynamicCVStats.segmentModelValid
+            ? dynamicCVStats.referenceDeltaCycles
+            : 0;
     int64_t rooflineTotalCycles = std::max<int64_t>(
         1, baseRooflineTotalCycles + tileMixDeltaCycles +
-               workspaceMultibufferDeltaCycles);
-    
+               workspaceMultibufferDeltaCycles +
+               dynamicCVReferenceDeltaCycles + dynamicCVDeltaCycles);
+
     // Also calculate simple sum for comparison
     int64_t simpleSumCycles = 0;
     for (const auto &pipelineOp : scheduler.getAllOps())
@@ -1461,6 +2162,9 @@ struct PipelineAnalysisPass
     module->setAttr("ascend.predicted_total_cycles",
                     IntegerAttr::get(IntegerType::get(module.getContext(), 64),
                                      predictedTotalCycles));
+    module->setAttr("ascend.cv_feature_mode",
+                    StringAttr::get(module.getContext(),
+                                    cvFeatureModeName(cvFeatureMode)));
     if (tileMixStats.used) {
       module->setAttr("ascend.tile_mix_schedule_model",
                       StringAttr::get(module.getContext(), "ttir_principle_marginal_cycles_v5_target_trip_peer_model"));
@@ -1558,6 +2262,69 @@ struct PipelineAnalysisPass
                       IntegerAttr::get(IntegerType::get(module.getContext(), 64), workspaceMultibufferStats.queueDeltaCycles));
       module->setAttr("ascend.workspace_multibuffer_net_delta_cycles",
                       IntegerAttr::get(IntegerType::get(module.getContext(), 64), workspaceMultibufferStats.netDeltaCycles));
+      module->setAttr("ascend.workspace_multibuffer_skip_reason",
+                      StringAttr::get(module.getContext(), workspaceMultibufferStats.skipReason));
+    }
+    if (dynamicCVStats.used) {
+      module->setAttr("ascend.dynamic_cv_schedule_model",
+                      StringAttr::get(
+                          module.getContext(),
+                          dynamicCVSegmentDagModelEnabled
+                              ? "ttir_segment_dag_three_fifo_v3"
+                              : "legacy_roofline_max_v1"));
+      module->setAttr("ascend.dynamic_cv_segment_dag_model_enabled",
+                      BoolAttr::get(module.getContext(),
+                                    dynamicCVSegmentDagModelEnabled));
+      module->setAttr("ascend.dynamic_cv_eligible",
+                      BoolAttr::get(module.getContext(), dynamicCVStats.eligible));
+      module->setAttr("ascend.dynamic_cv_adjustment_applied",
+                      BoolAttr::get(module.getContext(), dynamicCVStats.adjustmentApplied));
+      module->setAttr("ascend.dynamic_cv_work_item_count",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.workItemCount));
+      module->setAttr("ascend.dynamic_cv_segment_count",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.segmentCount));
+      module->setAttr("ascend.dynamic_cv_data_dependency_edges",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.dataDependencyEdges));
+      module->setAttr("ascend.dynamic_cv_segment_order_edges",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.segmentOrderEdges));
+      module->setAttr("ascend.dynamic_cv_cross_core_edges",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.crossCoreEdges));
+      module->setAttr("ascend.dynamic_cv_intra_capacity_edges",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.intraCapacityEdges));
+      module->setAttr("ascend.dynamic_cv_inter_capacity_edges",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.interCapacityEdges));
+      module->setAttr("ascend.dynamic_cv_load_capacity_edges",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.loadCapacityEdges));
+      module->setAttr("ascend.dynamic_cv_intra_blocking_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.intraBlockingCycles));
+      module->setAttr("ascend.dynamic_cv_inter_blocking_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.interBlockingCycles));
+      module->setAttr("ascend.dynamic_cv_load_blocking_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.loadBlockingCycles));
+      module->setAttr("ascend.dynamic_cv_iteration_count",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.iterationCount));
+      module->setAttr("ascend.dynamic_cv_original_makespan_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.originalMakespanCycles));
+      module->setAttr("ascend.dynamic_cv_transformed_makespan_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.transformedMakespanCycles));
+      module->setAttr("ascend.dynamic_cv_off_total_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.offTotalCycles));
+      module->setAttr("ascend.dynamic_cv_on_total_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.onTotalCycles));
+      module->setAttr("ascend.dynamic_cv_reference_delta_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.referenceDeltaCycles));
+      module->setAttr("ascend.dynamic_cv_sync_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.syncCycles));
+      module->setAttr("ascend.dynamic_cv_control_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.controlCycles));
+      module->setAttr("ascend.dynamic_cv_net_delta_cycles",
+                      IntegerAttr::get(IntegerType::get(module.getContext(), 64), dynamicCVStats.netDeltaCycles));
+      module->setAttr("ascend.dynamic_cv_skip_reason",
+                      StringAttr::get(module.getContext(), dynamicCVStats.skipReason));
+      module->setAttr("ascend.dynamic_cv_status_source",
+                      StringAttr::get(module.getContext(), dynamicCVStats.statusSource));
+      module->setAttr("ascend.dynamic_cv_compiler_applied",
+                      BoolAttr::get(module.getContext(), dynamicCVStats.compilerApplied));
     }
     if (tileMixStats.used) {
       module->setAttr("ascend.tile_mix_sync_ops_before",
@@ -1667,6 +2434,8 @@ struct PipelineAnalysisPass
                  << " (" << llvm::format("%.3f", config.cyclesToMicroseconds(simpleSumCycles)) << " us)\n";
     llvm::outs() << "  Roofline base (with overlap): " << baseRooflineTotalCycles
                  << " (" << llvm::format("%.3f", config.cyclesToMicroseconds(baseRooflineTotalCycles)) << " us)\n";
+    llvm::outs() << "  CV feature mode: " << cvFeatureModeName(cvFeatureMode)
+                 << "\n";
     if (tileMixStats.used) {
       llvm::outs() << "  Tile mix params: vector_loop=" << tileMixParams.vectorLoop
                    << ", cube_loop=" << tileMixParams.cubeLoop
@@ -1780,13 +2549,73 @@ struct PipelineAnalysisPass
                    << workspaceMultibufferStats.overlapReliefCycles
                    << ", queue_delta_cycles="
                    << workspaceMultibufferStats.queueDeltaCycles
-                   << ", net_delta_cycles="
-                   << workspaceMultibufferStats.netDeltaCycles << "\n";
+                    << ", net_delta_cycles="
+                    << workspaceMultibufferStats.netDeltaCycles
+                    << ", skip_reason="
+                    << workspaceMultibufferStats.skipReason << "\n";
       llvm::outs() << "  Workspace multibuffer marginal cycles: sync="
                    << workspaceMultibufferStats.syncDeltaCycles
                    << ", queue=" << workspaceMultibufferStats.queueDeltaCycles
                    << ", relief=" << workspaceMultibufferStats.overlapReliefCycles
-                   << ", net=" << workspaceMultibufferStats.netDeltaCycles
+                    << ", net=" << workspaceMultibufferStats.netDeltaCycles
+                    << "\n";
+    }
+    if (dynamicCVStats.used) {
+      llvm::outs() << "  Dynamic CV segment DAG model: "
+                   << (dynamicCVSegmentDagModelEnabled ? "enabled"
+                                                       : "disabled")
+                   << "\n";
+      llvm::outs() << "  Dynamic CV params: intra_cache_num="
+                   << dynamicCVStats.intraCacheCount
+                   << ", inter_cache_num=" << dynamicCVStats.interCacheCount
+                   << ", load_cache_num=" << dynamicCVStats.loadCacheCount
+                   << ", target_supported="
+                   << (dynamicCVParams.targetSupported ? "true" : "false")
+                   << "\n";
+      llvm::outs() << "  Dynamic CV schedule: eligible="
+                   << (dynamicCVStats.eligible ? "true" : "false")
+                   << ", status_source=" << dynamicCVStats.statusSource
+                   << ", compiler_applied="
+                   << (dynamicCVStats.compilerApplied ? "true" : "false")
+                   << ", skip_reason=" << dynamicCVStats.skipReason
+                   << ", segment_count=" << dynamicCVStats.segmentCount
+                   << ", data_dependency_edges="
+                   << dynamicCVStats.dataDependencyEdges
+                   << ", segment_order_edges="
+                   << dynamicCVStats.segmentOrderEdges
+                   << ", work_items=" << dynamicCVStats.workItemCount
+                   << ", cross_core_edges=" << dynamicCVStats.crossCoreEdges
+                   << ", intra_capacity_edges="
+                   << dynamicCVStats.intraCapacityEdges
+                   << ", inter_capacity_edges="
+                   << dynamicCVStats.interCapacityEdges
+                   << ", load_capacity_edges="
+                   << dynamicCVStats.loadCapacityEdges
+                   << ", intra_blocking_cycles="
+                   << dynamicCVStats.intraBlockingCycles
+                   << ", inter_blocking_cycles="
+                   << dynamicCVStats.interBlockingCycles
+                   << ", load_blocking_cycles="
+                   << dynamicCVStats.loadBlockingCycles
+                   << ", iterations=" << dynamicCVStats.iterationCount
+                   << ", cache_bytes=" << dynamicCVStats.cacheBytes
+                   << ", original_makespan_cycles="
+                   << dynamicCVStats.originalMakespanCycles
+                   << ", transformed_makespan_cycles="
+                   << dynamicCVStats.transformedMakespanCycles
+                   << ", off_makespan_cycles="
+                   << dynamicCVStats.offMakespanCycles
+                   << ", on_makespan_cycles="
+                   << dynamicCVStats.onMakespanCycles
+                   << ", off_total_cycles=" << dynamicCVStats.offTotalCycles
+                   << ", on_total_cycles=" << dynamicCVStats.onTotalCycles
+                   << ", reference_delta_cycles="
+                   << dynamicCVStats.referenceDeltaCycles
+                   << ", sync_cycles=" << dynamicCVStats.syncCycles
+                   << ", control_cycles=" << dynamicCVStats.controlCycles
+                   << ", dynamic_cv_net_delta_cycles="
+                   << dynamicCVStats.netDeltaCycles
+                   << ", net_delta_cycles=" << dynamicCVStats.netDeltaCycles
                    << "\n";
     }
     if (tileMixStats.used) {
@@ -1819,8 +2648,11 @@ struct PipelineAnalysisPass
                    << tileMixStats.scalarControlDeltaCycles << "\n";
     }
     llvm::outs() << "  Combined feature model delta cycles: tile_mix="
-                 << tileMixDeltaCycles << ", workspace_multibuffer="
-                 << workspaceMultibufferDeltaCycles << "\n";
+                  << tileMixDeltaCycles << ", workspace_multibuffer="
+                  << workspaceMultibufferDeltaCycles
+                  << ", dynamic_cv_off_reference="
+                  << dynamicCVReferenceDeltaCycles << ", dynamic_cv="
+                  << dynamicCVDeltaCycles << "\n";
     llvm::outs() << "  Roofline model (TTIR principle marginal tile mix): " << rooflineTotalCycles
                  << " (" << llvm::format("%.3f", config.cyclesToMicroseconds(rooflineTotalCycles)) << " us)\n";
     llvm::outs() << "  Kernel launch overhead: " << launch.totalCycles

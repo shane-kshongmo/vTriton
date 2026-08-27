@@ -26,6 +26,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include <cstdint>
+
 // Triton typed op headers (optional)
 #ifdef TRITONSIM_HAS_TRITON
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -83,6 +85,20 @@ static Value tracePointerSource(Value ptr) {
     }
   }
   return current;
+}
+
+/// Attach a run-local identity to transfers that access the same logical
+/// buffer. The identity is consumed only inside the current CostModel pass;
+/// its numeric value is deliberately not part of the reported score.
+static void markBufferFamily(Operation *op, Value identity,
+                             PatternRewriter &rewriter) {
+  if (!op || !identity)
+    return;
+  auto raw = reinterpret_cast<uintptr_t>(identity.getAsOpaquePointer());
+  int64_t id = static_cast<int64_t>(raw & UINT64_C(0x7fffffffffffffff));
+  if (id == 0)
+    id = 1;
+  op->setAttr("ascend.buffer_family_id", rewriter.getI64IntegerAttr(id));
 }
 
 /// Create a placeholder tensor source for ascend load ops.
@@ -187,9 +203,10 @@ struct ConvertTritonDot : public RewritePattern {
       int64_t bytes = getByteSize(tensorType);
       
       // Vector store (write from vector core to HBM via MTE3)
-      rewriter.create<VectorStoreOp>(loc, operand, bytes,
-                                     rewriter.getStringAttr("ub"),
-                                     rewriter.getStringAttr("hbm"), nullptr, nullptr);
+      auto vectorStore = rewriter.create<VectorStoreOp>(
+          loc, operand, bytes, rewriter.getStringAttr("ub"),
+          rewriter.getStringAttr("hbm"), nullptr, nullptr);
+      markBufferFamily(vectorStore.getOperation(), operand, rewriter);
 
       // Cube load (read into cube core L1 via MTE2)
       Value placeholder = createPlaceholderSource(tensorType, loc, rewriter);
@@ -197,6 +214,7 @@ struct ConvertTritonDot : public RewritePattern {
           loc, tensorType, placeholder ? placeholder : operand, bytes,
           rewriter.getStringAttr("hbm"), rewriter.getStringAttr("l1"),
           nullptr, nullptr);
+      markBufferFamily(cubeLoad.getOperation(), operand, rewriter);
 
       return cubeLoad.getResult();
     };
@@ -234,9 +252,10 @@ struct ConvertTritonDot : public RewritePattern {
     
     // Output: cube_store (write from cube L0C to HBM via FixPipe)
     int64_t resultBytes = getByteSize(resultType);
-    rewriter.create<CubeStoreOp>(loc, matmul.getResult(), resultBytes,
-                                 rewriter.getStringAttr("l0c"),
-                                 rewriter.getStringAttr("hbm"), nullptr, nullptr);
+    auto cubeStore = rewriter.create<CubeStoreOp>(
+        loc, matmul.getResult(), resultBytes, rewriter.getStringAttr("l0c"),
+        rewriter.getStringAttr("hbm"), nullptr, nullptr);
+    markBufferFamily(cubeStore.getOperation(), matmul.getResult(), rewriter);
     
     // Check if result is used by vector operations (or loop yield)
     // If so, insert vector_load to bring data into vector core
@@ -257,6 +276,7 @@ struct ConvertTritonDot : public RewritePattern {
           loc, resultType, placeholder ? placeholder : matmul.getResult(),
           resultBytes, rewriter.getStringAttr("hbm"),
           rewriter.getStringAttr("ub"), nullptr, nullptr);
+      markBufferFamily(vecLoad.getOperation(), matmul.getResult(), rewriter);
       rewriter.replaceOp(op, vecLoad.getResult());
     } else {
       rewriter.replaceOp(op, matmul.getResult());
@@ -290,6 +310,9 @@ struct ConvertTritonLoad : public RewritePattern {
     Location loc = op->getLoc();
     auto resultType = op->getResult(0).getType();
     int64_t bytes = getByteSize(resultType);
+    Value pointerIdentity = op->getNumOperands() > 0
+                                ? tracePointerSource(op->getOperand(0))
+                                : Value();
 
     // Create a placeholder tensor source
     Value source = createPlaceholderSource(resultType, loc, rewriter);
@@ -304,11 +327,13 @@ struct ConvertTritonLoad : public RewritePattern {
       auto cubeLoad = rewriter.create<CubeLoadOp>(
           loc, resultType, source, bytes, rewriter.getStringAttr("hbm"),
           rewriter.getStringAttr("l1"), nullptr, nullptr);
+      markBufferFamily(cubeLoad.getOperation(), pointerIdentity, rewriter);
       rewriter.replaceOp(op, cubeLoad.getResult());
     } else {
       auto vecLoad = rewriter.create<VectorLoadOp>(
           loc, resultType, source, bytes, rewriter.getStringAttr("hbm"),
           rewriter.getStringAttr("ub"), nullptr, nullptr);
+      markBufferFamily(vecLoad.getOperation(), pointerIdentity, rewriter);
       rewriter.replaceOp(op, vecLoad.getResult());
     }
     return success();
@@ -366,9 +391,11 @@ struct ConvertTritonStore : public RewritePattern {
     Value data = op->getOperand(1);
     int64_t bytes = getByteSize(data.getType());
 
-    rewriter.create<VectorStoreOp>(op->getLoc(), data, bytes,
-                                   rewriter.getStringAttr("ub"),
-                                   rewriter.getStringAttr("hbm"), nullptr, nullptr);
+    Value pointerIdentity = tracePointerSource(op->getOperand(0));
+    auto vectorStore = rewriter.create<VectorStoreOp>(
+        op->getLoc(), data, bytes, rewriter.getStringAttr("ub"),
+        rewriter.getStringAttr("hbm"), nullptr, nullptr);
+    markBufferFamily(vectorStore.getOperation(), pointerIdentity, rewriter);
     rewriter.eraseOp(op);
     return success();
   }

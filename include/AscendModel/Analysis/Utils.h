@@ -245,6 +245,58 @@ inline SymbolicBound analyzeValue(Value v, Operation *funcOp = nullptr) {
 /// Try to evaluate a value given argument and program_id bindings.
 /// Returns std::nullopt if evaluation fails.
 inline std::optional<int64_t> evaluateValue(
+    Value v,
+    const llvm::DenseMap<unsigned, int64_t> &argBindings,
+    const llvm::StringMap<int64_t> &programIdBindings);
+
+struct BoundPointerLocation {
+  unsigned argIndex;
+  int64_t elementOffset;
+};
+
+inline std::optional<unsigned> pointerElementBindingKey(
+    unsigned argIndex, int64_t elementOffset) {
+  constexpr unsigned marker = 0x80000000u;
+  if (argIndex >= 0x8000u || elementOffset < 0 || elementOffset > 0xffff)
+    return std::nullopt;
+  return marker | (argIndex << 16) |
+         static_cast<unsigned>(elementOffset);
+}
+
+inline std::optional<BoundPointerLocation> resolveBoundPointerLocation(
+    Value pointer,
+    const llvm::DenseMap<unsigned, int64_t> &argBindings,
+    const llvm::StringMap<int64_t> &programIdBindings) {
+  if (auto blockArg = dyn_cast<BlockArgument>(pointer))
+    return BoundPointerLocation{blockArg.getArgNumber(), 0};
+
+  Operation *defOp = pointer.getDefiningOp();
+  if (!defOp)
+    return std::nullopt;
+
+  llvm::StringRef name = defOp->getName().getStringRef();
+  if (name == "tt.addptr" && defOp->getNumOperands() >= 2) {
+    auto base = resolveBoundPointerLocation(
+        defOp->getOperand(0), argBindings, programIdBindings);
+    auto offset = evaluateValue(
+        defOp->getOperand(1), argBindings, programIdBindings);
+    if (base && offset) {
+      base->elementOffset += *offset;
+      return base;
+    }
+    return std::nullopt;
+  }
+
+  if ((name == "tt.splat" || name == "arith.index_cast" ||
+       name == "arith.index_castui") &&
+      defOp->getNumOperands() >= 1) {
+    return resolveBoundPointerLocation(
+        defOp->getOperand(0), argBindings, programIdBindings);
+  }
+  return std::nullopt;
+}
+
+inline std::optional<int64_t> evaluateValue(
     Value v, 
     const llvm::DenseMap<unsigned, int64_t> &argBindings,
     const llvm::StringMap<int64_t> &programIdBindings = {}) {
@@ -267,6 +319,25 @@ inline std::optional<int64_t> evaluateValue(
   Operation *defOp = v.getDefiningOp();
   if (!defOp)
     return std::nullopt;
+  // Small runtime control tensors can be serialized as
+  // argN_elemINDEX=value. Resolve scalar loads through the pointer arithmetic
+  // chain instead of treating the device address itself as a scalar value.
+  llvm::StringRef defName = defOp->getName().getStringRef();
+  if ((defName == "tt.load" || defName == "ascend.vector_load" ||
+       defName == "ascend.cube_load") &&
+      defOp->getNumOperands() >= 1) {
+    auto location = resolveBoundPointerLocation(
+        defOp->getOperand(0), argBindings, programIdBindings);
+    if (location) {
+      if (auto key = pointerElementBindingKey(
+              location->argIndex, location->elementOffset)) {
+        auto it = argBindings.find(*key);
+        if (it != argBindings.end())
+          return it->second;
+      }
+    }
+    return std::nullopt;
+  }
   
   // Handle tt.get_program_id
   if (defOp->getName().getStringRef() == "tt.get_program_id") {
@@ -465,7 +536,8 @@ inline LoopTripCountResult analyzeScfForTripCount(scf::ForOp forOp) {
 /// If bindings are missing for required args/program_ids, returns error in result.
 inline LoopTripCountResult getScfForTripCountWithBindings(
     scf::ForOp forOp,
-    const llvm::DenseMap<unsigned, int64_t> &argBindings = {},
+    const llvm::DenseMap<unsigned, int64_t> &argBindings =
+        llvm::DenseMap<unsigned, int64_t>(),
     const llvm::StringMap<int64_t> &programIdBindings = {}) {
   
   LoopTripCountResult result = analyzeScfForTripCount(forOp);
@@ -478,7 +550,12 @@ inline LoopTripCountResult getScfForTripCountWithBindings(
   // Check if we have all required bindings
   SmallVector<std::string> missingBindings;
   for (unsigned argIdx : result.dependentArgs) {
-    if (argBindings.find(argIdx) == argBindings.end()) {
+    auto pointerElementZero = pointerElementBindingKey(argIdx, 0);
+    bool hasPointerElements =
+        pointerElementZero &&
+        argBindings.find(*pointerElementZero) != argBindings.end();
+    if (argBindings.find(argIdx) == argBindings.end() &&
+        !hasPointerElements) {
       missingBindings.push_back("%arg" + std::to_string(argIdx));
     }
   }
@@ -724,6 +801,34 @@ public:
     for (const auto &kv : bindings_) {
       llvm::StringRef key = kv.first();
       if (key.starts_with("arg")) {
+        size_t elem = key.find("_elem");
+        if (elem != llvm::StringRef::npos && elem > 3) {
+          unsigned argIndex;
+          int64_t elementOffset;
+          if (!key.slice(3, elem).getAsInteger(10, argIndex) &&
+              !key.substr(elem + 5).getAsInteger(10, elementOffset)) {
+            if (auto encoded =
+                    pointerElementBindingKey(argIndex, elementOffset)) {
+              out[*encoded] = kv.second.asInt();
+            }
+          }
+          continue;
+        }
+        size_t open = key.find('[');
+        size_t close = key.find(']');
+        if (open != llvm::StringRef::npos &&
+            close == key.size() - 1 && open > 3) {
+          unsigned argIndex;
+          int64_t elementOffset;
+          if (!key.slice(3, open).getAsInteger(10, argIndex) &&
+              !key.slice(open + 1, close).getAsInteger(
+                  10, elementOffset)) {
+            if (auto encoded =
+                    pointerElementBindingKey(argIndex, elementOffset))
+              out[*encoded] = kv.second.asInt();
+          }
+          continue;
+        }
         unsigned idx;
         if (!key.substr(3).getAsInteger(10, idx)) {
           out[idx] = kv.second.asInt();
@@ -736,7 +841,8 @@ public:
     for (const auto &kv : bindings_) {
       llvm::StringRef key = kv.first();
       if (key.starts_with("pid_") || key.starts_with("program_id_") ||
-          key == "x" || key == "y" || key == "z") {
+          key == "x" || key == "y" || key == "z" ||
+          (key.starts_with("arg") && key.contains("["))) {
         out[key] = kv.second.asInt();
       }
     }
