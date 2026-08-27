@@ -44,7 +44,7 @@ from perfbound.validate.msprof_parser import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HW_CSV = PROJECT_ROOT / "tests" / "perfbound" / "fixtures" / "chunk_kda_op_summary_910b3.csv"
-HW_CONFIG = PROJECT_ROOT / "configs" / "ascend_910b.json"
+HW_CONFIG = PROJECT_ROOT / "configs" / "ascend_910b3_v4.json"
 
 KERNEL_OP_NAME = "chunk_kda_bwd_kernel_wy_dqkg_fused_opt_v2"
 

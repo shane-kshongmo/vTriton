@@ -28,7 +28,7 @@ from perfbound.validate.harness import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = PROJECT_ROOT / "tests" / "perfbound" / "fixtures"
-HW_CONFIG = json.loads((PROJECT_ROOT / "configs" / "ascend_910b.json").read_text())
+HW_CONFIG = json.loads((PROJECT_ROOT / "configs" / "ascend_910b3_v4.json").read_text())
 HBM_TBPS = HW_CONFIG["memory_spaces"]["hbm"]["bandwidth_tbps"]
 
 

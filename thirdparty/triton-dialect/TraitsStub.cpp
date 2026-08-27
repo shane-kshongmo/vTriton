@@ -17,6 +17,17 @@ namespace mlir {
 namespace OpTrait {
 namespace impl {
 
+LogicalResult verifyEquivalentType(Type typeA, Type typeB) {
+  auto tensorTypeA = dyn_cast<RankedTensorType>(typeA);
+  auto tensorTypeB = dyn_cast<RankedTensorType>(typeB);
+  if (!tensorTypeA || !tensorTypeB)
+    return typeA == typeB ? success() : failure();
+  if (tensorTypeA.getShape() != tensorTypeB.getShape() ||
+      tensorTypeA.getElementType() != tensorTypeB.getElementType())
+    return failure();
+  return success();
+}
+
 LogicalResult verifySameOperandsEncoding(Operation *op,
                                          bool allowTensorPointerType) {
   return success();

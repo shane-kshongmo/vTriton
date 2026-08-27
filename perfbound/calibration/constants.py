@@ -5,7 +5,7 @@
 # provenance (value, ci, source, n_runs) — no datasheet peaks enter I_c.
 #
 # Source spec: .omc/specs/performance_bound_model.md §A.1
-# Existing seed: configs/ascend_910b.json (calibration block)
+# Existing seed: configs/ascend_910b3_v4.json (calibration block)
 
 from __future__ import annotations
 
@@ -218,7 +218,7 @@ class VectorConfig:
     """Sustained Vector (SIMD engine) throughput.
 
     vec_width_elements: SIMD width (128 elements for 910B)
-    Per-op cycle costs from profiling calibration (seed from ascend_910b.json).
+    Per-op cycle costs from profiling calibration (seed from ascend_910b3_v4.json).
     """
     vec_width_elements: int = 128
     vec_width_bytes: int = 256

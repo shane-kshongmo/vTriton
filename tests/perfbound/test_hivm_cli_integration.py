@@ -28,7 +28,7 @@ HIVM_ADD_KERNEL = FIXTURE_DIR / "hivm_add_kernel.npuir.mlir"
 HIVM_MIXED_CV_KERNEL = FIXTURE_DIR / "hivm_mixed_cv_kernel.npuir.mlir"
 
 # Hardware config
-HW_CONFIG = PROJECT_ROOT / "configs" / "ascend_910b.json"
+HW_CONFIG = PROJECT_ROOT / "configs" / "ascend_910b3_v4.json"
 CALIBRATED_HW_CONFIG = PROJECT_ROOT / "configs" / "ascend_910b3_v4.json"
 
 

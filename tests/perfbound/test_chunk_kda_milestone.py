@@ -37,7 +37,7 @@ from perfbound.combine.report import KernelReport
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRITONSIM_HIVM = PROJECT_ROOT / "build" / "bin" / "tritonsim-hivm"
-HW_CONFIG = PROJECT_ROOT / "configs" / "ascend_910b.json"
+HW_CONFIG = PROJECT_ROOT / "configs" / "ascend_910b3_v4.json"
 
 # Mixed CV fixture (known-good, parser-tested)
 MIXED_CV_KERNEL = PROJECT_ROOT / "test" / "hivm_mixed_cv_kernel.npuir.mlir"

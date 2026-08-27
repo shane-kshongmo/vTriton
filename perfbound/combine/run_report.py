@@ -7,7 +7,7 @@
 #     — consumes an existing des.json via extract_hivm
 #
 # The two configs are separate:
-#   hardware_config (configs/ascend_910b.json) → C++ tool stage
+#   hardware_config (configs/ascend_910b3_v4.json) → C++ tool stage
 #   calibration DB (load_default_calib_db)    → Python model stage
 #
 # CLI:

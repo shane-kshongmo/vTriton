@@ -2,8 +2,8 @@
 # Format: tilesim-compatible CSV for Vector op latency modeling
 # Columns: intrinsic, computing_cycles, head_cycles, interval_cycles
 #
-# Population status: SEED VALUES from ascend_910b.json calibration
-# Source: configs/ascend_910b.json → calibration.vector_op_cycles_per_vec_instruction
+# Population status: SEED VALUES from ascend_910b3_v4.json calibration
+# Source: configs/ascend_910b3_v4.json → calibration.vector_op_cycles_per_vec_instruction
 # These are cycle costs per 128-element vector instruction.
 #
 # Actual measured values will come from CCE microbenchmarks:

@@ -448,7 +448,7 @@ HIVM 原生分析工具。支持两种输入模式：
 | 文件                                                                         | 说明                         |
 | ---------------------------------------------------------------------------- | ---------------------------- |
 | [hardware_schema.json](file:///d:/develop/vTriton/configs/hardware_schema.json) | JSON Schema 定义硬件配置格式 |
-| [ascend_910b.json](file:///d:/develop/vTriton/configs/ascend_910b.json)         | 昇腾 910B 默认配置           |
+| [ascend_910b3_v4.json](file:///d:/develop/vTriton/configs/ascend_910b3_v4.json)         | 昇腾 910B 默认配置           |
 | [ascend_910b3.json](file:///d:/develop/vTriton/configs/ascend_910b3.json)       | 昇腾 910B3 详细配置          |
 
 **910B3 关键硬件参数**：

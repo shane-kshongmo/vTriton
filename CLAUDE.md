@@ -61,7 +61,7 @@ Full options in `BUILD.md`; dependency graph in `DEPENDENCIES.md`.
 
 # ...with a hardware config (option goes on the pipeline, not as a global flag)
 ./build/bin/tritonsim-opt test/ascend_ops.mlir \
-  -ascend-perf-model="hardware-config=configs/ascend_910b.json"
+  -ascend-perf-model="hardware-config=configs/ascend_910b3_v4.json"
 
 # Step-by-step passes
 ./build/bin/tritonsim-opt test/ascend_ops.mlir -assign-op-ids -estimate-cycles -analyze-pipeline -perf-report
@@ -80,7 +80,7 @@ Mode-B builds can't parse `.ttir` directly. Pipe `triton-opt` (generic MLIR) int
 ```bash
 triton-opt kernel.ttir --allow-unregistered-dialect --mlir-print-op-generic | \
 ./build/bin/tritonsim-opt - --allow-unregistered-dialect \
-  -ascend-perf-model="hardware-config=configs/ascend_910b.json arg-bindings=arg7=4096"
+  -ascend-perf-model="hardware-config=configs/ascend_910b3_v4.json arg-bindings=arg7=4096"
 ```
 
 `arg-bindings=argN=<value>` binds a function argument (typically the runtime upper bound of an `scf.for` loop). Inspect the `.mlir` to find which `%argN` controls the loop bound. If all loops have static bounds, `arg-bindings` is not needed.
@@ -130,7 +130,7 @@ Python environment note: the repo ships a **Windows-style** `.venv` (it has `Scr
 
 ## Configs & calibration data
 
-- `configs/ascend_910b.json`, `configs/ascend_910b3.json` — hardware parameters (clock, memory hierarchy, compute-unit throughput, data-mover bandwidth). Format documented in `configs/README.md`, validated against `configs/hardware_schema.json`. **Default is 910B.**
+- `configs/ascend_910b3_v4.json`, `configs/ascend_910b3.json` — hardware parameters (clock, memory hierarchy, compute-unit throughput, data-mover bandwidth). Format documented in `configs/README.md`, validated against `configs/hardware_schema.json`. **Default is 910B.**
 - `perfbound/calibration/bench_output/*.csv` — measured sustained rates (bandwidth, cube peak, mandatory handoffs, MTE transfers) from `.cce` AscendC microbenchmarks. Calibration constants live in `perfbound/calibration/data/`. See `docs/CALIBRATION_GUIDE.md`.
 
 ## Conventions & gotchas
@@ -158,7 +158,7 @@ When using the Write tool for scripts, write variable assignments as **plain lit
 cd /mnt/d/work/git/vTriton/build && ninja -j$(nproc)
 ```
 
-Key local paths: `tritonsim-opt` → `build/bin/tritonsim-opt`; `triton-opt` → `/mnt/d/work/git/triton-ascend/python/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt`; default hardware config → `configs/ascend_910b.json`.
+Key local paths: `tritonsim-opt` → `build/bin/tritonsim-opt`; `triton-opt` → `/mnt/d/work/git/triton-ascend/python/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt`; default hardware config → `configs/ascend_910b3_v4.json`.
 
 ## Local environment bootstrap
 

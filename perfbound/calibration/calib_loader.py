@@ -135,14 +135,14 @@ def seed_calibration_from_ascend_json(
     ascend_json_path: str | Path,
     output_path: str | Path | None = None,
 ) -> CalibrationDB:
-    """Seed a CalibrationDB from the existing configs/ascend_910b.json.
+    """Seed a CalibrationDB from the existing configs/ascend_910b3_v4.json.
 
     Tags every constant with source="datasheet_seed" and n_runs=0.
     These MUST be replaced by measured sustained rates before any
     I_c computation enters the bound.
 
     Args:
-        ascend_json_path: Path to configs/ascend_910b.json.
+        ascend_json_path: Path to configs/ascend_910b3_v4.json.
         output_path: If given, write the seeded DB as JSON.
 
     Returns:

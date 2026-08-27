@@ -7,7 +7,7 @@ TritonSim 使用 JSON 文件定义目标硬件的参数，使性能建模能够�
 ```
 configs/
 ├── hardware_schema.json    # JSON Schema (用于验证)
-├── ascend_910b.json        # 昇腾 910B 配置
+├── ascend_910b3_v4.json        # 昇腾 910B 配置
 └── README.md               # 本文档
 ```
 
@@ -18,7 +18,7 @@ configs/
 ./bin/tritonsim-opt input.mlir -analyze-pipeline
 
 # 指定配置文件
-./bin/tritonsim-opt input.mlir --hardware-config=configs/ascend_910b.json
+./bin/tritonsim-opt input.mlir --hardware-config=configs/ascend_910b3_v4.json
 
 # 使用自定义配置
 ./bin/tritonsim-opt input.mlir --hardware-config=my_custom_hw.json
@@ -198,7 +198,7 @@ Vector 数据流:
 
 ## 创建自定义配置
 
-1. 复制 `ascend_910b.json` 作为模板
+1. 复制 `ascend_910b3_v4.json` 作为模板
 2. 修改参数以匹配目标硬件
 3. 使用 `hardware_schema.json` 验证 (可选)
 
@@ -232,7 +232,7 @@ npx ajv validate -s hardware_schema.json -d my_hardware.json
 
 | 硬件 | 配置文件 | 状态 |
 |------|----------|------|
-| Ascend 910B | `ascend_910b.json` | ✅ 完整支持 |
+| Ascend 910B | `ascend_910b3_v4.json` | ✅ 完整支持 |
 | Ascend 910C | `ascend_910c.json` | 🚧 规划中 |
 | 自定义 | 用户提供 | ✅ 支持 |
 
@@ -242,7 +242,7 @@ npx ajv validate -s hardware_schema.json -d my_hardware.json
 #include "AscendModel/HardwareConfig.h"
 
 // 加载配置
-auto config = HardwareConfig::loadFromFile("configs/ascend_910b.json");
+auto config = HardwareConfig::loadFromFile("configs/ascend_910b3_v4.json");
 
 // 查询参数
 double freq = config.getClockFrequencyGHz();      // 1.85

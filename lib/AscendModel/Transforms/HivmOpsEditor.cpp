@@ -780,7 +780,7 @@ VCumsumOp HivmOpsEditor::addVCumsumBefore(Operation *target, Value src,
   OpBuilder builder(target->getContext());
   builder.setInsertionPoint(target);
   return builder.create<VCumsumOp>(target->getLoc(), TypeRange{}, src, dst,
-                                   cumDims, BoolAttr());
+                                   cumDims, false);
 }
 
 VCumsumOp HivmOpsEditor::addVCumsumAfter(Operation *target, Value src,
@@ -789,7 +789,7 @@ VCumsumOp HivmOpsEditor::addVCumsumAfter(Operation *target, Value src,
   OpBuilder builder(target->getContext());
   builder.setInsertionPointAfter(target);
   return builder.create<VCumsumOp>(target->getLoc(), TypeRange{}, src, dst,
-                                   cumDims, BoolAttr());
+                                   cumDims, false);
 }
 
 VCumprodOp HivmOpsEditor::addVCumprodBefore(Operation *target, Value src,
@@ -798,7 +798,7 @@ VCumprodOp HivmOpsEditor::addVCumprodBefore(Operation *target, Value src,
   OpBuilder builder(target->getContext());
   builder.setInsertionPoint(target);
   return builder.create<VCumprodOp>(target->getLoc(), TypeRange{}, src, dst,
-                                    cumDims, BoolAttr());
+                                    cumDims, false);
 }
 
 VCumprodOp HivmOpsEditor::addVCumprodAfter(Operation *target, Value src,
@@ -807,7 +807,7 @@ VCumprodOp HivmOpsEditor::addVCumprodAfter(Operation *target, Value src,
   OpBuilder builder(target->getContext());
   builder.setInsertionPointAfter(target);
   return builder.create<VCumprodOp>(target->getLoc(), TypeRange{}, src, dst,
-                                    cumDims, BoolAttr());
+                                    cumDims, false);
 }
 
 VSortOp HivmOpsEditor::addVSortBefore(Operation *target, Value src,
@@ -1569,8 +1569,7 @@ CustomOp HivmOpsEditor::addCustomBefore(Operation *target,
                                          ValueRange outputs) {
   OpBuilder builder(target->getContext());
   builder.setInsertionPoint(target);
-  return builder.create<CustomOp>(target->getLoc(), name, TypeRange{}, inputs,
-                                  outputs);
+  return builder.create<CustomOp>(target->getLoc(), name, inputs, outputs);
 }
 
 CustomOp HivmOpsEditor::addCustomAfter(Operation *target,
@@ -1578,8 +1577,7 @@ CustomOp HivmOpsEditor::addCustomAfter(Operation *target,
                                         ValueRange outputs) {
   OpBuilder builder(target->getContext());
   builder.setInsertionPointAfter(target);
-  return builder.create<CustomOp>(target->getLoc(), name, TypeRange{}, inputs,
-                                  outputs);
+  return builder.create<CustomOp>(target->getLoc(), name, inputs, outputs);
 }
 
 DebugOp HivmOpsEditor::addDebugBefore(Operation *target,

@@ -27,7 +27,7 @@ C++ 工具与 Python 模型之间通过 JSON（DES 图、依赖图）松耦合�
 | `ascend-tiling-opt` | 在构建中存在时提供 tiling 优化入口（当前默认未构建） |
 | `perfbound/` | Python 性能下界模型：静态判断 kernel 是否已贴住硬件极限、差距归因到哪 |
 | `scripts/run_bound.py` | 端到端 bound 流水线入口（NPUIR dump → DES 图 → bound 报告） |
-| `configs/*.json` | 定义硬件参数，默认使用 `configs/ascend_910b.json` |
+| `configs/*.json` | 定义硬件参数，默认使用 `configs/ascend_910b3_v4.json` |
 | `docs/` | 架构、校准、部署文档 |
 
 ## 前置要求
@@ -175,7 +175,7 @@ cd ..
 
 ```bash
 ./build/bin/tritonsim-opt test/ascend_ops.mlir \
-  -ascend-perf-model="hardware-config=configs/ascend_910b.json"
+  -ascend-perf-model="hardware-config=configs/ascend_910b3_v4.json"
 ```
 
 ### 分析 HIVM IR
@@ -236,7 +236,7 @@ DSL。该 launcher 同时产出 TTIR 与 HIVM/NPUIR dump：
 
 ```bash
 TRITON_OPT=/path/to/triton-opt
-HW_CONFIG=configs/ascend_910b.json
+HW_CONFIG=configs/ascend_910b3_v4.json
 
 $TRITON_OPT kernel.ttir --allow-unregistered-dialect --mlir-print-op-generic | \
 ./build/bin/tritonsim-opt - \

@@ -45,7 +45,8 @@ if(NOT TRITON_GEN_INC_DIR)
   macro(add_tblgen_rule _dir _td _file)
     set(_flags ${ARGN})
     add_custom_command(OUTPUT ${_dir}/${_file}
-      COMMAND ${MLIR_TABLEGEN_EXE} ${_td} ${_flags} ${_I} -o ${_dir}/${_file}
+      COMMAND ${MLIR_TABLEGEN_EXE} ${BS_FEAT_LIST} ${_td} ${_flags} ${_I}
+              -o ${_dir}/${_file}
       DEPENDS ${_td}
       COMMENT "[Triton-tblgen] ${_file}")
   endmacro()
