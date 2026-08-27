@@ -159,7 +159,7 @@ def HIVMAnalysisPass : Pass<"analyze-hivm", "ModuleOp"> {
 
     Example:
       tritonsim-opt --analyze-hivm input.npuir.mlir
-      tritonsim-opt --analyze-hivm="hardware-config=configs/ascend_910b.json arg-bindings=arg10=128" input.npuir.mlir
+      tritonsim-opt --analyze-hivm="hardware-config=configs/ascend_910b3_v4.json arg-bindings=arg10=128" input.npuir.mlir
   }];
 
   let options = [

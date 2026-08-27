@@ -144,7 +144,7 @@ TritonSim 支持通过 JSON 配置文件定义目标硬件:
 
 ```bash
 # 使用默认 910B 配置
-./bin/tritonsim-opt input.mlir --hardware-config=configs/ascend_910b.json
+./bin/tritonsim-opt input.mlir --hardware-config=configs/ascend_910b3_v4.json
 
 # 或自定义配置
 ./bin/tritonsim-opt input.mlir --hardware-config=my_hardware.json
@@ -164,7 +164,7 @@ TritonSim 支持通过 JSON 配置文件定义目标硬件:
 
 # 自定义硬件配置 (选项传入 pipeline，不是全局 flag)
 ./bin/tritonsim-opt test/ascend_ops.mlir \
-  -ascend-perf-model="hardware-config=configs/ascend_910b.json"
+  -ascend-perf-model="hardware-config=configs/ascend_910b3_v4.json"
 
 # 分步执行各 pass
 ./bin/tritonsim-opt test/ascend_ops.mlir \

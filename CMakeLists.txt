@@ -54,8 +54,8 @@ set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 
-include(TableGen)
 include(AddLLVM)
+include(TableGen)
 include(AddMLIR)
 include(HandleLLVMOptions)
 
@@ -65,7 +65,7 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_BINARY_DIR}/include)
 
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
-add_definitions(${LLVM_DEFINITIONS})
+add_definitions(${LLVM_DEFINITIONS} ${BS_FEAT_LIST})
 
 #===----------------------------------------------------------------------===//
 # Triton Integration (Optional)

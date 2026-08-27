@@ -563,7 +563,7 @@ def _compute_gap4(
         Estimated per-instruction issue overhead in microseconds.
     """
     # CCE constants.  startup cycles mirror calibration.startup_latencies
-    # (ascend_910b.json); MAX_REPEAT is the 8-bit CCE repeat field limit;
+    # (ascend_910b3_v4.json); MAX_REPEAT is the 8-bit CCE repeat field limit;
     # PER_ITER_CYC is the 1-iteration/cycle vector/cube throughput floor.
     MAX_REPEAT = 255
     PER_ITER_CYC = 1.0

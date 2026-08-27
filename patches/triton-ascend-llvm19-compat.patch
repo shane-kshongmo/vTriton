@@ -1,0 +1,34 @@
+diff --git a/lib/Dialect/Triton/IR/Dialect.cpp b/lib/Dialect/Triton/IR/Dialect.cpp
+index 9073f423f..f6abc33cb 100644
+--- a/lib/Dialect/Triton/IR/Dialect.cpp
++++ b/lib/Dialect/Triton/IR/Dialect.cpp
+@@ -40,8 +40,8 @@ void TritonInlinerInterface::handleTerminator(Operation *op,
+ 
+   // Replace the return with a branch to the dest.
+   OpBuilder builder(op);
+-  mlir::cf::BranchOp::create(builder, op->getLoc(), newDest,
+-                             returnOp.getOperands());
++  builder.create<mlir::cf::BranchOp>(op->getLoc(), newDest,
++                                     returnOp.getOperands());
+   op->erase();
+ }
+ 
+diff --git a/lib/Dialect/Triton/IR/Ops.cpp b/lib/Dialect/Triton/IR/Ops.cpp
+index 7be62c734..220c13dce 100644
+--- a/lib/Dialect/Triton/IR/Ops.cpp
++++ b/lib/Dialect/Triton/IR/Ops.cpp
+@@ -774,10 +774,10 @@ LogicalResult ExpandDimsOp::canonicalize(ExpandDimsOp op,
+ 
+     auto newExpandTy = RankedTensorType::get(
+         newExpandShape, srcTy.getElementType(), newExpandEnc);
+-    auto newExpand = ExpandDimsOp::create(rewriter, op.getLoc(), newExpandTy,
+-                                          src, op.getAxis());
+-    auto newBroadcast = BroadcastOp::create(
+-        rewriter, broadcast.getLoc(), op.getType(), newExpand.getResult());
++    auto newExpand = rewriter.create<ExpandDimsOp>(
++        op.getLoc(), newExpandTy, src, op.getAxis());
++    auto newBroadcast = rewriter.create<BroadcastOp>(
++        broadcast.getLoc(), op.getType(), newExpand.getResult());
+     rewriter.replaceOp(op, {newBroadcast.getResult()});
+     return success();
+   }

@@ -221,16 +221,16 @@ HardwareConfig::loadFromJSON(const llvm::json::Value &json) {
 std::unique_ptr<HardwareConfig> HardwareConfig::getDefault910B() {
   // Try to load from standard config locations
   std::vector<std::string> searchPaths = {
-    "configs/ascend_910b.json",           // Current directory
-    "../configs/ascend_910b.json",        // Parent directory
-    "../../configs/ascend_910b.json",     // Two levels up
-    "../config/ascend_910b.json",         // Alternative naming
-    "config/ascend_910b.json",
+    "configs/ascend_910b3_v4.json",           // Current directory
+    "../configs/ascend_910b3_v4.json",        // Parent directory
+    "../../configs/ascend_910b3_v4.json",     // Two levels up
+    "../config/ascend_910b3_v4.json",         // Alternative naming
+    "config/ascend_910b3_v4.json",
   };
   
   // Also check environment variable for config path
   if (const char* envPath = std::getenv("ASCEND_CONFIG_PATH")) {
-    searchPaths.insert(searchPaths.begin(), std::string(envPath) + "/ascend_910b.json");
+    searchPaths.insert(searchPaths.begin(), std::string(envPath) + "/ascend_910b3_v4.json");
   }
   
   for (const auto& path : searchPaths) {

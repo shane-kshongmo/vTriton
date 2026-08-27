@@ -93,7 +93,7 @@ echo ">>> Testing fixture parse..."
 "${PROJECT_ROOT}/build/bin/tritonsim-hivm" \
   --npuir-file "${PROJECT_ROOT}/test/hivm_add_kernel.npuir.mlir" \
   --des-graph-file /tmp/test_des.json \
-  --hardware-config "${PROJECT_ROOT}/configs/ascend_910b.json" 2>&1
+  --hardware-config "${PROJECT_ROOT}/configs/ascend_910b3_v4.json" 2>&1
 
 if [ -f /tmp/test_des.json ] && [ -s /tmp/test_des.json ]; then
   echo ""

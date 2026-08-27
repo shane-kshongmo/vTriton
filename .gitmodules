@@ -1,3 +1,4 @@
 [submodule "thirdparty/triton-ascend"]
 	path = thirdparty/triton-ascend
-	url = https://gitcode.com/Ascend/triton-ascend.git
+	url = https://github.com/triton-lang/triton-ascend.git
+	branch = main-dev
