@@ -77,6 +77,7 @@ class ValidationResult:
     tightness: float = 0.0               # T_measured / T_bound
 
     n_invocations: int = 0               # valid invocations used in median
+    task_wait_us: float = 0.0             # median queue/dispatch wait
     component_match: bool | None = None  # measured dominant component matches predicted
     msprof_source: str = ""              # path to op_summary CSV
     notes: str = ""
@@ -266,6 +267,7 @@ def validate_from_csv(case: ValidationCase) -> ValidationResult:
         t_bound_us=case.bound_result.t_bound_us,
         t_measured_us=timing.t_us,
         n_invocations=timing.n_invocations,
+        task_wait_us=timing.median_task_wait_us,
         status=ValidationStatus.BOUND_VIOLATION if is_violation else ValidationStatus.PASS,
         tightness=timing.t_us / case.bound_result.t_bound_us,
         msprof_source=str(case.csv_path),

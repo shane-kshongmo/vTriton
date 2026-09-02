@@ -49,6 +49,11 @@ llvm::cl::opt<std::string> npuirFile(
     "npuir-file", llvm::cl::desc("Path to a dumped kernel.npuir.mlir file"),
     llvm::cl::value_desc("path"));
 
+llvm::cl::opt<std::string> semanticIrFile(
+    "semantic-ir-file",
+    llvm::cl::desc("Optional pre-outline TTAdapter MLIR used to recover typed semantic work"),
+    llvm::cl::value_desc("path"));
+
 llvm::cl::opt<std::string> tritonScript(
     "triton-script",
     llvm::cl::desc("Path to a Triton Python script to compile in dump mode"),
@@ -153,6 +158,34 @@ std::optional<std::string> findLatestNpuirUnder(llvm::StringRef root) {
   if (!found)
     return std::nullopt;
   return bestPath;
+}
+
+std::optional<std::string> findLatestSemanticIrUnder(llvm::StringRef root) {
+  std::error_code ec;
+  llvm::sys::fs::recursive_directory_iterator it(root, ec), end;
+  if (ec)
+    return std::nullopt;
+
+  std::string bestPath;
+  llvm::sys::TimePoint<> bestTime;
+  bool found = false;
+  for (; it != end && !ec; it.increment(ec)) {
+    if (!llvm::sys::fs::is_regular_file(it->path()))
+      continue;
+    llvm::StringRef path = it->path();
+    if (!path.ends_with(".ttadapter.mlir") && !path.ends_with(".ttadapter"))
+      continue;
+
+    llvm::sys::fs::file_status status;
+    if (llvm::sys::fs::status(it->path(), status))
+      continue;
+    if (!found || status.getLastModificationTime() > bestTime) {
+      bestPath = it->path();
+      bestTime = status.getLastModificationTime();
+      found = true;
+    }
+  }
+  return found ? std::optional<std::string>(bestPath) : std::nullopt;
 }
 
 std::optional<HIVMSchedulerMode> parseSchedulerMode(llvm::StringRef mode) {
@@ -679,6 +712,7 @@ int main(int argc, char **argv) {
   }
 
   std::string npuirPath = npuirFile;
+  std::string semanticPath = semanticIrFile;
   std::string tempDumpDir;
   std::string inferredBindings;
   if (!tritonScript.empty()) {
@@ -687,6 +721,10 @@ int main(int argc, char **argv) {
                                dumpError)) {
       llvm::errs() << dumpError << "\n";
       return 1;
+    }
+    if (semanticPath.empty()) {
+      if (auto capturedSemantic = findLatestSemanticIrUnder(tempDumpDir))
+        semanticPath = *capturedSemantic;
     }
   }
 
@@ -721,6 +759,11 @@ int main(int argc, char **argv) {
   HIVMAnalysisReport report;
   std::string error;
   if (!analyzer.analyzeFile(npuirPath, report, error)) {
+    llvm::errs() << error << "\n";
+    return 1;
+  }
+  if (!semanticPath.empty() &&
+      !analyzer.overlaySemanticFile(semanticPath, report, error)) {
     llvm::errs() << error << "\n";
     return 1;
   }

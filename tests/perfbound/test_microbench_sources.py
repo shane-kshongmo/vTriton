@@ -7,8 +7,8 @@ MICROBENCH_DIR = Path(__file__).parents[2] / "perfbound/calibration/microbench"
 def test_microbench_sources_are_current_ascendc_entrypoints():
     sources = sorted(MICROBENCH_DIR.glob("*.cce"))
 
-    # 13 original + scalar_peak + mte_l0c_to_gm + mte_hbm_allcore
-    assert len(sources) == 16
+    # 16 prior kernels plus isolated FP16 and FP32 transcendental measurements.
+    assert len(sources) == 24
     for source in sources:
         text = source.read_text()
         assert "TODO" not in text

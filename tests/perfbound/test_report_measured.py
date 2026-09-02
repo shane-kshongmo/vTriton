@@ -44,6 +44,51 @@ def test_author_headroom_flows_through():
     assert report.author_headroom_us == 4000.0
 
 
+def test_event_elapsed_is_not_used_as_author_headroom():
+    br = _make_bound_result(t_bound_us=1000.0)
+    report = KernelReport.from_bound(
+        br,
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+        ),
+    )
+
+    report.merge_event_elapsed(5000.0, source="triton.testing.do_bench")
+
+    assert report.event_elapsed_us == 5000.0
+    assert report.measurement_metric == "event_elapsed"
+    assert report.t_measured_us is None
+    assert report.author_headroom_us is None
+
+
+def test_incomplete_model_coverage_suppresses_headroom_and_recommendation():
+    br = _make_bound_result(t_bound_us=1000.0)
+    report = KernelReport.from_bound(
+        br,
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+            t_measured_us=1200.0,
+        ),
+    )
+
+    report.merge_model_coverage({
+        "status": "conservative_partial",
+        "outlined_calls": 2,
+        "summarized_outlined_calls": 2,
+        "zero_byte_transfers": 0,
+    })
+
+    assert report.model_coverage["status"] == "conservative_partial"
+    assert report.compiler_headroom_us is None
+    assert report.author_headroom_us is None
+    assert report.headroom_status == "model_incomplete"
+    assert "incomplete" in report.recommended_action.lower()
+
+
 def test_to_text_three_levels():
     """Reachability Hierarchy section present in text output."""
     br = _make_bound_result()

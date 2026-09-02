@@ -1,0 +1,10 @@
+/* Measures sustained VRSQRT throughput in isolation. */
+#include "vt_microbench_common.h"
+
+extern "C" __global__ __aicore__ void vector_peak_transcendental_rsqrt(GM_ADDR x, GM_ADDR z)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    VTCalib::VectorUnaryKernel op;
+    op.Init(x, z);
+    op.ProcessRsqrt();
+}

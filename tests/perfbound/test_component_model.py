@@ -375,13 +375,13 @@ class TestEdgeCases:
         )
         assert result.t_core_floor_us == 0.0
 
-    def test_scalar_only_zero_time(self, calibration):
-        """Scalar work has no separate throughput (accounted via overhead)."""
+    def test_scalar_issue_cycles_form_floor(self, calibration):
+        """Zero-element scalar instructions still occupy the Scalar pipe."""
         ops = [
             OpRecord(op_id=1, op_name="cmp", component=Component.SCALAR,
                      precision=Precision.INT32, pipe="Scalar",
-                     bytes_transferred=0, elements=1000,
-                     duration_cycles=10, loop_multiplier=1, depends_on=[]),
+                     bytes_transferred=0, elements=0,
+                     duration_cycles=1850, loop_multiplier=2, depends_on=[]),
         ]
         extract = HIVMExtract(operations=ops, handoffs=[])
         result = compute_component_floor(
@@ -391,9 +391,25 @@ class TestEdgeCases:
             calibration["memory"],
             calibration["core"],
         )
-        # Scalar should be in per_component_us but with 0 time
         assert "scalar" in result.per_component_us
-        assert result.per_component_us["scalar"] == 0.0
+        assert result.per_component_us["scalar"] == pytest.approx(2 / 1850)
+
+    def test_zero_byte_mte_uses_issue_cycle_floor(self, calibration):
+        ops = [
+            OpRecord(
+                op_id=1, op_name="load", component=Component.MTE_GM,
+                precision=Precision.FP16, pipe="PIPE_MTE2_V",
+                bytes_transferred=0, elements=0,
+                duration_cycles=925, loop_multiplier=4, depends_on=[],
+                src_space="gm", dst_space="ub",
+            ),
+        ]
+        result = compute_component_floor(
+            HIVMExtract(operations=ops, handoffs=[]),
+            calibration["cube"], calibration["vector"],
+            calibration["memory"], calibration["core"],
+        )
+        assert result.per_component_us["mte_gm"] == pytest.approx(2.0)
 
 
 # ── Integration: Full M4+M5 Pipeline ───────────────────────────────────────

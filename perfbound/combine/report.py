@@ -45,6 +45,8 @@ class KernelReport:
     t_grid_floor_us: float = 0.0
     t_core_floor_us: float = 0.0
     t_serial_irreducible_us: float = 0.0
+    t_body_bound_us: float = 0.0
+    t_launch_overhead_us: float = 0.0
 
     # Two-limit (A.7)
     t_bound_hivm_us: Optional[float] = None
@@ -56,7 +58,12 @@ class KernelReport:
     # Measurement metadata
     msprof_source: Optional[str] = None
     n_invocations: Optional[int] = None
+    task_wait_us: Optional[float] = None
     component_match: Optional[bool] = None
+    measurement_metric: Optional[str] = None
+    event_elapsed_us: Optional[float] = None
+    event_elapsed_source: Optional[str] = None
+    model_coverage: Optional[dict] = None
 
     # Calibration provenance
     calibration_source: Optional[str] = None
@@ -123,10 +130,17 @@ class KernelReport:
             "t_grid_floor_us": self.t_grid_floor_us,
             "t_core_floor_us": self.t_core_floor_us,
             "t_serial_irreducible_us": self.t_serial_irreducible_us,
+            "t_body_bound_us": self.t_body_bound_us,
+            "t_launch_overhead_us": self.t_launch_overhead_us,
             "t_bound_hivm_us": self.t_bound_hivm_us,
             "t_measured_us": self.t_measured_us,
             "compiler_headroom_us": self.compiler_headroom_us,
             "author_headroom_us": self.author_headroom_us,
+            "measurement_metric": self.measurement_metric,
+            "event_elapsed_us": self.event_elapsed_us,
+            "event_elapsed_source": self.event_elapsed_source,
+            "task_wait_us": self.task_wait_us,
+            "model_coverage": self.model_coverage,
             "attribution": self.attribution,
             "attribution_us": self.attribution_us,
             "calibration": {
@@ -199,11 +213,22 @@ class KernelReport:
             f"  Tier 1 (grid):      {self.t_grid_floor_us:.2f} us",
             f"  Tier 2 (component): {self.t_core_floor_us:.2f} us",
             f"  Serial irreducible: {self.t_serial_irreducible_us:.2f} us",
+            f"  Launch overhead:     {self.t_launch_overhead_us:.2f} us",
             f"",
             f"Binding: {self.binding_tier}",
         ]
         if self.binding_component:
             lines.append(f"  Component: {self.binding_component}")
+
+        if self.model_coverage is not None:
+            lines.extend([
+                "",
+                "Model coverage:",
+                f"  status: {self.model_coverage.get('status', 'unknown')}",
+                f"  outlined calls: {self.model_coverage.get('outlined_calls', 0)} "
+                f"(summarized: {self.model_coverage.get('summarized_outlined_calls', 0)})",
+                f"  zero-byte transfers: {self.model_coverage.get('zero_byte_transfers', 0)}",
+            ])
 
         if self.calibration_version or self.calibration_source:
             lines.extend([
@@ -322,6 +347,11 @@ class KernelReport:
                 source_line += f"  n={self.n_invocations} invocations"
             if source_line:
                 lines.append(source_line)
+            if self.task_wait_us is not None:
+                lines.append(
+                    f"     median task wait: {self.task_wait_us:.2f} us "
+                    "(reported separately)"
+                )
             # Component match
             if self.component_match is not None:
                 match_sym = "✓" if self.component_match else "✗"
@@ -332,6 +362,12 @@ class KernelReport:
         else:
             meas_line += "not yet measured"
             lines.append(meas_line)
+
+        if self.event_elapsed_us is not None:
+            lines.append(
+                f"  End-to-end event elapsed: {self.event_elapsed_us:.2f} us "
+                "(not used for task-duration headroom)"
+            )
 
         if self.profile_diagnosis:
             lines.append(f"")
@@ -417,9 +453,20 @@ class KernelReport:
             t_grid_floor_us=result.t_grid_floor_us,
             t_core_floor_us=result.t_core_floor_us,
             t_serial_irreducible_us=result.t_serial_irreducible_us,
+            t_body_bound_us=(
+                result.t_body_bound_us
+                if result.t_body_bound_us is not None
+                else result.t_bound_us
+            ),
+            t_launch_overhead_us=result.t_launch_overhead_us,
             t_bound_hivm_us=two_limit.t_bound_hivm_us if two_limit else None,
             t_bound_dsl_us=two_limit.t_bound_dsl_us if two_limit else result.t_bound_us,
             t_measured_us=two_limit.t_measured_us if two_limit else None,
+            measurement_metric=(
+                "msprof_task_duration"
+                if two_limit and two_limit.t_measured_us is not None
+                else None
+            ),
             compiler_headroom_us=two_limit.compiler_headroom_us if two_limit else None,
             author_headroom_us=two_limit.author_headroom_us if two_limit else None,
             attribution={
@@ -445,6 +492,7 @@ class KernelReport:
         msprof_source: str = "",
         n_invocations: int = 0,
         component_match: bool | None = None,
+        task_wait_us: float | None = None,
     ) -> None:
         """Merge measurement provenance from ValidationResult into this report.
 
@@ -459,12 +507,44 @@ class KernelReport:
             component_match: Whether dominant measured component matches predicted.
         """
         self.t_measured_us = t_measured_us
+        self.measurement_metric = "msprof_task_duration"
         self.msprof_source = msprof_source or None
         self.n_invocations = n_invocations or None
         self.component_match = component_match
+        self.task_wait_us = task_wait_us
         # Recompute author headroom
-        if self.t_bound_dsl_us is not None:
+        coverage_status = (
+            self.model_coverage.get("status") if self.model_coverage else None
+        )
+        if (
+            self.t_bound_dsl_us is not None
+            and coverage_status in {None, "complete"}
+        ):
             self.author_headroom_us = t_measured_us - self.t_bound_dsl_us
+
+    def merge_event_elapsed(self, elapsed_us: float, source: str = "") -> None:
+        """Attach end-to-end event latency without treating it as task time."""
+        self.event_elapsed_us = elapsed_us
+        self.event_elapsed_source = source or None
+        self.measurement_metric = "event_elapsed"
+
+    def merge_model_coverage(self, coverage: dict) -> None:
+        """Attach extraction coverage and suppress claims on partial models."""
+        self.model_coverage = dict(coverage)
+        status = self.model_coverage.get("status", "legacy_unknown")
+        if status == "complete":
+            return
+        self.compiler_headroom_us = None
+        self.author_headroom_us = None
+        self.headroom_status = "model_incomplete"
+        self.headroom_confidence = "none"
+        self.headroom_method = (
+            "Outlined or zero-work operations were only partially modeled; "
+            "headroom claims are suppressed until complete semantic work is available."
+        )
+        self.recommended_action = (
+            "Model coverage incomplete — restore semantic work before optimization advice"
+        )
 
     def merge_calibration(
         self,
@@ -544,6 +624,12 @@ class KernelReport:
         self.exposed_control_deficit_pts = profile_report.exposed_control_deficit_pts
         self.exposed_control_deficit_us = profile_report.exposed_control_deficit_us
         self.n_sync_ops = profile_report.n_sync_ops
+
+        if (
+            self.model_coverage
+            and self.model_coverage.get("status") != "complete"
+        ):
+            return
 
         if (
             self.author_headroom_us is not None
