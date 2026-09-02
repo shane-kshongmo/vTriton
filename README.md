@@ -195,6 +195,58 @@ cd ..
   --perfetto-trace-file /tmp/hivm_trace.json
 ```
 
+#### 使用 TTAdapter 语义 sidecar 补全工作量
+
+GraphSync 后的 NPUIR 保留真实的流水线拓扑、依赖和同步关系，但被 outline
+的 Vector 函数可能只剩下不透明的 `vcall`，无法看出原始算子的类型和工作量。
+此时可通过 `--semantic-ir-file` 提供同一次 kernel 编译中、outline 前捕获的
+TTAdapter MLIR：
+
+```bash
+./build/bin/tritonsim-hivm \
+  --npuir-file /path/to/kernel.npuir.mlir \
+  --semantic-ir-file /path/to/kernel.ttadapter.mlir \
+  --hardware-config configs/ascend_910b3_v4.json \
+  --arg-bindings arg9=1,arg10=128 \
+  --scheduler des \
+  --des-graph-file /tmp/kernel.des.json \
+  --perfetto-trace-file /tmp/kernel.trace.json
+```
+
+- NPUIR 始终负责调度拓扑、依赖和同步；semantic IR 只补充 NPUIR 中缺失的
+  Vector、Cube、Scalar 和数据搬运工作量，不会替换 NPUIR 图。
+- semantic IR 必须来自与 NPUIR 相同的 kernel、编译和 workload。目前工具
+  不会自动验证二者是否匹配，错误配对会污染结果。
+- TTAdapter module 应包含非 declaration 的入口函数。工具优先选择带
+  `global_kernel` 或 `hacc.entry` 属性的函数，否则选择第一个非
+  `hivm.vector_function` 的已定义函数。
+- 动态循环边界通过 `--arg-bindings` 绑定；同一组 binding 会同时用于 NPUIR
+  和 semantic IR。未解析的循环或分支会使模型覆盖状态保持 partial。
+- 工具先扣除 NPUIR 已表示的同类工作，再添加缺失量。缺失的 Vector 周期按
+  workload 权重投影到现有 `vcall` 并重新调度；无法精确放置的其他语义工作
+  仍会计入分析下界，但 Perfetto timing coverage 会标记为 partial。
+
+检查 DES JSON 中的 `model_coverage.status`、`trace_timing_status`、
+`semantic_overlay`、`semantic_placement`、`unscheduled_semantic_ops` 和
+`unplaced_semantic_vector_cycles`。只有 `trace_timing_status=complete` 时，
+才能把生成的时间线视为完整的逐流水线 trace。
+
+通过 Python perfbound 入口运行时，对应参数名为 `--semantic-ir`：
+
+```bash
+python3 -m perfbound.combine.run_report \
+  --npuir /path/to/kernel.npuir.mlir \
+  --semantic-ir /path/to/kernel.ttadapter.mlir \
+  --hardware-config configs/ascend_910b3_v4.json \
+  --arg-bindings arg9=1,arg10=128 \
+  --grid 128,32
+```
+
+使用 `tritonsim-hivm --triton-script` 时，如果没有显式指定
+`--semantic-ir-file`，工具会在本次临时 dump 目录中自动选择最新的
+`.ttadapter.mlir` 或 `.ttadapter` 文件。直接使用 `--npuir-file` 时不会自动
+发现 sidecar，必须显式传入路径。
+
 也可在 `tritonsim-opt` 中直接对 HIVM IR 跑 pass：
 
 ```bash
