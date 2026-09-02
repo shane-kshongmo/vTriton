@@ -143,6 +143,25 @@ class TestDESGraphSchema:
         assert len(ops) == 4
         assert all(isinstance(o, OpRecord) for o in ops)
 
+    def test_composite_elem_type_preserves_precision(self, tmp_path):
+        des = _make_des_json([
+            {
+                "id": 1, "name": "mmadL1.cube", "pipe": "PIPE_M",
+                "duration": 1, "bytes": 0, "elements": 1024,
+                "loop_multiplier": 1, "depends_on": [],
+                "src_space": "l1", "dst_space": "l1",
+                "elem_type": "f32, strided<[128, 128, 8, 1], offset: ?>",
+                "start_cycle": 0, "end_cycle": 1,
+            },
+        ])
+        path = tmp_path / "composite-elem-type.json"
+        path.write_text(json.dumps(des))
+
+        ops = load_hivm_desgraph(path)
+
+        assert ops[0].component == Component.CUBE
+        assert ops[0].precision == Precision.FP32
+
     def test_operations_fields_populated(self, tmp_path):
         """Each OpRecord has id, name, pipe, component, precision, src/dst_space."""
         des = _make_des_json(_vector_add_ops())

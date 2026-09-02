@@ -151,6 +151,25 @@ struct HIVMAnalysisReport {
   size_t unknownOpCount = 0;
   size_t calibratedOpCount = 0;
   size_t heuristicOpCount = 0;
+  size_t outlinedCallCount = 0;
+  size_t summarizedOutlinedCallCount = 0;
+  size_t zeroByteTransferCount = 0;
+  size_t zeroWorkScalarOpCount = 0;
+  bool semanticOverlayApplied = false;
+  bool semanticOverlayComplete = false;
+  std::string semanticSourcePath;
+  size_t semanticVectorOpCount = 0;
+  size_t semanticCubeOpCount = 0;
+  size_t semanticScalarOpCount = 0;
+  size_t semanticTransferOpCount = 0;
+  size_t semanticUnsupportedOpCount = 0;
+  size_t semanticSyntheticOpCount = 0;
+  int64_t semanticUnplacedVectorCycles = 0;
+  size_t semanticResolvedLoopCount = 0;
+  size_t semanticUnresolvedLoopCount = 0;
+  size_t semanticResolvedBranchCount = 0;
+  size_t semanticEquivalentBranchCount = 0;
+  size_t semanticUnresolvedBranchCount = 0;
   int64_t calibratedCycles = 0;
   int64_t heuristicCycles = 0;
   int64_t calibratedWeightedCycles = 0;
@@ -188,6 +207,12 @@ public:
 
   bool analyzeFile(llvm::StringRef path, HIVMAnalysisReport &report,
                    std::string &error) const;
+
+  /// Recover typed semantic work from the pre-outline TTAdapter IR and merge
+  /// only work missing from the post-GraphSync HIVM graph. Dependencies and
+  /// synchronization remain owned by the HIVM analysis.
+  bool overlaySemanticFile(llvm::StringRef path, HIVMAnalysisReport &report,
+                           std::string &error) const;
 
   static llvm::StringRef stringifyPipe(HIVMPipe pipe);
   static llvm::StringRef stringifySchedulerMode(HIVMSchedulerMode mode);

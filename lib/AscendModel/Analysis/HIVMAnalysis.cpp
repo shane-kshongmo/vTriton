@@ -16,15 +16,20 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Parser/Parser.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -41,9 +46,11 @@
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <queue>
+#include <set>
 #include <sstream>
 #include <tuple>
 #include <vector>
@@ -1304,6 +1311,15 @@ static bool resolveMLIRValueImpl(mlir::Value value, const AnalysisState &state,
     resolved = std::min(lhs, rhs);
     return finish(true);
   }
+  if (auto minOp = llvm::dyn_cast<mlir::arith::MinUIOp>(defOp)) {
+    int64_t lhs = 0, rhs = 0;
+    if (!resolveMLIRValueImpl(minOp.getLhs(), state, lhs, visited) ||
+        !resolveMLIRValueImpl(minOp.getRhs(), state, rhs, visited))
+      return finish(false);
+    resolved = static_cast<int64_t>(
+        std::min(static_cast<uint64_t>(lhs), static_cast<uint64_t>(rhs)));
+    return finish(true);
+  }
   if (auto cmpOp = llvm::dyn_cast<mlir::arith::CmpIOp>(defOp)) {
     int64_t lhs = 0, rhs = 0;
     if (!resolveMLIRValueImpl(cmpOp.getLhs(), state, lhs, visited) ||
@@ -1794,6 +1810,22 @@ static bool captureDerivedScalarValue(mlir::Operation *op, AnalysisState &state)
     return false;
   }
 
+  if (auto maxOp = llvm::dyn_cast<mlir::arith::MaxSIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(maxOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(maxOp.getRhs(), state, rhs))
+      return recordValue(std::max(lhs, rhs));
+    return false;
+  }
+
+  if (auto orOp = llvm::dyn_cast<mlir::arith::OrIOp>(op)) {
+    int64_t lhs = 0, rhs = 0;
+    if (resolveMLIRValue(orOp.getLhs(), state, lhs) &&
+        resolveMLIRValue(orOp.getRhs(), state, rhs))
+      return recordValue(lhs | rhs);
+    return false;
+  }
+
   if (auto cmpOp = llvm::dyn_cast<mlir::arith::CmpIOp>(op)) {
     int64_t lhs = 0, rhs = 0;
     if (!resolveMLIRValue(cmpOp.getLhs(), state, lhs) ||
@@ -2270,6 +2302,8 @@ static int64_t estimateDuration(const ParsedOp &parsed, const HardwareConfig &co
   };
   if (isVectorALUOp(opName))
     return vectorCycles(config.getVectorOpCyclesPerInstruction(opName));
+  if (opName == "vcall")
+    return vectorCycles(config.getVectorOpCyclesPerInstruction("vmul"));
   if (opName == "fixpipe") {
     int64_t bytes = std::max<int64_t>(parsed.op.bytes, 1);
     auto spaces = parseLoadStoreSpaces(line);
@@ -2722,9 +2756,44 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
       break;
     }
 
-    bool preferActualArgNames =
-        minBoundArgIndex && firstScalarArgIndex &&
-        *minBoundArgIndex >= *firstScalarArgIndex;
+    auto isBindableIntegerArg = [&](unsigned idx) {
+      if (idx >= funcOp.getNumArguments() ||
+          funcOp.getArgAttr(idx, "hacc.arg_type"))
+        return false;
+      mlir::Type type = funcOp.getArgument(idx).getType();
+      return llvm::isa<mlir::IntegerType, mlir::IndexType>(type);
+    };
+
+    llvm::SmallVector<unsigned, 8> userArgToActual;
+    for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
+      (void)arg;
+      if (!funcOp.getArgAttr(idx, "hacc.arg_type"))
+        userArgToActual.push_back(idx);
+    }
+
+    int actualIndexScore = 0;
+    int userIndexScore = 0;
+    for (const auto &entry : funcState.argBindings) {
+      llvm::StringRef name(entry.first);
+      if (!name.consume_front("arg"))
+        continue;
+      unsigned bindingIndex = 0;
+      if (name.getAsInteger(10, bindingIndex))
+        continue;
+      actualIndexScore += isBindableIntegerArg(bindingIndex) ? 1 : -1;
+      userIndexScore +=
+          bindingIndex < userArgToActual.size() &&
+                  isBindableIntegerArg(userArgToActual[bindingIndex])
+              ? 1
+              : -1;
+    }
+
+    bool preferActualArgNames = actualIndexScore > userIndexScore;
+    if (actualIndexScore == userIndexScore) {
+      preferActualArgNames =
+          minBoundArgIndex && firstScalarArgIndex &&
+          *minBoundArgIndex >= *firstScalarArgIndex;
+    }
 
     unsigned userArgIndex = 0;
     for (auto [idx, arg] : llvm::enumerate(funcOp.getArguments())) {
@@ -2828,6 +2897,46 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
                           config, replayIterations);
     }
     propagateLoopResults(forOp, loopState, state);
+    return;
+  }
+
+  if (auto callOp = llvm::dyn_cast<mlir::func::CallOp>(op)) {
+    if (!op->hasAttr("hivm.vector_function"))
+      return;
+
+    report.outlinedCallCount++;
+    ParsedOp parsed;
+    parsed.op.opName = "vcall";
+    parsed.op.pipe = HIVMPipe::Vector;
+    parsed.op.loopMultiplier = loopMultiplier;
+    parsed.op.lineNumber = getLineNumberFromLocation(op->getLoc());
+    parsed.op.text = renderOperation(op);
+    parsed.op.costSource = "outlined_call_lower_bound";
+    parsed.op.costSubpipe = "vector";
+    parsed.mlirResults.assign(op->result_begin(), op->result_end());
+
+    if (auto parentFunc = op->getParentOfType<mlir::func::FuncOp>()) {
+      llvm::StringRef funcName = parentFunc.getName();
+      parsed.op.coreType =
+          funcName.contains("aic") || funcName.contains("AIC") ? "CUBE"
+                                                               : "VECTOR";
+    }
+
+    for (mlir::Value operand : callOp.getOperands()) {
+      parsed.op.bytes = std::max(
+          parsed.op.bytes, inferValueBytesWithBindings(operand, state));
+      parsed.op.elements = std::max(
+          parsed.op.elements, inferValueElementsWithBindings(operand, state));
+      auto producer = state.valueProducers.find(operand);
+      if (producer != state.valueProducers.end())
+        parsed.op.dependsOn.push_back(producer->second);
+    }
+    if (parsed.op.elements > 0)
+      report.summarizedOutlinedCallCount++;
+    parsed.op.elemType = "f32";
+    parsed.op.duration = estimateDuration(parsed, config);
+    attachBufferAccessMetadata(op, parsed, state);
+    ingestParsedOp(parsed, state, report, config);
     return;
   }
 
@@ -2952,6 +3061,10 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
     attachSyncMetadata(parsed);
     attachBufferAccessMetadata(op, parsed, state);
     parsed.op.duration = estimateDuration(parsed, config);
+    if ((parsed.op.opName == "load" || parsed.op.opName == "store" ||
+         parsed.op.opName == "copy" || parsed.op.opName == "fixpipe") &&
+        parsed.op.bytes <= 0)
+      report.zeroByteTransferCount++;
     ingestParsedOp(parsed, state, report, config);
   } else if (!llvm::isa<mlir::scf::YieldOp>(op) &&
              !llvm::isa<mlir::func::ReturnOp>(op) &&
@@ -2967,6 +3080,7 @@ static void analyzeParsedOperation(mlir::Operation *op, int64_t loopMultiplier,
     parsed.op.text = renderOperation(op);
     parsed.op.duration = 1;  // scalar ops take 1 cycle
     parsed.mlirResults.assign(op->result_begin(), op->result_end());
+    report.zeroWorkScalarOpCount++;
 
     // Determine core type from function context
     if (auto parentFunc = op->getParentOfType<mlir::func::FuncOp>()) {
@@ -3376,6 +3490,46 @@ static void recordCalibrationSummary(HIVMAnalysisReport &report,
   }
 }
 
+static void resetScheduleSummary(HIVMAnalysisReport &report) {
+  report.oneIterationCycles = 0;
+  report.weightedCycles = 0;
+  report.bodyCycles = 0;
+  report.predictedTotalCycles = 0;
+  report.totalBusyCycles = 0;
+  report.syncCycles = 0;
+  report.syncIssueCycles = 0;
+  report.syncEventWaitCycles = 0;
+  report.criticalPathCycles = 0;
+  report.criticalPathIssueCycles = 0;
+  report.criticalPathEventWaitCycles = 0;
+  report.barrierCycles = 0;
+  report.opCount = 0;
+  report.syncOpCount = 0;
+  report.barrierCount = 0;
+  report.unknownOpCount = 0;
+  report.calibratedOpCount = 0;
+  report.heuristicOpCount = 0;
+  report.calibratedCycles = 0;
+  report.heuristicCycles = 0;
+  report.calibratedWeightedCycles = 0;
+  report.heuristicWeightedCycles = 0;
+  report.scheduleTruncated = false;
+  report.pipeBusyCycles.clear();
+  report.weightedPipeCycles.clear();
+  report.costSourceStats.clear();
+  report.costSubpipeStats.clear();
+  report.unclassifiedCostStats.clear();
+  report.criticalPathOps.clear();
+
+  for (HIVMOp &op : report.operations) {
+    op.startCycle = 0;
+    op.resourceReleaseCycle = 0;
+    op.valueReadyCycle = 0;
+    op.endCycle = 0;
+    op.eventWaitCycles = 0;
+  }
+}
+
 static bool analyzeSemanticHivmBuffer(llvm::StringRef buffer,
                                       llvm::StringRef path,
                                       HIVMAnalysisReport &report,
@@ -3501,9 +3655,57 @@ static bool analyzeSemanticHivmBuffer(llvm::StringRef buffer,
   return true;
 }
 
+struct ScheduleResourceKey {
+  HIVMPipe pipe = HIVMPipe::Unknown;
+  std::string coreType;
+  bool flowControl = false;
+
+  bool operator<(const ScheduleResourceKey &other) const {
+    return std::tie(pipe, coreType, flowControl) <
+           std::tie(other.pipe, other.coreType, other.flowControl);
+  }
+};
+
+static std::string normalizeScheduleCore(llvm::StringRef coreType,
+                                         HIVMPipe pipe) {
+  if (coreType == "CUBE" || coreType == "AIC")
+    return "AIC";
+  if (coreType == "VECTOR" || coreType == "AIV")
+    return "AIV";
+  if (pipe == HIVMPipe::Scalar || pipe == HIVMPipe::All ||
+      pipe == HIVMPipe::Unknown)
+    return "";
+  if (pipeBelongsToCore(pipe, "AIC"))
+    return "AIC";
+  if (pipeBelongsToCore(pipe, "AIV"))
+    return "AIV";
+  return "";
+}
+
+static bool usesFlowControlResource(const HIVMOp &op) {
+  return op.opName == "sync_block_wait";
+}
+
+static ScheduleResourceKey getScheduleResource(const HIVMOp &op) {
+  return {op.pipe, normalizeScheduleCore(op.coreType, op.pipe),
+          usesFlowControlResource(op)};
+}
+
+static ScheduleResourceKey getScheduleResource(HIVMPipe pipe,
+                                               llvm::StringRef coreType) {
+  return {pipe, normalizeScheduleCore(coreType, pipe), false};
+}
+
+static bool scheduleResourceBelongsToCore(const ScheduleResourceKey &resource,
+                                          llvm::StringRef coreType) {
+  std::string normalized = normalizeScheduleCore(coreType, resource.pipe);
+  return normalized.empty() || resource.coreType.empty() ||
+         resource.coreType == normalized;
+}
+
 static void finalizeScheduledReport(HIVMAnalysisReport &report,
                                     const HardwareConfig &config) {
-  std::map<HIVMPipe, int64_t> pipeAvailableAt;
+  std::map<ScheduleResourceKey, int64_t> pipeAvailableAt;
   for (HIVMOp &op : report.operations) {
     int64_t earliest = 0;
     for (size_t depId : op.dependsOn) {
@@ -3511,11 +3713,24 @@ static void finalizeScheduledReport(HIVMAnalysisReport &report,
         earliest = std::max(earliest, report.operations[depId].endCycle);
     }
 
-    if (op.isBarrier) {
+    if (usesFlowControlResource(op)) {
+      ScheduleResourceKey resource = getScheduleResource(op);
+      int64_t start = std::max(earliest, pipeAvailableAt[resource]);
+      op.startCycle = start;
+      op.issueDuration = op.issueDuration ? op.issueDuration : op.duration;
+      op.dependencyLatency =
+          op.dependencyLatency ? op.dependencyLatency : op.duration;
+      op.resourceReleaseCycle = start + op.issueDuration;
+      op.valueReadyCycle = start + op.dependencyLatency;
+      op.endCycle = op.valueReadyCycle;
+      pipeAvailableAt[resource] = op.resourceReleaseCycle;
+    } else if (op.isBarrier) {
       int64_t start = earliest;
       if (op.pipe == HIVMPipe::All) {
-        for (const auto &entry : pipeAvailableAt)
-          start = std::max(start, entry.second);
+        for (const auto &entry : pipeAvailableAt) {
+          if (scheduleResourceBelongsToCore(entry.first, op.coreType))
+            start = std::max(start, entry.second);
+        }
         op.startCycle = start;
         op.issueDuration = op.issueDuration ? op.issueDuration : op.duration;
         op.dependencyLatency =
@@ -3523,10 +3738,16 @@ static void finalizeScheduledReport(HIVMAnalysisReport &report,
         op.resourceReleaseCycle = start + op.issueDuration;
         op.valueReadyCycle = start + op.dependencyLatency;
         op.endCycle = op.valueReadyCycle;
-        for (auto &entry : pipeAvailableAt)
-          entry.second = op.resourceReleaseCycle;
+        for (auto &entry : pipeAvailableAt) {
+          if (scheduleResourceBelongsToCore(entry.first, op.coreType))
+            entry.second = op.resourceReleaseCycle;
+        }
+        for (HIVMPipe pipe : getCoreBarrierPipes(op.coreType))
+          pipeAvailableAt[getScheduleResource(pipe, op.coreType)] =
+              op.resourceReleaseCycle;
       } else {
-        start = std::max(start, pipeAvailableAt[op.pipe]);
+        ScheduleResourceKey resource = getScheduleResource(op);
+        start = std::max(start, pipeAvailableAt[resource]);
         op.startCycle = start;
         op.issueDuration = op.issueDuration ? op.issueDuration : op.duration;
         op.dependencyLatency =
@@ -3534,9 +3755,10 @@ static void finalizeScheduledReport(HIVMAnalysisReport &report,
         op.resourceReleaseCycle = start + op.issueDuration;
         op.valueReadyCycle = start + op.dependencyLatency;
         op.endCycle = op.valueReadyCycle;
-        pipeAvailableAt[op.pipe] = op.resourceReleaseCycle;
+        pipeAvailableAt[resource] = op.resourceReleaseCycle;
       }
-    } else if (op.pipe == HIVMPipe::Unknown) {
+    } else if (op.pipe == HIVMPipe::Unknown &&
+               !usesFlowControlResource(op)) {
       op.startCycle = earliest;
       op.issueDuration = op.issueDuration ? op.issueDuration : op.duration;
       op.dependencyLatency =
@@ -3545,7 +3767,8 @@ static void finalizeScheduledReport(HIVMAnalysisReport &report,
       op.valueReadyCycle = earliest + op.dependencyLatency;
       op.endCycle = op.valueReadyCycle;
     } else {
-      int64_t start = std::max(earliest, pipeAvailableAt[op.pipe]);
+      ScheduleResourceKey resource = getScheduleResource(op);
+      int64_t start = std::max(earliest, pipeAvailableAt[resource]);
       op.startCycle = start;
       op.issueDuration = op.issueDuration ? op.issueDuration : op.duration;
       op.dependencyLatency =
@@ -3553,7 +3776,7 @@ static void finalizeScheduledReport(HIVMAnalysisReport &report,
       op.resourceReleaseCycle = start + op.issueDuration;
       op.valueReadyCycle = start + op.dependencyLatency;
       op.endCycle = op.valueReadyCycle;
-      pipeAvailableAt[op.pipe] = op.resourceReleaseCycle;
+      pipeAvailableAt[resource] = op.resourceReleaseCycle;
     }
 
     report.oneIterationCycles = std::max(report.oneIterationCycles, op.endCycle);
@@ -3668,8 +3891,10 @@ static void wireCrossCoreSyncDependencies(HIVMAnalysisReport &report) {
     SyncKey key{op.eventId, sourceCore.str(), op.eventGeneration};
     auto it = setOpById.find(key);
     if (it != setOpById.end()) {
-      op.dependsOn.push_back(it->second);
-      op.eventDependsOn.push_back(it->second);
+      if (!llvm::is_contained(op.dependsOn, it->second))
+        op.dependsOn.push_back(it->second);
+      if (!llvm::is_contained(op.eventDependsOn, it->second))
+        op.eventDependsOn.push_back(it->second);
     }
   }
 }
@@ -3753,7 +3978,7 @@ static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
   std::priority_queue<CompletionEvent, std::vector<CompletionEvent>,
                       std::greater<CompletionEvent>>
       completions;
-  std::map<HIVMPipe, int64_t> pipeAvailableAt;
+  std::map<ScheduleResourceKey, int64_t> pipeAvailableAt;
   std::map<EventInstanceKey, int64_t> flagEventVisibleAt;
   std::map<EventInstanceKey, int64_t> blockSyncVisibleAt;
   std::map<std::string, BufferRootState> bufferStates;
@@ -3915,21 +4140,26 @@ static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
         start = std::max(start, slotReady);
       }
     }
+    if (usesFlowControlResource(op))
+      return applyEventGate(
+          op, std::max(start, pipeAvailableAt[getScheduleResource(op)]));
     if (op.pipe == HIVMPipe::Unknown)
-      return applyEventGate(op, start);
+      if (!usesFlowControlResource(op))
+        return applyEventGate(op, start);
     if (op.isBarrier && op.pipe == HIVMPipe::All) {
       if (op.coreType.empty()) {
         for (const auto &entry : pipeAvailableAt)
           start = std::max(start, entry.second);
       } else {
         for (const auto &entry : pipeAvailableAt) {
-          if (pipeBelongsToCore(entry.first, op.coreType))
+          if (scheduleResourceBelongsToCore(entry.first, op.coreType))
             start = std::max(start, entry.second);
         }
       }
       return applyEventGate(op, start);
     }
-    return applyEventGate(op, std::max(start, pipeAvailableAt[op.pipe]));
+    return applyEventGate(
+        op, std::max(start, pipeAvailableAt[getScheduleResource(op)]));
   };
 
   auto startOp = [&](size_t opId, int64_t startTime) {
@@ -3979,17 +4209,20 @@ static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
       writeSlotAssignments[opId].push_back({root, bestSlot});
     }
     if (op.pipe != HIVMPipe::Unknown) {
-      if (op.isBarrier && op.pipe == HIVMPipe::All) {
+      if (usesFlowControlResource(op)) {
+        pipeAvailableAt[getScheduleResource(op)] = resourceReleaseTime;
+      } else if (op.isBarrier && op.pipe == HIVMPipe::All) {
         auto barrierPipes = getCoreBarrierPipes(op.coreType);
         if (barrierPipes.empty()) {
           for (auto &entry : pipeAvailableAt)
             entry.second = resourceReleaseTime;
         } else {
           for (HIVMPipe barrierPipe : barrierPipes)
-            pipeAvailableAt[barrierPipe] = resourceReleaseTime;
+            pipeAvailableAt[getScheduleResource(barrierPipe, op.coreType)] =
+                resourceReleaseTime;
         }
       } else {
-        pipeAvailableAt[op.pipe] = resourceReleaseTime;
+        pipeAvailableAt[getScheduleResource(op)] = resourceReleaseTime;
       }
     }
     if (op.dependencyLatency == 0)
@@ -4044,8 +4277,10 @@ static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
     for (size_t opId : readyOps)
       nextTime = std::min(nextTime, computeStartTime(report.operations[opId]));
 
-    if (nextTime == std::numeric_limits<int64_t>::max())
+    if (nextTime == std::numeric_limits<int64_t>::max()) {
+      report.scheduleTruncated = true;
       break;
+    }
     currentTime = std::max(currentTime, nextTime);
 
     while (!completions.empty() && completions.top().time <= currentTime) {
@@ -4068,6 +4303,869 @@ static void finalizeDiscreteEventReport(HIVMAnalysisReport &report,
   if (report.weightedCycles == 0)
     report.weightedCycles = report.oneIterationCycles;
   computeCriticalPathSummary(report);
+}
+
+enum class SemanticComponent {
+  Vector,
+  Cube,
+  Scalar,
+  MTEGM,
+  MTEL1,
+  MTEUB,
+};
+
+struct SemanticWorkKey {
+  SemanticComponent component = SemanticComponent::Scalar;
+  std::string opName;
+  std::string elemType;
+  bool isFlops = false;
+
+  bool operator<(const SemanticWorkKey &other) const {
+    return std::tie(component, opName, elemType, isFlops) <
+           std::tie(other.component, other.opName, other.elemType,
+                    other.isFlops);
+  }
+
+  bool operator==(const SemanticWorkKey &other) const {
+    return component == other.component && opName == other.opName &&
+           elemType == other.elemType && isFlops == other.isFlops;
+  }
+};
+
+struct SemanticSummary {
+  std::map<SemanticWorkKey, int64_t> work;
+  size_t vectorOps = 0;
+  size_t cubeOps = 0;
+  size_t scalarOps = 0;
+  size_t transferOps = 0;
+  size_t unsupportedOps = 0;
+  size_t resolvedLoops = 0;
+  size_t unresolvedLoops = 0;
+  size_t resolvedBranches = 0;
+  size_t equivalentBranches = 0;
+  size_t unresolvedBranches = 0;
+
+  void add(SemanticWorkKey key, int64_t amount, int64_t multiplier) {
+    if (amount <= 0 || multiplier <= 0)
+      return;
+    if (amount > std::numeric_limits<int64_t>::max() / multiplier)
+      amount = std::numeric_limits<int64_t>::max();
+    else
+      amount *= multiplier;
+    work[key] += amount;
+    switch (key.component) {
+    case SemanticComponent::Vector:
+      ++vectorOps;
+      break;
+    case SemanticComponent::Cube:
+      ++cubeOps;
+      break;
+    case SemanticComponent::Scalar:
+      ++scalarOps;
+      break;
+    case SemanticComponent::MTEGM:
+    case SemanticComponent::MTEL1:
+    case SemanticComponent::MTEUB:
+      ++transferOps;
+      break;
+    }
+  }
+};
+
+static int64_t getStaticElementCount(mlir::Type type) {
+  if (!type)
+    return 0;
+  auto shaped = llvm::dyn_cast<mlir::ShapedType>(type);
+  if (!shaped || !shaped.hasStaticShape())
+    return 0;
+  return shaped.getNumElements();
+}
+
+static mlir::Type getElementType(mlir::Type type) {
+  if (!type)
+    return type;
+  if (auto shaped = llvm::dyn_cast<mlir::ShapedType>(type))
+    return shaped.getElementType();
+  return type;
+}
+
+static std::string stringifyElementType(mlir::Type type) {
+  if (!type)
+    return "";
+  type = getElementType(type);
+  if (type.isF16())
+    return "f16";
+  if (type.isBF16())
+    return "bf16";
+  if (type.isF32())
+    return "f32";
+  if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
+    return "i" + std::to_string(intType.getWidth());
+  return "";
+}
+
+static mlir::Type getLargestShapedType(mlir::Operation *op) {
+  mlir::Type best;
+  int64_t bestElements = 0;
+  auto consider = [&](mlir::Type type) {
+    int64_t elements = getStaticElementCount(type);
+    if (elements > bestElements) {
+      best = type;
+      bestElements = elements;
+    }
+  };
+  for (mlir::Type type : op->getResultTypes())
+    consider(type);
+  for (mlir::Value operand : op->getOperands())
+    consider(operand.getType());
+  return best;
+}
+
+static int64_t getLargestStaticElementCount(mlir::Operation *op) {
+  return getStaticElementCount(getLargestShapedType(op));
+}
+
+static int64_t getStaticByteCount(mlir::Type type) {
+  int64_t elements = getStaticElementCount(type);
+  if (elements <= 0)
+    return 0;
+  std::string elemType = stringifyElementType(type);
+  int64_t width = getElementByteWidth(elemType);
+  return width > 0 ? elements * width : 0;
+}
+
+static int64_t getLargestStaticByteCount(mlir::Operation *op) {
+  int64_t bytes = 0;
+  for (mlir::Type type : op->getResultTypes())
+    bytes = std::max(bytes, getStaticByteCount(type));
+  for (mlir::Value operand : op->getOperands())
+    bytes = std::max(bytes, getStaticByteCount(operand.getType()));
+  return bytes;
+}
+
+static int64_t getLargestByteCountWithBindings(mlir::Operation *op,
+                                               const AnalysisState &state) {
+  int64_t bytes = getLargestStaticByteCount(op);
+  for (mlir::Value result : op->getResults())
+    bytes = std::max(bytes, inferValueBytesWithBindings(result, state));
+  for (mlir::Value operand : op->getOperands())
+    bytes = std::max(bytes, inferValueBytesWithBindings(operand, state));
+  return bytes;
+}
+
+static std::optional<std::string> mapSemanticVectorOp(llvm::StringRef name) {
+  if (name == "arith.addf" || name == "arith.addi")
+    return "vadd";
+  if (name == "arith.subf" || name == "arith.subi")
+    return "vsub";
+  if (name == "arith.mulf" || name == "arith.muli")
+    return "vmul";
+  if (name == "arith.divf" || name == "arith.divsi" ||
+      name == "arith.divui")
+    return "vdiv";
+  if (name == "arith.maxnumf" || name == "arith.maxsi" ||
+      name == "arith.maxui")
+    return "vmax";
+  if (name == "arith.minnumf" || name == "arith.minsi" ||
+      name == "arith.minui")
+    return "vmin";
+  if (name == "arith.extf" || name == "arith.truncf" ||
+      name == "arith.extsi" || name == "arith.extui" ||
+      name == "arith.trunci" || name == "arith.uitofp" ||
+      name == "arith.sitofp")
+    return "vcast";
+  if (name == "arith.cmpi" || name == "arith.cmpf")
+    return "vcmp";
+  if (name == "arith.select")
+    return "vsel";
+  if (name == "arith.ori")
+    return "vor";
+  if (name == "math.exp" || name == "math.exp2")
+    return "vexp";
+  if (name == "math.log" || name == "math.log2")
+    return "vlog";
+  if (name == "math.absf" || name == "math.absi")
+    return "vabs";
+  if (name == "math.sqrt")
+    return "vsqrt";
+  if (name == "math.rsqrt")
+    return "vrsqrt";
+  if (name == "math.tanh")
+    return "vtanh";
+  if (name == "linalg.index")
+    return "varange";
+  return std::nullopt;
+}
+
+static bool hasShapedValue(mlir::Operation *op) {
+  return llvm::any_of(op->getResultTypes(), [](mlir::Type type) {
+           return llvm::isa<mlir::ShapedType>(type);
+         }) ||
+         llvm::any_of(op->getOperands(), [](mlir::Value value) {
+           return llvm::isa<mlir::ShapedType>(value.getType());
+         });
+}
+
+static bool isGlobalSemanticValue(mlir::Value value,
+                                  mlir::func::FuncOp entry) {
+  if (auto blockArg = llvm::dyn_cast<mlir::BlockArgument>(value))
+    return blockArg.getOwner() == &entry.getBody().front() &&
+           llvm::isa<mlir::MemRefType>(blockArg.getType());
+  mlir::Operation *def = value.getDefiningOp();
+  if (!def || def->getNumOperands() == 0)
+    return false;
+  llvm::StringRef name = def->getName().getStringRef();
+  if (name == "memref.reinterpret_cast" || name == "memref.subview" ||
+      name == "memref.cast")
+    return isGlobalSemanticValue(def->getOperand(0), entry);
+  return false;
+}
+
+static void seedSemanticFunctionBindings(mlir::func::FuncOp func,
+                                         AnalysisState &state) {
+  llvm::SmallVector<unsigned, 8> userArgToActual;
+  bool hasTypedSyntheticArgs = false;
+  for (unsigned idx = 0; idx < func.getNumArguments(); ++idx) {
+    if (func.getArgAttr(idx, "hacc.arg_type")) {
+      hasTypedSyntheticArgs = true;
+      continue;
+    }
+    userArgToActual.push_back(idx);
+  }
+
+  if (!hasTypedSyntheticArgs) {
+    std::set<unsigned> synthetic;
+    for (llvm::StringRef attrName : {"SyncBlockLockArgIdx",
+                                     "WorkspaceArgIdx"}) {
+      if (auto attr = func->getAttrOfType<mlir::IntegerAttr>(attrName)) {
+        int64_t idx = attr.getInt();
+        if (idx >= 0 && idx < func.getNumArguments())
+          synthetic.insert(static_cast<unsigned>(idx));
+      }
+    }
+    userArgToActual.clear();
+    for (unsigned idx = 0; idx < func.getNumArguments(); ++idx) {
+      if (synthetic.find(idx) == synthetic.end())
+        userArgToActual.push_back(idx);
+    }
+  }
+
+  auto bindable = [&](unsigned idx) {
+    if (idx >= func.getNumArguments())
+      return false;
+    mlir::Type type = func.getArgument(idx).getType();
+    return llvm::isa<mlir::IntegerType, mlir::IndexType>(type);
+  };
+
+  for (const auto &entry : state.argBindings) {
+    llvm::StringRef name(entry.first);
+    if (!name.consume_front("arg"))
+      continue;
+    unsigned userIndex = 0;
+    if (name.getAsInteger(10, userIndex))
+      continue;
+    std::optional<unsigned> actualIndex;
+    if (userIndex < userArgToActual.size() &&
+        bindable(userArgToActual[userIndex]))
+      actualIndex = userArgToActual[userIndex];
+    else if (bindable(userIndex))
+      actualIndex = userIndex;
+    if (actualIndex)
+      state.boundValues[func.getArgument(*actualIndex)] = entry.second;
+  }
+
+  if (func.getNumArguments() >= 3) {
+    unsigned firstPid = func.getNumArguments() - 3;
+    constexpr llvm::StringLiteral pidNames[] = {"pid_x", "pid_y", "pid_z"};
+    for (auto [offset, name] : llvm::enumerate(pidNames)) {
+      auto binding = state.argBindings.find(name.str());
+      if (binding != state.argBindings.end() && bindable(firstPid + offset))
+        state.boundValues[func.getArgument(firstPid + offset)] =
+            binding->second;
+    }
+  }
+}
+
+static void mergeMinimumBranchWork(SemanticSummary &target,
+                                   const SemanticSummary &thenSummary,
+                                   const SemanticSummary &elseSummary) {
+  for (const auto &entry : thenSummary.work) {
+    auto other = elseSummary.work.find(entry.first);
+    if (other != elseSummary.work.end())
+      target.work[entry.first] += std::min(entry.second, other->second);
+  }
+  target.unsupportedOps +=
+      thenSummary.unsupportedOps + elseSummary.unsupportedOps;
+  target.unresolvedLoops +=
+      thenSummary.unresolvedLoops + elseSummary.unresolvedLoops;
+  target.equivalentBranches += thenSummary.equivalentBranches +
+                               elseSummary.equivalentBranches;
+  target.unresolvedBranches += thenSummary.unresolvedBranches +
+                               elseSummary.unresolvedBranches;
+}
+
+static bool haveEquivalentBranchWork(const SemanticSummary &lhs,
+                                     const SemanticSummary &rhs) {
+  return lhs.work == rhs.work && lhs.unsupportedOps == 0 &&
+         rhs.unsupportedOps == 0 && lhs.unresolvedLoops == 0 &&
+         rhs.unresolvedLoops == 0 && lhs.unresolvedBranches == 0 &&
+         rhs.unresolvedBranches == 0;
+}
+
+static void analyzeSemanticRegion(mlir::Region &region, int64_t multiplier,
+                                  AnalysisState &state,
+                                  SemanticSummary &summary,
+                                  mlir::func::FuncOp entry,
+                                  std::set<mlir::Operation *> &callStack);
+
+static void addVectorSemanticOp(mlir::Operation *op, llvm::StringRef opName,
+                                int64_t elements, int64_t multiplier,
+                                SemanticSummary &summary) {
+  mlir::Type type = getLargestShapedType(op);
+  summary.add({SemanticComponent::Vector, opName.str(),
+               stringifyElementType(type), false},
+              elements, multiplier);
+}
+
+static void analyzeSemanticOperation(mlir::Operation *op, int64_t multiplier,
+                                     AnalysisState &state,
+                                     SemanticSummary &summary,
+                                     mlir::func::FuncOp entry,
+                                     std::set<mlir::Operation *> &callStack) {
+  if (captureConstant(op, state))
+    return;
+  captureDerivedScalarValue(op, state);
+
+  if (auto forOp = llvm::dyn_cast<mlir::scf::ForOp>(op)) {
+    int64_t tripCount = 1;
+    bool resolved = parseForTripCount(forOp, state, tripCount);
+    if (resolved)
+      ++summary.resolvedLoops;
+    else
+      ++summary.unresolvedLoops;
+    AnalysisState loopState = state;
+    seedLoopCarriedState(forOp, state, loopState);
+    int64_t lower = 0;
+    int64_t step = 1;
+    bool replay = resolved && tripCount > 0 && tripCount <= 1000000 &&
+                  resolveMLIRValue(forOp.getLowerBound(), state, lower) &&
+                  resolveMLIRValue(forOp.getStep(), state, step);
+    if (replay) {
+      for (int64_t iteration = 0; iteration < tripCount; ++iteration) {
+        loopState.boundValues[forOp.getInductionVar()] =
+            lower + iteration * step;
+        analyzeSemanticRegion(forOp.getRegion(), multiplier, loopState,
+                              summary, entry, callStack);
+        if (iteration + 1 < tripCount)
+          advanceLoopCarriedState(forOp, loopState);
+      }
+    } else {
+      int64_t nestedMultiplier =
+          multiplier * std::max<int64_t>(tripCount, 1);
+      analyzeSemanticRegion(forOp.getRegion(), nestedMultiplier, loopState,
+                            summary, entry, callStack);
+    }
+    propagateLoopResults(forOp, loopState, state);
+    return;
+  }
+
+  if (auto ifOp = llvm::dyn_cast<mlir::scf::IfOp>(op)) {
+    int64_t condition = 0;
+    if (resolveMLIRValue(ifOp.getCondition(), state, condition)) {
+      ++summary.resolvedBranches;
+      mlir::Region &selected =
+          condition != 0 ? ifOp.getThenRegion() : ifOp.getElseRegion();
+      if (!selected.empty())
+        analyzeSemanticRegion(selected, multiplier, state, summary, entry,
+                              callStack);
+    } else {
+      SemanticSummary thenSummary;
+      SemanticSummary elseSummary;
+      AnalysisState thenState = state;
+      AnalysisState elseState = state;
+      analyzeSemanticRegion(ifOp.getThenRegion(), multiplier, thenState,
+                            thenSummary, entry, callStack);
+      if (!ifOp.getElseRegion().empty())
+        analyzeSemanticRegion(ifOp.getElseRegion(), multiplier, elseState,
+                              elseSummary, entry, callStack);
+      if (haveEquivalentBranchWork(thenSummary, elseSummary)) {
+        summary.equivalentBranches +=
+            1 + thenSummary.equivalentBranches +
+            elseSummary.equivalentBranches;
+        for (const auto &entry : thenSummary.work)
+          summary.work[entry.first] += entry.second;
+      } else {
+        ++summary.unresolvedBranches;
+        mergeMinimumBranchWork(summary, thenSummary, elseSummary);
+      }
+    }
+    return;
+  }
+
+  if (auto call = llvm::dyn_cast<mlir::func::CallOp>(op)) {
+    auto callee = mlir::SymbolTable::lookupNearestSymbolFrom<mlir::func::FuncOp>(
+        call, call.getCalleeAttr());
+    if (!callee || callee.isDeclaration()) {
+      if (call.getCallee().contains("cumsum") && call.getNumOperands() >= 1) {
+        auto tensorType =
+            llvm::dyn_cast<mlir::RankedTensorType>(call.getOperand(0).getType());
+        int64_t axis = 0;
+        if (call.getNumOperands() >= 2)
+          resolveMLIRValue(call.getOperand(1), state, axis);
+        if (tensorType && tensorType.hasStaticShape() && axis >= 0 &&
+            axis < tensorType.getRank()) {
+          int64_t total = tensorType.getNumElements();
+          int64_t axisSize = tensorType.getDimSize(axis);
+          int64_t adds = axisSize > 0 ? total - total / axisSize : 0;
+          summary.add({SemanticComponent::Vector, "vadd",
+                       stringifyElementType(tensorType), false},
+                      adds, multiplier);
+          return;
+        }
+      }
+      ++summary.unsupportedOps;
+      return;
+    }
+    if (!callStack.insert(callee.getOperation()).second) {
+      ++summary.unsupportedOps;
+      return;
+    }
+    AnalysisState calleeState;
+    calleeState.argBindings = state.argBindings;
+    for (auto [idx, operand] : llvm::enumerate(call.getOperands())) {
+      if (idx >= callee.getNumArguments())
+        break;
+      int64_t value = 0;
+      if (resolveMLIRValue(operand, state, value))
+        calleeState.boundValues[callee.getArgument(idx)] = value;
+    }
+    analyzeSemanticRegion(callee.getBody(), multiplier, calleeState, summary,
+                          entry, callStack);
+    callStack.erase(callee.getOperation());
+    return;
+  }
+
+  llvm::StringRef name = op->getName().getStringRef();
+  if (name == "linalg.matmul") {
+    if (op->getNumOperands() < 2) {
+      ++summary.unsupportedOps;
+      return;
+    }
+    auto lhs = llvm::dyn_cast<mlir::RankedTensorType>(
+        op->getOperand(0).getType());
+    auto rhs = llvm::dyn_cast<mlir::RankedTensorType>(
+        op->getOperand(1).getType());
+    if (!lhs || !rhs || !lhs.hasStaticShape() || !rhs.hasStaticShape() ||
+        lhs.getRank() != 2 || rhs.getRank() != 2) {
+      ++summary.unsupportedOps;
+      return;
+    }
+    int64_t flops = 2 * lhs.getDimSize(0) * lhs.getDimSize(1) *
+                    rhs.getDimSize(1);
+    summary.add({SemanticComponent::Cube, "matmul",
+                 stringifyElementType(lhs), true},
+                flops, multiplier);
+    return;
+  }
+
+  // Fill and broadcast are indexing semantics in TTAdapter. Their consumers
+  // can fuse them without issuing a standalone vector instruction, so
+  // charging them here would make a theoretical lower bound unsound.
+  if (name == "linalg.fill" || name == "linalg.broadcast")
+    return;
+
+  if (name == "linalg.transpose") {
+    int64_t elements = getLargestStaticElementCount(op);
+    if (elements > 0)
+      addVectorSemanticOp(op, "vtranspose", elements, multiplier, summary);
+    else
+      ++summary.unsupportedOps;
+    return;
+  }
+
+  if (name == "linalg.reduce") {
+    int64_t elements = op->getNumOperands() > 0
+                           ? getStaticElementCount(op->getOperand(0).getType())
+                           : 0;
+    std::string reduceName = "vreduce";
+    op->walk([&](mlir::Operation *nested) {
+      llvm::StringRef nestedName = nested->getName().getStringRef();
+      if (nestedName.contains("max"))
+        reduceName = "vreduce_max";
+      else if (nestedName.contains("min"))
+        reduceName = "vreduce_min";
+      else if (nestedName.contains("mul"))
+        reduceName = "vreduce_prod";
+    });
+    if (elements > 0)
+      addVectorSemanticOp(op, reduceName, elements, multiplier, summary);
+    else
+      ++summary.unsupportedOps;
+    return;
+  }
+
+  if (name == "linalg.generic") {
+    int64_t elements = getLargestStaticElementCount(op);
+    size_t before = summary.vectorOps;
+    for (mlir::Region &nestedRegion : op->getRegions()) {
+      nestedRegion.walk([&](mlir::Operation *nested) {
+        if (nested == op || nested->getName().getStringRef() == "linalg.yield")
+          return;
+        if (auto mapped =
+                mapSemanticVectorOp(nested->getName().getStringRef()))
+          addVectorSemanticOp(op, *mapped, elements, multiplier, summary);
+      });
+    }
+    if (summary.vectorOps == before)
+      ++summary.unsupportedOps;
+    return;
+  }
+
+  if (name == "memref.copy" && op->getNumOperands() >= 2) {
+    bool srcGlobal = isGlobalSemanticValue(op->getOperand(0), entry);
+    bool dstGlobal = isGlobalSemanticValue(op->getOperand(1), entry);
+    SemanticComponent component =
+        srcGlobal ? SemanticComponent::MTEGM : SemanticComponent::MTEUB;
+    if (!srcGlobal && !dstGlobal)
+      component = SemanticComponent::MTEUB;
+    int64_t bytes = inferValueBytesWithBindings(op->getOperand(0), state);
+    if (bytes <= 0)
+      bytes = inferValueBytesWithBindings(op->getOperand(1), state);
+    summary.add({component, srcGlobal ? "load" : "store",
+                 stringifyElementType(op->getOperand(0).getType()), false},
+                bytes, multiplier);
+    return;
+  }
+
+  if (name == "bufferization.materialize_in_destination" ||
+      name == "hivm.hir.store") {
+    int64_t bytes = getLargestByteCountWithBindings(op, state);
+    summary.add({SemanticComponent::MTEUB, "store",
+                 stringifyElementType(getLargestShapedType(op)), false},
+                bytes, multiplier);
+    return;
+  }
+
+  if (name == "memref.load") {
+    mlir::Type resultType = op->getNumResults() ? op->getResult(0).getType()
+                                                : mlir::Type();
+    int64_t width = getElementByteWidth(stringifyElementType(resultType));
+    if (op->getNumOperands() &&
+        isGlobalSemanticValue(op->getOperand(0), entry)) {
+      summary.add({SemanticComponent::MTEGM, "load",
+                   stringifyElementType(resultType), false},
+                  std::max<int64_t>(width, 1), multiplier);
+    } else {
+      summary.add({SemanticComponent::Scalar, "scalar", "i32", false}, 1,
+                  multiplier);
+    }
+    return;
+  }
+
+  if (auto mapped = mapSemanticVectorOp(name)) {
+    if (hasShapedValue(op)) {
+      int64_t elements = getLargestStaticElementCount(op);
+      if (elements > 0)
+        addVectorSemanticOp(op, *mapped, elements, multiplier, summary);
+      else
+        ++summary.unsupportedOps;
+    } else {
+      summary.add({SemanticComponent::Scalar, "scalar",
+                   stringifyElementType(op->getNumResults()
+                                            ? op->getResult(0).getType()
+                                            : mlir::Type()),
+                   false},
+                  1, multiplier);
+    }
+    return;
+  }
+
+  if (name == "tensor.extract" || name == "tensor.insert") {
+    summary.add({SemanticComponent::Scalar, "scalar", "i32", false}, 1,
+                multiplier);
+    return;
+  }
+
+  if (name == "arith.constant" || name == "func.return" ||
+      name == "scf.yield" || name == "linalg.yield" ||
+      name == "tensor.empty" || name == "tensor.expand_shape" ||
+      name == "tensor.collapse_shape" || name == "tensor.extract_slice" ||
+      name == "tensor.insert_slice" || name == "tensor.reshape" ||
+      name == "memref.alloc" || name == "memref.reinterpret_cast" ||
+      name == "memref.subview" || name == "bufferization.to_tensor" ||
+      name == "bufferization.alloc_tensor")
+    return;
+
+  if (hasShapedValue(op))
+    ++summary.unsupportedOps;
+  else if (name.starts_with("arith.") || name.starts_with("math."))
+    summary.add({SemanticComponent::Scalar, "scalar", "i32", false}, 1,
+                multiplier);
+}
+
+static void analyzeSemanticRegion(mlir::Region &region, int64_t multiplier,
+                                  AnalysisState &state,
+                                  SemanticSummary &summary,
+                                  mlir::func::FuncOp entry,
+                                  std::set<mlir::Operation *> &callStack) {
+  for (mlir::Block &block : region) {
+    for (mlir::Operation &op : block)
+      analyzeSemanticOperation(&op, multiplier, state, summary, entry,
+                               callStack);
+  }
+}
+
+static std::string semanticGroup(const SemanticWorkKey &key) {
+  switch (key.component) {
+  case SemanticComponent::Vector:
+    return "vector/" + key.opName;
+  case SemanticComponent::Cube:
+    return "cube";
+  case SemanticComponent::Scalar:
+    return "scalar";
+  case SemanticComponent::MTEGM:
+    return "mte_gm";
+  case SemanticComponent::MTEL1:
+    return "mte_l1";
+  case SemanticComponent::MTEUB:
+    return "mte_ub";
+  }
+  return "scalar";
+}
+
+static std::optional<std::string> semanticGroup(const HIVMOp &op) {
+  if (op.isSyncOp || op.isBarrier)
+    return std::nullopt;
+  switch (op.pipe) {
+  case HIVMPipe::Vector:
+    return "vector/" + op.opName;
+  case HIVMPipe::Cube:
+    return "cube";
+  case HIVMPipe::Scalar:
+    return "scalar";
+  case HIVMPipe::VectorMTE2:
+  case HIVMPipe::CubeMTE2:
+    return "mte_gm";
+  case HIVMPipe::MTE1:
+    return "mte_l1";
+  case HIVMPipe::MTE3:
+  case HIVMPipe::FixPipe:
+    return "mte_ub";
+  default:
+    return std::nullopt;
+  }
+}
+
+static int64_t semanticAmount(const HIVMOp &op) {
+  int64_t amount = 0;
+  if (op.pipe == HIVMPipe::VectorMTE2 || op.pipe == HIVMPipe::CubeMTE2 ||
+      op.pipe == HIVMPipe::MTE1 || op.pipe == HIVMPipe::MTE3 ||
+      op.pipe == HIVMPipe::FixPipe)
+    amount = op.bytes;
+  else if (op.pipe == HIVMPipe::Cube)
+    amount = op.flops > 0 ? op.flops : op.elements;
+  else if (op.pipe == HIVMPipe::Scalar)
+    amount = op.flops > 0 ? op.flops : op.elements;
+  else
+    amount = op.flops > 0 ? op.flops : op.elements;
+  if (op.pipe == HIVMPipe::Scalar && amount <= 0 && op.duration > 0)
+    amount = 1;
+  return amount * std::max<int64_t>(op.loopMultiplier, 1);
+}
+
+static HIVMPipe semanticPipe(SemanticComponent component) {
+  switch (component) {
+  case SemanticComponent::Vector:
+    return HIVMPipe::Vector;
+  case SemanticComponent::Cube:
+    return HIVMPipe::Cube;
+  case SemanticComponent::Scalar:
+    return HIVMPipe::Scalar;
+  case SemanticComponent::MTEGM:
+    return HIVMPipe::VectorMTE2;
+  case SemanticComponent::MTEL1:
+    return HIVMPipe::MTE1;
+  case SemanticComponent::MTEUB:
+    return HIVMPipe::MTE3;
+  }
+  return HIVMPipe::Scalar;
+}
+
+static int64_t estimateSemanticVectorCycles(const SemanticWorkKey &key,
+                                            int64_t elements,
+                                            const HardwareConfig &config,
+                                            bool &calibrated) {
+  int64_t instructions =
+      ceilDiv(elements, std::max<int>(1, config.getVectorWidthElements()));
+  double cyclesPerInstruction =
+      config.getVectorOpCyclesPerInstruction(key.opName);
+  if (auto dtypeCost = config.lookupVectorOpCyclesPerInstructionByDType(
+          key.opName, key.elemType)) {
+    cyclesPerInstruction = *dtypeCost;
+  } else if (auto cost = config.lookupOpcodeCycleCost("PIPE_V", key.opName)) {
+    if (cost->hasCycles && !cost->source.empty()) {
+      cyclesPerInstruction = cost->cycles;
+    } else {
+      calibrated = false;
+    }
+  } else {
+    calibrated = false;
+  }
+  return std::max<int64_t>(
+      1, ceilToI64(static_cast<double>(instructions) * cyclesPerInstruction));
+}
+
+static std::string normalizeSemanticElemType(llvm::StringRef elemType) {
+  if (elemType == "fp16")
+    return "f16";
+  if (elemType == "fp32")
+    return "f32";
+  return elemType.str();
+}
+
+static void applySemanticSummary(const SemanticSummary &summary,
+                                 HIVMAnalysisReport &report,
+                                 const HardwareConfig &config) {
+  struct VCallProjection {
+    size_t opIndex = 0;
+    int64_t elementWeight = 1;
+    int64_t loopMultiplier = 1;
+  };
+
+  using ExistingSemanticKey = std::pair<std::string, std::string>;
+  std::map<ExistingSemanticKey, int64_t> existing;
+  std::vector<VCallProjection> vectorCalls;
+  int64_t semanticVectorCycles = 0;
+  bool semanticVectorCostCalibrated = true;
+  report.semanticUnplacedVectorCycles = 0;
+  size_t nextId = 0;
+  for (auto [opIndex, op] : llvm::enumerate(report.operations)) {
+    nextId = std::max(nextId, op.id + 1);
+    if (op.opName == "vcall") {
+      vectorCalls.push_back(
+          {opIndex, std::max<int64_t>(op.elements, 1),
+           std::max<int64_t>(op.loopMultiplier, 1)});
+      op.elements = 0;
+      op.flops = 0;
+      op.duration = 0;
+      op.issueDuration = 0;
+      op.dependencyLatency = 0;
+      continue;
+    }
+    if (auto group = semanticGroup(op)) {
+      existing[{*group, normalizeSemanticElemType(op.elemType)}] +=
+          semanticAmount(op);
+    }
+  }
+
+  for (const auto &entry : summary.work) {
+    const SemanticWorkKey &key = entry.first;
+    std::string group = semanticGroup(key);
+    ExistingSemanticKey exactKey{group, normalizeSemanticElemType(key.elemType)};
+    int64_t covered = std::min(existing[exactKey], entry.second);
+    existing[exactKey] -= covered;
+    if (covered < entry.second && !exactKey.second.empty()) {
+      ExistingSemanticKey untypedKey{group, ""};
+      int64_t untypedCovered =
+          std::min(existing[untypedKey], entry.second - covered);
+      existing[untypedKey] -= untypedCovered;
+      covered += untypedCovered;
+    }
+    int64_t deficit = entry.second - covered;
+    if (deficit <= 0)
+      continue;
+
+    if (key.component == SemanticComponent::Vector) {
+      int64_t cycles = estimateSemanticVectorCycles(
+          key, deficit, config, semanticVectorCostCalibrated);
+      if (semanticVectorCycles >
+          std::numeric_limits<int64_t>::max() - cycles)
+        semanticVectorCycles = std::numeric_limits<int64_t>::max();
+      else
+        semanticVectorCycles += cycles;
+    }
+
+    HIVMOp synthetic;
+    synthetic.id = nextId++;
+    synthetic.opName = key.opName;
+    synthetic.text = "semantic-sidecar aggregate";
+    synthetic.pipe = semanticPipe(key.component);
+    synthetic.coreType = key.component == SemanticComponent::Cube ? "CUBE"
+                                                                   : "VECTOR";
+    synthetic.elemType = key.elemType;
+    synthetic.loopMultiplier = 1;
+    synthetic.costSource = "ttadapter_semantic_overlay";
+    synthetic.costSubpipe = group;
+    if (key.component == SemanticComponent::MTEGM ||
+        key.component == SemanticComponent::MTEL1 ||
+        key.component == SemanticComponent::MTEUB) {
+      synthetic.bytes = deficit;
+      synthetic.packetBytes = deficit;
+      if (key.component == SemanticComponent::MTEGM) {
+        synthetic.srcSpace = "gm";
+        synthetic.dstSpace = "ub";
+      } else if (key.component == SemanticComponent::MTEL1) {
+        synthetic.srcSpace = "l1";
+        synthetic.dstSpace = "l0a";
+      } else {
+        synthetic.srcSpace = "ub";
+        synthetic.dstSpace = "gm";
+      }
+    } else if (key.isFlops) {
+      synthetic.flops = deficit;
+    } else {
+      synthetic.elements = deficit;
+    }
+    report.operations.push_back(std::move(synthetic));
+    ++report.semanticSyntheticOpCount;
+  }
+
+  if (semanticVectorCycles > 0 && !vectorCalls.empty()) {
+    long double weightedElements = 0.0;
+    for (const VCallProjection &call : vectorCalls)
+      weightedElements += static_cast<long double>(call.elementWeight) *
+                          call.loopMultiplier;
+
+    std::vector<std::pair<long double, size_t>> remainders;
+    int64_t assignedCycles = 0;
+    for (const VCallProjection &call : vectorCalls) {
+      HIVMOp &op = report.operations[call.opIndex];
+      long double share =
+          static_cast<long double>(semanticVectorCycles) * call.elementWeight /
+          std::max<long double>(weightedElements, 1.0);
+      op.duration = static_cast<int64_t>(std::floor(share));
+      op.issueDuration = op.duration;
+      op.dependencyLatency = op.duration;
+      op.calibratedCost = semanticVectorCostCalibrated;
+      op.costSource = "ttadapter_semantic_projection";
+      op.costSubpipe = "vector/semantic";
+      assignedCycles += op.duration * call.loopMultiplier;
+      remainders.push_back(
+          {(share - std::floor(share)) * call.loopMultiplier, call.opIndex});
+    }
+    if (assignedCycles < semanticVectorCycles) {
+      llvm::sort(remainders, [](const auto &lhs, const auto &rhs) {
+        return lhs.first > rhs.first;
+      });
+      int64_t residual = semanticVectorCycles - assignedCycles;
+      for (const auto &remainder : remainders) {
+        HIVMOp &op = report.operations[remainder.second];
+        int64_t multiplier = std::max<int64_t>(op.loopMultiplier, 1);
+        if (residual < multiplier)
+          continue;
+        ++op.duration;
+        ++op.issueDuration;
+        ++op.dependencyLatency;
+        residual -= multiplier;
+        if (residual == 0)
+          break;
+      }
+      report.semanticUnplacedVectorCycles = residual;
+    }
+  } else if (semanticVectorCycles > 0) {
+    report.semanticUnplacedVectorCycles = semanticVectorCycles;
+  }
+  report.opCount = report.operations.size();
 }
 
 } // namespace
@@ -4205,6 +5303,118 @@ bool HIVMAnalyzer::analyzeModule(mlir::ModuleOp module,
   return true;
 }
 
+bool HIVMAnalyzer::overlaySemanticFile(llvm::StringRef path,
+                                       HIVMAnalysisReport &report,
+                                       std::string &error) const {
+  auto fileOrErr = llvm::MemoryBuffer::getFile(path);
+  if (!fileOrErr) {
+    error = "failed to read semantic IR file: " + path.str();
+    return false;
+  }
+
+  mlir::DialectRegistry registry;
+  registry.insert<mlir::BuiltinDialect, mlir::affine::AffineDialect,
+                  mlir::arith::ArithDialect,
+                  mlir::bufferization::BufferizationDialect,
+                  mlir::func::FuncDialect, mlir::linalg::LinalgDialect,
+                  mlir::math::MathDialect, mlir::memref::MemRefDialect,
+                  mlir::scf::SCFDialect, mlir::tensor::TensorDialect>();
+#ifdef TRITONSIM_HAS_BISHENGIR_HIVM
+  registry.insert<mlir::annotation::AnnotationDialect,
+                  mlir::hacc::HACCDialect, mlir::hivm::HIVMDialect>();
+#endif
+  mlir::MLIRContext context(registry);
+  context.allowUnregisteredDialects();
+
+  std::string parseDiagnostics;
+  mlir::ScopedDiagnosticHandler diagHandler(
+      &context, [&](mlir::Diagnostic &diag) {
+        llvm::raw_string_ostream os(parseDiagnostics);
+        diag.print(os);
+        os << "\n";
+        return mlir::success();
+      });
+  mlir::ParserConfig parserConfig(&context, /*verifyAfterParse=*/false);
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(
+      fileOrErr.get()->getBuffer(), parserConfig);
+  if (!module) {
+    error = "failed to parse semantic TTAdapter MLIR";
+    if (!parseDiagnostics.empty())
+      error += ":\n" + parseDiagnostics;
+    return false;
+  }
+
+  mlir::func::FuncOp entry;
+  for (mlir::func::FuncOp func : module->getOps<mlir::func::FuncOp>()) {
+    if (func.isDeclaration())
+      continue;
+    if (func->hasAttr("global_kernel") || func->hasAttr("hacc.entry")) {
+      entry = func;
+      break;
+    }
+  }
+  if (!entry) {
+    for (mlir::func::FuncOp func : module->getOps<mlir::func::FuncOp>()) {
+      if (!func.isDeclaration() &&
+          !func->hasAttr("hivm.vector_function")) {
+        entry = func;
+        break;
+      }
+    }
+  }
+  if (!entry) {
+    error = "semantic TTAdapter MLIR has no analyzable entry function";
+    return false;
+  }
+
+  AnalysisState state;
+  state.argBindings = parseArgBindings(argBindingsStr);
+  seedSemanticFunctionBindings(entry, state);
+  SemanticSummary summary;
+  std::set<mlir::Operation *> callStack = {entry.getOperation()};
+  analyzeSemanticRegion(entry.getBody(), 1, state, summary, entry, callStack);
+  applySemanticSummary(summary, report, config);
+
+  std::vector<HIVMOp> semanticAggregates;
+  std::vector<HIVMOp> schedulableOperations;
+  semanticAggregates.reserve(report.semanticSyntheticOpCount);
+  schedulableOperations.reserve(report.operations.size());
+  for (HIVMOp &op : report.operations) {
+    if (op.costSource == "ttadapter_semantic_overlay")
+      semanticAggregates.push_back(std::move(op));
+    else
+      schedulableOperations.push_back(std::move(op));
+  }
+  report.operations = std::move(schedulableOperations);
+
+  resetScheduleSummary(report);
+  if (schedulerMode == HIVMSchedulerMode::DES)
+    finalizeDiscreteEventReport(report, config);
+  else
+    finalizeScheduledReport(report, config);
+  applyKernelLaunchOverhead(report, config, state.argBindings, argBindingsStr);
+  report.operations.insert(report.operations.end(),
+                           std::make_move_iterator(semanticAggregates.begin()),
+                           std::make_move_iterator(semanticAggregates.end()));
+
+  report.semanticOverlayApplied = true;
+  report.semanticSourcePath = path.str();
+  report.semanticVectorOpCount = summary.vectorOps;
+  report.semanticCubeOpCount = summary.cubeOps;
+  report.semanticScalarOpCount = summary.scalarOps;
+  report.semanticTransferOpCount = summary.transferOps;
+  report.semanticUnsupportedOpCount = summary.unsupportedOps;
+  report.semanticResolvedLoopCount = summary.resolvedLoops;
+  report.semanticUnresolvedLoopCount = summary.unresolvedLoops;
+  report.semanticResolvedBranchCount = summary.resolvedBranches;
+  report.semanticEquivalentBranchCount = summary.equivalentBranches;
+  report.semanticUnresolvedBranchCount = summary.unresolvedBranches;
+  report.semanticOverlayComplete =
+      summary.unsupportedOps == 0 && summary.unresolvedLoops == 0 &&
+      summary.unresolvedBranches == 0;
+  return true;
+}
+
 void HIVMAnalysisReport::print(llvm::raw_ostream &os,
                                const HardwareConfig &config) const {
   os << "=== HIVM Analysis ===\n";
@@ -4251,6 +5461,25 @@ void HIVMAnalysisReport::print(llvm::raw_ostream &os,
   os << "  Critical path event wait cycles: " << criticalPathEventWaitCycles << "\n";
   os << "  Barrier cycles: " << barrierCycles << "\n";
   os << "  Max loop multiplier: " << maxLoopMultiplier << "\n\n";
+
+  if (semanticOverlayApplied) {
+    os << "Semantic overlay:\n";
+    os << "  Source: " << semanticSourcePath << "\n";
+    os << "  Status: "
+       << (semanticOverlayComplete ? "complete" : "partial") << "\n";
+    os << "  Ops: vector=" << semanticVectorOpCount
+       << ", cube=" << semanticCubeOpCount
+       << ", scalar=" << semanticScalarOpCount
+       << ", transfer=" << semanticTransferOpCount
+       << ", unsupported=" << semanticUnsupportedOpCount << "\n";
+    os << "  Synthetic aggregate ops: " << semanticSyntheticOpCount << "\n";
+    os << "  Unplaced vector cycles: " << semanticUnplacedVectorCycles << "\n";
+    os << "  Loops: resolved=" << semanticResolvedLoopCount
+       << ", unresolved=" << semanticUnresolvedLoopCount << "\n";
+    os << "  Branches: resolved=" << semanticResolvedBranchCount
+       << ", model-equivalent=" << semanticEquivalentBranchCount
+       << ", unresolved=" << semanticUnresolvedBranchCount << "\n\n";
+  }
 
   os << "Cost calibration:\n";
   os << "  Calibrated ops: " << calibratedOpCount << ", cycles: "
@@ -4337,6 +5566,8 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
   constexpr int kPidAIC = 1;
   constexpr int kPidAIV = 2;
   constexpr int kPidShared = 3;
+  constexpr int kTidFlowControl = 6;
+  constexpr int kTidScalarLoadStore = 7;
 
   auto pipeTid = [](HIVMPipe pipe) -> int {
     switch (pipe) {
@@ -4391,6 +5622,21 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
     return kPidShared;
   };
 
+  auto isScalarLoadStore = [](const HIVMOp &op) {
+    return op.pipe == HIVMPipe::Scalar &&
+           (op.opName == "load" || op.opName == "store");
+  };
+  auto tracePid = [&](const HIVMOp &op) {
+    return pipePid(op.pipe, op.coreType);
+  };
+  auto traceTid = [&](const HIVMOp &op) {
+    if (usesFlowControlResource(op))
+      return kTidFlowControl;
+    if (isScalarLoadStore(op))
+      return kTidScalarLoadStore;
+    return pipeTid(op.pipe);
+  };
+
   auto cyclesToTraceUs = [&](int64_t cycles) -> double {
     return config.cyclesToMicroseconds(cycles);
   };
@@ -4416,6 +5662,21 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
     ss.flush();
     return joined;
   };
+  const bool hasVectorProjection = llvm::any_of(operations, [](const HIVMOp &op) {
+    return op.costSource == "ttadapter_semantic_projection" && op.duration > 0;
+  });
+  const size_t unscheduledSemanticOps = llvm::count_if(
+      operations, [&](const HIVMOp &op) {
+        if (op.costSource != "ttadapter_semantic_overlay" || op.duration > 0)
+          return false;
+        return op.pipe != HIVMPipe::Vector || !hasVectorProjection;
+      });
+  const bool traceTimingComplete =
+      !scheduleTruncated && unscheduledSemanticOps == 0 &&
+      semanticUnplacedVectorCycles == 0 &&
+      ((semanticOverlayApplied && semanticOverlayComplete) ||
+       (!semanticOverlayApplied && outlinedCallCount == 0 &&
+        zeroByteTransferCount == 0 && zeroWorkScalarOpCount == 0));
 
   os << "{\n  \"traceEvents\": [\n";
   bool first = true;
@@ -4451,6 +5712,14 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
   os << "    {\"ph\":\"M\",\"pid\":" << kPidAIC
      << ",\"tid\":" << pipeTid(HIVMPipe::Scalar)
      << ",\"name\":\"thread_name\",\"args\":{\"name\":\"Scalar\"}}";
+  for (auto [tid, name] :
+       {std::pair<int, llvm::StringRef>{kTidFlowControl, "FLOWCTRL"},
+        {kTidScalarLoadStore, "SCALARLDST"}}) {
+    emitComma();
+    os << "    {\"ph\":\"M\",\"pid\":" << kPidAIC << ",\"tid\":" << tid
+       << ",\"name\":\"thread_name\",\"args\":{\"name\":\"" << name
+       << "\"}}";
+  }
 
   // AIV pipes: Vector, VectorMTE2, MTE3, Scalar(AIV)
   for (HIVMPipe pipe :
@@ -4466,6 +5735,14 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
   os << "    {\"ph\":\"M\",\"pid\":" << kPidAIV
      << ",\"tid\":" << pipeTid(HIVMPipe::Scalar)
      << ",\"name\":\"thread_name\",\"args\":{\"name\":\"Scalar\"}}";
+  for (auto [tid, name] :
+       {std::pair<int, llvm::StringRef>{kTidFlowControl, "FLOWCTRL"},
+        {kTidScalarLoadStore, "SCALARLDST"}}) {
+    emitComma();
+    os << "    {\"ph\":\"M\",\"pid\":" << kPidAIV << ",\"tid\":" << tid
+       << ",\"name\":\"thread_name\",\"args\":{\"name\":\"" << name
+       << "\"}}";
+  }
 
   // Shared process: cross-core barrier track
   emitComma();
@@ -4476,11 +5753,25 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
 
   for (const HIVMOp &op : operations) {
     // Skip zero-cycle metadata ops that are not real scheduled work.
-    if (op.opName == "pointer_cast" || op.opName == "convert_layout")
+    if (op.duration <= 0 || op.opName == "pointer_cast" ||
+        op.opName == "convert_layout")
       continue;
+    if (usesFlowControlResource(op) && op.eventWaitCycles > 0) {
+      emitComma();
+      os << "    {\"ph\":\"X\",\"pid\":" << tracePid(op)
+         << ",\"tid\":" << kTidFlowControl
+         << ",\"ts\":"
+         << llvm::format("%.3f", cyclesToTraceUs(
+                                  op.startCycle - op.eventWaitCycles))
+         << ",\"dur\":"
+         << llvm::format("%.3f", cyclesToTraceUs(op.eventWaitCycles))
+         << ",\"name\":\"" << jsonEscape(op.opName)
+         << " wait\",\"args\":{\"blocked\":true,\"cycles\":"
+         << op.eventWaitCycles << "}}";
+    }
     emitComma();
-    os << "    {\"ph\":\"X\",\"pid\":" << pipePid(op.pipe, op.coreType)
-       << ",\"tid\":" << pipeTid(op.pipe)
+    os << "    {\"ph\":\"X\",\"pid\":" << tracePid(op)
+       << ",\"tid\":" << traceTid(op)
        << ",\"ts\":" << llvm::format("%.3f", cyclesToTraceUs(op.startCycle))
        << ",\"dur\":" << llvm::format("%.3f", cyclesToTraceUs(op.duration))
        << ",\"name\":\"" << jsonEscape(op.opName) << "\",\"args\":{"
@@ -4550,16 +5841,16 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
         // Flow start at set-op end time
         emitComma();
         os << "    {\"ph\":\"s\",\"id\":" << flowId
-           << ",\"pid\":" << pipePid(setOp.pipe, setOp.coreType)
-           << ",\"tid\":" << pipeTid(setOp.pipe)
+           << ",\"pid\":" << tracePid(setOp)
+           << ",\"tid\":" << traceTid(setOp)
            << ",\"ts\":" << llvm::format("%.3f",
                   cyclesToTraceUs(setOp.valueReadyCycle))
            << ",\"name\":\"sync\",\"cat\":\"sync\"}";
         // Flow finish at wait-op start time
         emitComma();
         os << "    {\"ph\":\"f\",\"id\":" << flowId
-           << ",\"pid\":" << pipePid(waitOp.pipe, waitOp.coreType)
-           << ",\"tid\":" << pipeTid(waitOp.pipe)
+           << ",\"pid\":" << tracePid(waitOp)
+           << ",\"tid\":" << traceTid(waitOp)
            << ",\"ts\":" << llvm::format("%.3f",
                   cyclesToTraceUs(waitOp.startCycle))
            << ",\"name\":\"sync\",\"cat\":\"sync\",\"bp\":\"e\"}";
@@ -4568,7 +5859,15 @@ void HIVMAnalysisReport::emitPerfettoTrace(llvm::raw_ostream &os,
     }
   }
 
-  os << "\n  ],\n  \"displayTimeUnit\": \"us\"\n}\n";
+  os << "\n  ],\n  \"displayTimeUnit\": \"us\",\n";
+  os << "  \"metadata\": {\"timing_coverage\":\""
+     << (traceTimingComplete ? "complete" : "partial")
+     << "\",\"semantic_placement\":\""
+     << (hasVectorProjection ? "weighted_vcall_heuristic" : "none")
+     << "\",\"unscheduled_semantic_ops\":" << unscheduledSemanticOps
+     << ",\"unplaced_semantic_vector_cycles\":"
+     << semanticUnplacedVectorCycles
+     << "}\n}\n";
 }
 
 void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
@@ -4654,6 +5953,77 @@ void HIVMAnalysisReport::emitDESGraph(llvm::raw_ostream &os,
      << jsonEscape(config.getOpcodeCalibrationVersion()) << "\",\n";
   os << "  \"opcode_calibration_path\": \""
      << jsonEscape(config.getOpcodeCalibrationPath()) << "\",\n";
+  const bool semanticCoverageComplete =
+      semanticOverlayApplied && semanticOverlayComplete;
+  const bool allOutlinedCallsSummarized =
+      semanticCoverageComplete ||
+      outlinedCallCount == summarizedOutlinedCallCount;
+  const bool coverageComplete =
+      semanticCoverageComplete ||
+      (outlinedCallCount == 0 && zeroByteTransferCount == 0 &&
+       zeroWorkScalarOpCount == 0);
+  llvm::StringRef coverageStatus =
+      coverageComplete
+          ? "complete"
+          : (allOutlinedCallsSummarized ? "conservative_partial"
+                                        : "incomplete");
+  const bool hasVectorProjection = llvm::any_of(operations, [](const HIVMOp &op) {
+    return op.costSource == "ttadapter_semantic_projection" && op.duration > 0;
+  });
+  const size_t unscheduledSemanticOps = llvm::count_if(
+      operations, [&](const HIVMOp &op) {
+        if (op.costSource != "ttadapter_semantic_overlay" || op.duration > 0)
+          return false;
+        return op.pipe != HIVMPipe::Vector || !hasVectorProjection;
+      });
+  const bool traceTimingComplete =
+      !scheduleTruncated && unscheduledSemanticOps == 0 &&
+      semanticUnplacedVectorCycles == 0 &&
+      ((semanticOverlayApplied && semanticOverlayComplete) ||
+       (!semanticOverlayApplied && outlinedCallCount == 0 &&
+        zeroByteTransferCount == 0 && zeroWorkScalarOpCount == 0));
+  os << "  \"model_coverage\": {\n";
+  os << "    \"status\": \"" << coverageStatus << "\",\n";
+  os << "    \"trace_timing_status\": \""
+     << (traceTimingComplete ? "complete" : "partial") << "\",\n";
+  os << "    \"semantic_placement\": \""
+     << (hasVectorProjection ? "weighted_vcall_heuristic" : "none") << "\",\n";
+  os << "    \"unscheduled_semantic_ops\": " << unscheduledSemanticOps
+     << ",\n";
+  os << "    \"unplaced_semantic_vector_cycles\": "
+     << semanticUnplacedVectorCycles << ",\n";
+  os << "    \"outlined_calls\": " << outlinedCallCount << ",\n";
+  os << "    \"summarized_outlined_calls\": "
+     << summarizedOutlinedCallCount << ",\n";
+  os << "    \"semantic_covered_outlined_calls\": "
+     << (semanticCoverageComplete ? outlinedCallCount : 0) << ",\n";
+  os << "    \"zero_byte_transfers\": " << zeroByteTransferCount << ",\n";
+  os << "    \"zero_work_scalar_ops\": " << zeroWorkScalarOpCount << ",\n";
+  os << "    \"semantic_overlay\": {\n";
+  os << "      \"applied\": " << (semanticOverlayApplied ? "true" : "false")
+     << ",\n";
+  os << "      \"complete\": "
+     << (semanticOverlayComplete ? "true" : "false") << ",\n";
+  os << "      \"source\": \"" << jsonEscape(semanticSourcePath) << "\",\n";
+  os << "      \"vector_ops\": " << semanticVectorOpCount << ",\n";
+  os << "      \"cube_ops\": " << semanticCubeOpCount << ",\n";
+  os << "      \"scalar_ops\": " << semanticScalarOpCount << ",\n";
+  os << "      \"transfer_ops\": " << semanticTransferOpCount << ",\n";
+  os << "      \"synthetic_ops\": " << semanticSyntheticOpCount << ",\n";
+  os << "      \"unplaced_vector_cycles\": "
+     << semanticUnplacedVectorCycles << ",\n";
+  os << "      \"unsupported_ops\": " << semanticUnsupportedOpCount << ",\n";
+  os << "      \"resolved_loops\": " << semanticResolvedLoopCount << ",\n";
+  os << "      \"unresolved_loops\": " << semanticUnresolvedLoopCount
+     << ",\n";
+  os << "      \"resolved_branches\": " << semanticResolvedBranchCount
+     << ",\n";
+  os << "      \"model_equivalent_branches\": "
+     << semanticEquivalentBranchCount << ",\n";
+  os << "      \"unresolved_branches\": " << semanticUnresolvedBranchCount
+     << "\n";
+  os << "    }\n";
+  os << "  },\n";
   os << "  \"latency_summary\": {\n";
   os << "    \"body_cycles\": " << bodyCycles << ",\n";
   os << "    \"body_time_us\": "

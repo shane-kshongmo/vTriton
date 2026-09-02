@@ -18,12 +18,15 @@
 # Source spec: .omc/specs/performance_bound_model.md §A.7
 
 from __future__ import annotations
-
-import copy
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
-from ..extract.hivm_extractor import HIVMExtract, OpRecord, HandoffRecord
+from ..extract.hivm_extractor import (
+    HIVMExtract,
+    OpRecord,
+    HandoffRecord,
+    _compute_producer_component,
+)
 from ..extract.op_classifier import Component
 from ..extract.eligibility_oracle import get_eligibility, op_category_for_name
 
@@ -85,6 +88,7 @@ def _build_idealized_extract(extract: HIVMExtract) -> HIVMExtract:
             precision=op.precision,
             pipe=op.pipe,
             bytes_transferred=op.bytes_transferred,
+            packet_bytes=op.packet_bytes,
             elements=op.elements,
             flops=op.flops,
             duration_cycles=op.duration_cycles,
@@ -92,6 +96,7 @@ def _build_idealized_extract(extract: HIVMExtract) -> HIVMExtract:
             depends_on=list(op.depends_on),
             src_space=op.src_space,
             dst_space=op.dst_space,
+            line=op.line,
             repeat=op.repeat,
             mask=op.mask,
             start_cycle=op.start_cycle,
@@ -120,16 +125,49 @@ def _build_idealized_extract(extract: HIVMExtract) -> HIVMExtract:
 
         ideal_ops.append(ideal_op)
 
+    ideal_op_by_id = {op.op_id: op for op in ideal_ops}
+    original_op_by_id = {op.op_id: op for op in extract.operations}
+
     # Build idealized handoff list: keep only mandatory cross-path handoffs.
     # Avoidable handoffs (same-path) are removed — the idealized kernel
     # has perfect scheduling/ping-pong.
     ideal_handoffs = []
     for h in extract.handoffs:
+        producer_op = ideal_op_by_id.get(h.producer_op_id)
+        consumer_op = ideal_op_by_id.get(h.consumer_op_id)
+        if producer_op is None or consumer_op is None:
+            continue
+
+        original_producer = original_op_by_id.get(h.producer_op_id)
+        if (
+            original_producer is not None
+            and h.producer_component != original_producer.component
+        ):
+            producer_component = _compute_producer_component(
+                h.producer_op_id, ideal_op_by_id
+            )
+            if producer_component is None:
+                continue
+        else:
+            producer_component = producer_op.component
+
+        consumer_component = consumer_op.component
+        ideal_handoff = HandoffRecord(
+            producer_op_id=h.producer_op_id,
+            consumer_op_id=h.consumer_op_id,
+            producer_component=producer_component,
+            consumer_component=consumer_component,
+            bytes_transferred=h.bytes_transferred,
+            is_mandatory=h.is_mandatory,
+        )
+
         # Keep the handoff only if it's cross-path (mandatory)
         # Use the same logic as serialization._is_cross_component_mandatory
         from ..model.serialization import _same_path
-        if not _same_path(h.producer_component, h.consumer_component):
-            ideal_handoffs.append(h)
+        if not _same_path(
+            ideal_handoff.producer_component, ideal_handoff.consumer_component
+        ):
+            ideal_handoffs.append(ideal_handoff)
 
     return HIVMExtract(
         operations=ideal_ops,
@@ -152,6 +190,7 @@ def compute_two_limit(
     t_measured_us: Optional[float] = None,
     n_cores: int | None = None,
     total_programs: int | None = None,
+    launch_overhead_us: float = 0.0,
 ) -> TwoLimitResult:
     """Compute T_bound_HIVM by recomputing the bound from an idealized extract.
 
@@ -188,6 +227,7 @@ def compute_two_limit(
     ideal_result = combine(
         ideal_pieces.grid, ideal_pieces.component, ideal_pieces.serial,
         kernel_name=kernel_name, extract=ideal_extract, calibration=calib_db,
+        launch_overhead_us=launch_overhead_us,
     )
 
     t_bound_hivm_us = ideal_result.t_bound_us

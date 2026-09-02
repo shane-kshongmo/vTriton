@@ -142,7 +142,13 @@ def classify_op(
         if component is None:
             component = Component.SCALAR
 
-    # Precision from element type
-    precision = ELEM_TYPE_TO_PRECISION.get(elem_type)
+    # DES emitters may append MLIR layout text (for example
+    # ``f32, strided<[...]>``).  The leading token is still the scalar element
+    # type and must not turn calibrated compute work into unknown precision.
+    normalized_elem_type = elem_type.strip().lower()
+    precision = ELEM_TYPE_TO_PRECISION.get(normalized_elem_type)
+    if precision is None and normalized_elem_type:
+        leading_type = normalized_elem_type.split(",", 1)[0].strip()
+        precision = ELEM_TYPE_TO_PRECISION.get(leading_type)
 
     return component, precision

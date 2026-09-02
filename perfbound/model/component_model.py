@@ -68,6 +68,7 @@ def _get_cube_throughput_ops_per_us(dtype: DType, cube: CubeConfig) -> float:
 # Ops with no analytical-rate equivalent (vcmp/vnot/vand/varange) are absent
 # and fall through to the aggregate rate.
 _HIVM_VEC_NAME_MAP: dict[str, str] = {
+    "vcall": "mul",
     "vbrc": "broadcast",
     "vsel": "select",
     "vreduce": "reduce_sum",
@@ -283,6 +284,8 @@ def compute_component_floor(
     # compute_work[(comp, prec)] = total ops (or bytes for MTE)
     compute_work: dict[tuple[Component, Optional[Precision]], float] = {}
     component_extra_us: dict[Component, float] = {}
+    component_issue_cycles: dict[Component, float] = {}
+    component_has_zero_work_issue: dict[Component, bool] = {}
     mte_bytes: dict[Component, float] = {}
     mte_operations: dict[Component, list[tuple[OpRecord, float]]] = {}
     cycles_per_us = core.clock_freq_ghz * 1000.0
@@ -290,6 +293,28 @@ def compute_component_floor(
     for op in extract.operations:
         comp = op.component
         prec = op.precision
+        semantic_work = (
+            op.bytes_transferred
+            if comp in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB)
+            else (op.flops if op.flops > 0 else op.elements)
+        )
+        issue_cycles = float(op.duration_cycles)
+        if comp == Component.SCALAR and semantic_work <= 0 and issue_cycles > 0:
+            # DES scalar durations are estimates, not calibrated lower bounds.
+            # One issue cycle per instruction is the sound irreducible floor.
+            issue_cycles = 1.0
+        component_issue_cycles[comp] = component_issue_cycles.get(comp, 0.0) + (
+            issue_cycles * float(op.loop_multiplier)
+        )
+        needs_issue_fallback = (
+            comp == Component.SCALAR
+            or (
+                comp in (Component.MTE_GM, Component.MTE_L1, Component.MTE_UB)
+                and op.op_name in {"load", "store", "copy", "fixpipe"}
+            )
+        )
+        if semantic_work <= 0 and op.duration_cycles > 0 and needs_issue_fallback:
+            component_has_zero_work_issue[comp] = True
 
         if op.op_name == "pipe_barrier":
             barrier_cycles = (
@@ -309,6 +334,8 @@ def compute_component_floor(
             # Vector fallback rate is also FLOP/us (per-op elements/us path is dead
             # until op_name is threaded through — do not enable in A.4).
             work_raw = op.flops if op.flops > 0 else op.elements
+            if comp == Component.SCALAR and work_raw <= 0 and op.duration_cycles > 0:
+                work_raw = 1
             work = float(work_raw) * float(op.loop_multiplier)
             key = (comp, prec)
             compute_work[key] = compute_work.get(key, 0.0) + work
@@ -337,8 +364,15 @@ def compute_component_floor(
                 precision_work.append((p, w))
 
         extra_us = component_extra_us.get(comp, 0.0)
+        issue_floor_us = component_issue_cycles.get(comp, 0.0) / cycles_per_us
+        has_issue_fallback = component_has_zero_work_issue.get(comp, False)
 
-        if not precision_work and comp not in mte_bytes and extra_us <= 0.0:
+        if (
+            not precision_work
+            and comp not in mte_bytes
+            and extra_us <= 0.0
+            and not has_issue_fallback
+        ):
             continue
 
         total_work = sum(w for _, w in precision_work)
@@ -348,21 +382,31 @@ def compute_component_floor(
             numerator = 0.0
             denominator = 0.0
             for prec, w in precision_work:
-                if prec is None:
-                    continue
-                dtype = _prec_to_dtype(prec)
-                p_rate = _get_cube_throughput_ops_per_us(dtype, cube)
+                p_rate = 0.0
+                if prec is not None:
+                    dtype = _prec_to_dtype(prec)
+                    p_rate = _get_cube_throughput_ops_per_us(dtype, cube)
+                if p_rate <= 0:
+                    # Unknown/unsupported precision uses the fastest calibrated
+                    # Cube rate. This is an optimistic rate and therefore keeps
+                    # the time floor conservative instead of becoming infinite.
+                    p_rate = max(cube.throughput.values(), default=0.0) * 1e6
                 if p_rate <= 0:
                     continue
                 numerator += w
                 denominator += w / p_rate
-                key = f"{comp_str}/{prec.value}"
+                prec_name = prec.value if prec is not None else "unknown"
+                key = f"{comp_str}/{prec_name}"
                 rates[key] = ComponentRate(
                     component=comp, precision=prec,
                     i_c=p_rate, o_c=w, t_c_us=w / p_rate,
                 )
             i_c = numerator / denominator if denominator > 0 else 0.0
-            t_c = total_work / i_c if i_c > 0 else float("inf")
+            t_c = (
+                total_work / i_c
+                if i_c > 0
+                else (0.0 if total_work <= 0 else float("inf"))
+            )
             t_c += extra_us
             total_ops[comp_str] = total_work
 
@@ -397,7 +441,11 @@ def compute_component_floor(
                     i_c=p_rate, o_c=w, t_c_us=w / p_rate,
                 )
             i_c = numerator / denominator if denominator > 0 else 0.0
-            t_c = total_work / i_c if i_c > 0 else float("inf")
+            t_c = (
+                total_work / i_c
+                if i_c > 0
+                else (0.0 if total_work <= 0 else float("inf"))
+            )
             t_c += extra_us
             total_ops[comp_str] = total_work
 
@@ -411,8 +459,10 @@ def compute_component_floor(
                 # Use the best-available Scalar rate (first precision with work)
                 scalar_rate = 0.0
                 for prec, w in precision_work:
-                    if prec is not None and w > 0:
-                        rate = _get_scalar_throughput_ops_per_us(prec, vector)
+                    if w > 0:
+                        rate = _get_scalar_throughput_ops_per_us(
+                            prec or Precision.FP16, vector
+                        )
                         if rate > scalar_rate:
                             scalar_rate = rate
                 i_c = scalar_rate
@@ -452,6 +502,11 @@ def compute_component_floor(
         else:
             continue
 
+        # DES duration is an issue/resource occupancy cost, not event-wait
+        # latency. A component cannot execute faster than its serialized issue
+        # work even when semantic elements/bytes are absent or incomplete.
+        if has_issue_fallback:
+            t_c = max(t_c, issue_floor_us)
         per_component_us[comp_str] = t_c
 
     # Core floor = max across components

@@ -340,6 +340,130 @@ private:
     AscendC::GlobalTensor<half> zGm;
 };
 
+class VectorUnaryKernel {
+public:
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z)
+    {
+        xGm.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(x), kVectorElements);
+        zGm.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(z), kVectorElements);
+        pipe.InitBuffer(xQueue, 1, kVectorElements * sizeof(half));
+        pipe.InitBuffer(zQueue, 1, kVectorElements * sizeof(half));
+    }
+
+    __aicore__ inline void ProcessExp()
+    {
+        AscendC::LocalTensor<half> x = xQueue.AllocTensor<half>();
+        AscendC::LocalTensor<half> z = zQueue.AllocTensor<half>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Exp(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+    __aicore__ inline void ProcessLog()
+    {
+        AscendC::LocalTensor<half> x = xQueue.AllocTensor<half>();
+        AscendC::LocalTensor<half> z = zQueue.AllocTensor<half>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Ln(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+    __aicore__ inline void ProcessSqrt()
+    {
+        AscendC::LocalTensor<half> x = xQueue.AllocTensor<half>();
+        AscendC::LocalTensor<half> z = zQueue.AllocTensor<half>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Sqrt(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+    __aicore__ inline void ProcessRsqrt()
+    {
+        AscendC::LocalTensor<half> x = xQueue.AllocTensor<half>();
+        AscendC::LocalTensor<half> z = zQueue.AllocTensor<half>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Rsqrt(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> xQueue;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> zQueue;
+    AscendC::GlobalTensor<half> xGm;
+    AscendC::GlobalTensor<half> zGm;
+};
+
+class VectorUnaryFp32Kernel {
+public:
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z)
+    {
+        xGm.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(x), kVectorElements);
+        zGm.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(z), kVectorElements);
+        pipe.InitBuffer(xQueue, 1, kVectorElements * sizeof(float));
+        pipe.InitBuffer(zQueue, 1, kVectorElements * sizeof(float));
+    }
+
+    __aicore__ inline void ProcessExp()
+    {
+        AscendC::LocalTensor<float> x = xQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> z = zQueue.AllocTensor<float>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Exp(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+    __aicore__ inline void ProcessLog()
+    {
+        AscendC::LocalTensor<float> x = xQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> z = zQueue.AllocTensor<float>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Ln(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+    __aicore__ inline void ProcessSqrt()
+    {
+        AscendC::LocalTensor<float> x = xQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> z = zQueue.AllocTensor<float>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Sqrt(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+    __aicore__ inline void ProcessRsqrt()
+    {
+        AscendC::LocalTensor<float> x = xQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> z = zQueue.AllocTensor<float>();
+        AscendC::DataCopy(x, xGm, kVectorElements);
+        for (uint32_t i = 0; i < kVectorRepeat; ++i) {
+            AscendC::Rsqrt(z, x, kVectorElements);
+        }
+        AscendC::DataCopy(zGm, z, kVectorElements);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> xQueue;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> zQueue;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> zGm;
+};
+
 class MteGmUbKernel {
 public:
     __aicore__ inline void Init(GM_ADDR src, GM_ADDR dst, uint32_t startIter, uint32_t iterCount)

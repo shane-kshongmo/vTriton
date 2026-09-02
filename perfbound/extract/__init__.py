@@ -17,6 +17,7 @@ from .hivm_extractor import (
     OpRecord,
     HandoffRecord,
     load_hivm_desgraph,
+    load_des_metadata,
     load_pipeline_depgraph,
     extract_hivm,
 )

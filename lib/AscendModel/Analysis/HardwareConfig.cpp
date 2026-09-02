@@ -955,6 +955,25 @@ bool HardwareConfig::parseJSON(const llvm::json::Value &json,
       readInt("copy", "copy");
     }
 
+    if (const auto *dtypeVecOps = calibration->getObject(
+            "vector_op_cycles_per_vec_instruction_by_dtype")) {
+      auto readDtypeCycles = [&](llvm::StringRef key,
+                                 llvm::StringRef opName) {
+        const auto *byDtype = dtypeVecOps->getObject(key);
+        if (!byDtype)
+          return;
+        for (const auto &entry : *byDtype) {
+          if (auto cycles = entry.second.getAsNumber())
+            vectorOpCyclesPerInstructionByDType[
+                (opName + "|" + entry.first.str()).str()] = *cycles;
+        }
+      };
+      readDtypeCycles("exp", "vexp");
+      readDtypeCycles("log", "vlog");
+      readDtypeCycles("sqrt", "vsqrt");
+      readDtypeCycles("rsqrt", "vrsqrt");
+    }
+
     if (const auto *syncOps = calibration->getObject("sync_op_cycles")) {
       for (const auto &kv : *syncOps) {
         if (auto v = kv.second.getAsInteger())
@@ -1330,6 +1349,21 @@ int HardwareConfig::getVectorOpCyclesPerInstruction(
   return 1;     // non-vector, don't guess
 }
 
+std::optional<double>
+HardwareConfig::lookupVectorOpCyclesPerInstructionByDType(
+    llvm::StringRef opName, llvm::StringRef elemType) const {
+  llvm::StringRef dtype = elemType;
+  if (elemType == "f16" || elemType == "bf16")
+    dtype = "fp16";
+  else if (elemType == "f32")
+    dtype = "fp32";
+  std::string key = (opName + "|" + dtype).str();
+  auto it = vectorOpCyclesPerInstructionByDType.find(key);
+  if (it == vectorOpCyclesPerInstructionByDType.end())
+    return std::nullopt;
+  return it->second;
+}
+
 double HardwareConfig::getCostModelParam(llvm::StringRef name,
                                          double defaultValue) const {
   auto it = costModelParams.find(name);
@@ -1365,6 +1399,7 @@ HardwareConfig::lookupOpcodeCycleCost(llvm::StringRef pipeName,
   if (isSyncOpcode(opName)) {
     if (const OpcodeCycleCost *cost = findCost("PIPE_S", opName))
       return *cost;
+    return std::nullopt;
   }
 
   if (pipeName == "PIPE_ALL" || pipeName == "PIPE_UNKNOWN") {

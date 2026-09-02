@@ -100,6 +100,8 @@ class BoundResult:
 
     binding_tier: BindingTier
     binding_component: Optional[Component] = None
+    t_body_bound_us: Optional[float] = None
+    t_launch_overhead_us: float = 0.0
 
     attribution: Attribution = field(default_factory=Attribution)
 
@@ -116,10 +118,12 @@ def combine(
     kernel_name: str = "unknown",
     extract: Optional[HIVMExtract] = None,
     calibration: Optional[CalibrationDB | dict] = None,
+    launch_overhead_us: float = 0.0,
 ) -> BoundResult:
     """Combine Tier 1 + Tier 2 + serialization into a single conservative bound.
 
-    T_bound = max(T_grid_floor, T_core_floor + T_serial_irreducible)
+    T_bound = T_launch + max(T_grid_floor,
+                             T_core_floor + T_serial_irreducible)
 
     NOTE: T_serial attaches INSIDE the max (spec §4.1 + §A.5). The additive
     form max(grid, core) + serial is unsound (can overstate the bound). See
@@ -149,7 +153,9 @@ def combine(
     """
     # Sound composition: serialization is intra-core, attaches to Tier-2 term
     core_plus_serial_us = component.t_core_floor_us + serial.t_serial_irreducible_us
-    t_bound_us = max(grid.t_grid_floor_us, core_plus_serial_us)
+    t_body_bound_us = max(grid.t_grid_floor_us, core_plus_serial_us)
+    launch_overhead_us = max(float(launch_overhead_us), 0.0)
+    t_bound_us = launch_overhead_us + t_body_bound_us
 
     # Determine binding tier: grid binds iff grid floor ≥ core+serial floor
     if grid.t_grid_floor_us >= core_plus_serial_us:
@@ -192,6 +198,8 @@ def combine(
         t_serial_irreducible_us=serial.t_serial_irreducible_us,
         binding_tier=binding_tier,
         binding_component=binding_component,
+        t_body_bound_us=t_body_bound_us,
+        t_launch_overhead_us=launch_overhead_us,
         attribution=attribution,
     )
 
@@ -321,6 +329,7 @@ def worst_case_bound_us(
     kernel_name: str = "unknown",
     n_cores: int | None = None,
     total_programs: int = 1,
+    launch_overhead_us: float = 0.0,
 ) -> Optional[float]:
     """Diagnostic-only companion bound using each unresolved loop's sound
     structural upper-bound trip-count estimate in place of the primary
@@ -397,6 +406,7 @@ def worst_case_bound_us(
     result = combine(
         pieces.grid, pieces.component, pieces.serial,
         kernel_name=kernel_name, extract=worst_extract, calibration=calib_db,
+        launch_overhead_us=launch_overhead_us,
     )
     return result.t_bound_us
 

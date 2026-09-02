@@ -41,6 +41,85 @@ def filter_lines(text):
     return out
 
 
+def _function_symbol(line):
+    stripped = line.lstrip()
+    prefix = 'func.func @'
+    if not stripped.startswith(prefix):
+        return None
+    start = len(prefix)
+    end = stripped.find('(', start)
+    if end == -1:
+        return None
+    return stripped[start:end]
+
+
+def _brace_delta(line):
+    """Count structural braces while ignoring braces inside string literals."""
+    delta = 0
+    in_string = False
+    escaped = False
+    for ch in line:
+        if escaped:
+            escaped = False
+            continue
+        if ch == '\\' and in_string:
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            delta += 1
+        elif ch == '}':
+            delta -= 1
+    return delta
+
+
+def extract_unique_function_blocks(text):
+    """Extract one complete top-level block per repeated ``func.func`` symbol.
+
+    BiShengIR failure output can concatenate the same AIC/AIV graph-sync dump
+    several times and interleave generic-form helper IR.  Returning ``None``
+    when symbols are already unique preserves the normal cleaner path.
+    """
+    raw_lines = text.splitlines(True)
+    blocks = []
+    symbols = []
+    i = 0
+    while i < len(raw_lines):
+        symbol = _function_symbol(raw_lines[i])
+        if symbol is None:
+            i += 1
+            continue
+
+        start = i
+        depth = 0
+        saw_body = False
+        while i < len(raw_lines):
+            depth += _brace_delta(raw_lines[i])
+            if depth > 0:
+                saw_body = True
+            i += 1
+            if saw_body and depth == 0:
+                break
+        blocks.append((symbol, raw_lines[start:i]))
+        symbols.append(symbol)
+
+    if len(symbols) == len(set(symbols)):
+        return None
+
+    unique_lines = []
+    seen = set()
+    for symbol, block in blocks:
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        unique_lines.extend(block)
+    return unique_lines
+
+
 def parse_collapse_shape(line):
     """Parse a ``memref.collapse_shape`` line into its structural parts.
 
@@ -191,7 +270,12 @@ def main(argv):
     with open(src) as f:
         text = f.read()
 
-    lines = filter_lines(text)
+    unique_functions = extract_unique_function_blocks(text)
+    lines = (
+        filter_lines(''.join(unique_functions))
+        if unique_functions is not None
+        else filter_lines(text)
+    )
     fixes = fix_strides(lines)
 
     with open(dst, 'w') as f:

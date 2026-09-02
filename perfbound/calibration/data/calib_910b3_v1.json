@@ -54,7 +54,7 @@
       "1024": 0.2411,
       "2048": 0.3895,
       "4096": 0.5834,
-      "8192": 0.7610,
+      "8192": 0.761,
       "16384": 0.9447,
       "32768": 0.9894,
       "65536": 1.0
@@ -129,39 +129,39 @@
     },
     "P_vector_exp_sustained": {
       "name": "P_vector_exp_sustained",
-      "value": 3.3286395599187757,
+      "value": 11.393442473889722,
       "unit": "GFLOPS",
-      "ci_95": 0.001087807467796042,
+      "ci_95": 0.013831864521490746,
       "source": "cce_microbench",
       "n_runs": 45,
-      "notes": "buffer=256, N_iter=10000, CV=0.001"
+      "notes": "buffer=256, N_iter=10000, CV=0.004"
     },
     "P_vector_log_sustained": {
       "name": "P_vector_log_sustained",
-      "value": 3.3286395599187757,
+      "value": 10.86020512112741,
       "unit": "GFLOPS",
-      "ci_95": 0.001087807467796042,
+      "ci_95": 0.012248110820429875,
       "source": "cce_microbench",
       "n_runs": 45,
-      "notes": "buffer=256, N_iter=10000, CV=0.001"
+      "notes": "buffer=256, N_iter=10000, CV=0.004"
     },
     "P_vector_sqrt_sustained": {
       "name": "P_vector_sqrt_sustained",
-      "value": 3.3286395599187757,
+      "value": 11.119787259527044,
       "unit": "GFLOPS",
-      "ci_95": 0.001087807467796042,
+      "ci_95": 0.012854814616966631,
       "source": "cce_microbench",
       "n_runs": 45,
-      "notes": "buffer=256, N_iter=10000, CV=0.001"
+      "notes": "buffer=256, N_iter=10000, CV=0.004"
     },
     "P_vector_rsqrt_sustained": {
       "name": "P_vector_rsqrt_sustained",
-      "value": 3.3286395599187757,
+      "value": 16.7816605885515,
       "unit": "GFLOPS",
-      "ci_95": 0.001087807467796042,
+      "ci_95": 0.03140800406914747,
       "source": "cce_microbench",
       "n_runs": 45,
-      "notes": "buffer=256, N_iter=10000, CV=0.001"
+      "notes": "buffer=256, N_iter=10000, CV=0.006"
     },
     "BW_gm_to_ub_sustained": {
       "name": "BW_gm_to_ub_sustained",
@@ -231,6 +231,42 @@
       "source": "cce_microbench",
       "n_runs": 30,
       "notes": "dependent scalar FMA chain, N_iter=1000000, flops_per_iter=2, profiler_metric=aiv_scalar_time, warmup_samples=15, steady_samples=30, selection=chronological, CV=0.000089"
+    },
+    "P_vector_exp_fp32_sustained": {
+      "name": "P_vector_exp_fp32_sustained",
+      "value": 11.397696785212467,
+      "unit": "GFLOPS",
+      "ci_95": 0.01363840295855349,
+      "source": "cce_microbench",
+      "n_runs": 45,
+      "notes": "buffer=256, N_iter=10000, CV=0.004"
+    },
+    "P_vector_log_fp32_sustained": {
+      "name": "P_vector_log_fp32_sustained",
+      "value": 10.856724622953056,
+      "unit": "GFLOPS",
+      "ci_95": 0.012336619911716414,
+      "source": "cce_microbench",
+      "n_runs": 45,
+      "notes": "buffer=256, N_iter=10000, CV=0.004"
+    },
+    "P_vector_sqrt_fp32_sustained": {
+      "name": "P_vector_sqrt_fp32_sustained",
+      "value": 11.12079181054977,
+      "unit": "GFLOPS",
+      "ci_95": 0.012888408153033049,
+      "source": "cce_microbench",
+      "n_runs": 45,
+      "notes": "buffer=256, N_iter=10000, CV=0.004"
+    },
+    "P_vector_rsqrt_fp32_sustained": {
+      "name": "P_vector_rsqrt_fp32_sustained",
+      "value": 15.645268774555234,
+      "unit": "GFLOPS",
+      "ci_95": 0.02775608465371974,
+      "source": "cce_microbench",
+      "n_runs": 45,
+      "notes": "buffer=256, N_iter=10000, CV=0.006"
     }
   },
   "startup_latency": {},
