@@ -144,63 +144,34 @@ class TestTwoLimitCompilerHeadroom:
         )
 
     def test_compiler_headroom_is_non_negative(self):
-        """compiler_headroom = T_bound_DSL - T_bound_HIVM >= 0."""
+        """Legacy coverage cannot support compiler-headroom claims."""
         report = self._report()
-        assert report.compiler_headroom_us is not None
-        assert report.compiler_headroom_us >= 0, (
-            f"compiler_headroom must be >= 0, got {report.compiler_headroom_us:.2f}"
-        )
+        assert report.model_coverage["status"] == "legacy_unknown"
+        assert report.compiler_headroom_us is None
 
     def test_author_headroom_is_positive(self):
-        """author_headroom = T_measured - T_bound_DSL > 0 (large gap)."""
+        """Legacy coverage cannot support author-headroom claims."""
         report = self._report()
-        assert report.author_headroom_us is not None
-        assert report.author_headroom_us > 0, (
-            "author_headroom must be positive (model soundness)"
-        )
+        assert report.author_headroom_us is None
+        assert report.headroom_status == "model_incomplete"
 
     def test_compiler_headroom_is_small(self):
-        """Compiler headroom is small: bishengir's lowering is near-optimal.
-
-        For chunk_kda, the compiler headroom (Gap-1/Gap-3 only) is < 0.1%
-        of T_measured. This means the compiler cannot meaningfully improve
-        the bound — the dominant gap is author headroom (Triton-level
-        rewrite opportunity), not compiler-level suboptimality.
-        """
+        """Incomplete inputs suppress numeric headroom instead of guessing."""
         report = self._report()
-        headroom_pct = report.compiler_headroom_us / report.t_measured_us * 100
-        assert headroom_pct < 1.0, (
-            f"compiler headroom should be < 1% of T_measured, got {headroom_pct:.2f}%"
-        )
+        assert report.compiler_headroom_us is None
+        assert report.recoverable_headroom_estimate_us is None
 
     def test_dominant_gap_is_author_headroom(self):
-        """The dominant gap (T_measured - T_bound_DSL) is author headroom.
-
-        Validates the model's key finding: for chunk_kda, the compiler is
-        near-optimal and the performance opportunity is at the DSL/kernel level.
-        """
+        """No dominant-gap claim is made for legacy coverage."""
         report = self._report()
-        total_gap = report.t_measured_us - report.t_bound_hivm_us
-        compiler = report.compiler_headroom_us
-        author = report.author_headroom_us
-        assert author / total_gap > 0.99, (
-            f"Author headroom should dominate (>99% of total gap), "
-            f"got {author/total_gap*100:.1f}%"
-        )
+        assert report.author_headroom_us is None
+        assert "coverage incomplete" in report.recommended_action.lower()
 
     def test_gap_interpretation_is_documented(self):
-        """The result uses Gap-1/Gap-3 only (resolved decision).
-
-        The spec author resolved the gap interpretation: T_bound_HIVM relaxes
-        only Gap-1 (placement) and Gap-3 (avoidable serialization). Gap-2
-        (coalescing) and Gap-4 (intra-unit exec) remain as hardware limits.
-        """
+        """Coverage status explains why gap interpretation is unavailable."""
         report = self._report()
-        # Gap-1/Gap-3 relaxation should only produce a small headroom
-        assert report.compiler_headroom_us < 100, (
-            "Gap-1/3-only relaxation should produce < 100µs headroom "
-            f"(got {report.compiler_headroom_us:.2f}µs)"
-        )
+        assert report.model_coverage["status"] == "legacy_unknown"
+        assert "semantic work" in report.headroom_method.lower()
 
     def test_binding_is_component_tier(self):
         """chunk_kda binds at Tier 2 (component level), not grid level."""
@@ -210,16 +181,10 @@ class TestTwoLimitCompilerHeadroom:
         )
 
     def test_attribution_gap4_is_largest(self):
-        """Gap-4 (intra-unit exec) is the largest attributed gap."""
+        """Scalar issue work, not an unverified gap, binds the legacy graph."""
         report = self._report()
-        attr = report.attribution
-        gap4 = attr.get("gap4_intra_unit_exec", 0)
-        assert gap4 > 0, "Gap-4 must be non-zero"
-        for gap_name, gap_val in attr.items():
-            if gap_name != "gap4_intra_unit_exec":
-                assert gap4 >= gap_val, (
-                    f"Gap-4 ({gap4:.4f}) should be >= {gap_name} ({gap_val:.4f})"
-                )
+        assert report.binding_component == "scalar"
+        assert report.headroom_status == "model_incomplete"
 
 
 # ===========================================================================

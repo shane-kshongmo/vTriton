@@ -11,6 +11,7 @@ from perfbound.calibration.scripts.fit_constants import (
     extract_scalar_constant,
     extract_hbm_allcore_bandwidth,
     extract_l0c_to_gm_bandwidth,
+    extract_vector_constant,
     read_msprof_csv,
     write_bandwidth_csv,
 )
@@ -96,7 +97,17 @@ def test_extract_all_constants_from_synthetic_measured_csvs(tmp_path):
 
     for op in ["add", "mul", "max", "min"]:
         _write_rows(tmp_path / f"vector_peak_elemwise_{op}.csv", f"vector_{op}", _vector_duration_for(640.0))
-    _write_rows(tmp_path / "vector_peak_transcendental.csv", "vector", _vector_duration_for(160.0))
+    for op in ["exp", "log", "sqrt", "rsqrt"]:
+        _write_rows(
+            tmp_path / f"vector_peak_transcendental_{op}.csv",
+            f"vector_{op}",
+            _vector_duration_for(160.0),
+        )
+        _write_rows(
+            tmp_path / f"vector_peak_transcendental_{op}_fp32.csv",
+            f"vector_{op}_fp32",
+            _vector_duration_for(120.0),
+        )
 
     for src, dst, gbps in [
         ("gm", "ub", 180.0),
@@ -129,6 +140,23 @@ def test_extract_all_constants_from_synthetic_measured_csvs(tmp_path):
     csv_path = tmp_path / "bandwidth_910b3.csv"
     write_bandwidth_csv(db, csv_path)
     assert "gm,ub,-1,-1,sustained,180" in csv_path.read_text()
+
+
+def test_composite_transcendental_csv_is_not_mislabeled_per_op(tmp_path):
+    composite = tmp_path / "vector_peak_transcendental.csv"
+    _write_rows(
+        composite,
+        "vector_transcendental",
+        _vector_duration_for(160.0),
+    )
+
+    with pytest.raises(ValueError, match="composite"):
+        extract_vector_constant(composite, "exp")
+
+    db = extract_all_constants(tmp_path)
+
+    for op in ["exp", "log", "sqrt", "rsqrt"]:
+        assert db.get_constant(f"P_vector_{op}_sustained") is None
 
 
 def test_read_msprof_csv_parses_task_type_and_start_time(tmp_path):

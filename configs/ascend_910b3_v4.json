@@ -263,11 +263,11 @@
                                                 }
                           },
     "calibration":  {
-                        "description":  "v4 per-opcode calibration from v3 plus remote NPU scalar_peak refinement. 2026-07-02.",
+                        "description":  "v4 per-opcode calibration from v3 plus remote NPU scalar and final_ops simulator-trace refinement.",
                         "calib_file":  "perfbound/calibration/data/calib_910b3_v4_opcode.json",
                         "bandwidth_csv":  "perfbound/calibration/data/bandwidth_910b3.csv",
                         "vec_cycle_csv":  "perfbound/calibration/data/vec_cycle_910b3_v3.csv",
-                        "notes":  "Scalar basic ALU cycles tightened to 3.0843 from remote scalar_peak.cce; vector/cube/MTE inherited from v3; AGU/misc remain estimated; sync costs consumed through model-side sync fallback.",
+                        "notes":  "Scalar basic ALU cycles use remote scalar_peak.cce; local flag and barrier issue costs use retained final_ops msprof simulator traces; vector/cube/MTE inherit v3 plus isolated transcendental calibration; AGU/misc remain estimated.",
                         "cost_model_params":  {
                                                   "tilemix_loop_control_cycles_per_segment":  2.0
                                               },
@@ -282,12 +282,10 @@
                                               },
                         "vector_op_cycles_per_vec_instruction":  {
                                                                      "simple_ops_add_sub_mul_etc":  3,
-                                                                     "exp":  83,
-                                                                     "log":  83,
-                                                                     "tanh":  83,
-                                                                     "sigmoid":  83,
-                                                                     "sqrt":  83,
-                                                                     "rsqrt":  83,
+                                                                     "exp":  21,
+                                                                     "log":  22,
+                                                                     "sqrt":  21,
+                                                                     "rsqrt":  14,
                                                                      "div":  5,
                                                                      "brc":  15,
                                                                      "cast":  10,
@@ -303,7 +301,7 @@
                                                                      "broadcast":  15,
                                                                      "arange":  10,
                                                                      "copy":  3,
-                                                                     "_canonical_source":  "perfbound/calibration/data/calib_910b3_v3_opcode.json (opcode_cycles.PIPE_V) is the single source of truth; the integer values above are rounded from it for the C++ HardwareConfig parser.",
+                                                                     "_canonical_source":  "Isolated 910B3 CCE microbenchmarks in perfbound/calibration/bench_output/vector_peak_transcendental_{exp,log,sqrt,rsqrt}{,_fp32}.csv; generic values are rounded FP16 cycles per 128 elements and dtype-specific FP32 values are below. Other opcodes remain from calib_910b3_v4_opcode.json.",
                                                                      "_measured_raw":  {
                                                                                            "vmul":  3.0,
                                                                                            "vadd":  3.5,
@@ -320,13 +318,32 @@
                                                                                            "vor":  5.4,
                                                                                            "vnot":  4.0,
                                                                                            "varange":  9.9,
-                                                                                           "vexp":  82.6,
-                                                                                           "vlog":  82.6,
-                                                                                           "vsqrt":  82.6,
-                                                                                           "vrsqrt":  82.6,
+                                                                                           "vexp":  20.783885164003153,
+                                                                                           "vlog":  21.80437637769198,
+                                                                                           "vsqrt":  21.295371437715057,
+                                                                                           "vrsqrt":  14.110641718111357,
                                                                                            "copy":  3.0
-                                                                                       }
+                                                                     }
                                                                  },
+                        "vector_op_cycles_per_vec_instruction_by_dtype":  {
+                                                                                 "exp":  {
+                                                                                              "fp16":  21,
+                                                                                              "fp32":  21
+                                                                                          },
+                                                                                 "log":  {
+                                                                                              "fp16":  22,
+                                                                                              "fp32":  22
+                                                                                          },
+                                                                                 "sqrt":  {
+                                                                                               "fp16":  21,
+                                                                                               "fp32":  21
+                                                                                           },
+                                                                                 "rsqrt":  {
+                                                                                                "fp16":  14,
+                                                                                                "fp32":  15
+                                                                                            },
+                                                                                 "_source":  "45-run isolated FP16 and FP32 910B3 CCE microbenchmarks, 2026-09-01"
+                                                                             },
                         "scalar_overhead":  {
                                                 "aiv_scalar_alu_width":  1,
                                                 "aic_scalar_alu_width":  1,
@@ -357,10 +374,10 @@
                                                        "description":  "Initial tiny-kernel calibration from problematic_configs block_dim sweep: fixed 1.0 us + 0.04 us/block. The per-block term is saturated by calibration.parallelism num_aic_cores/num_aiv_cores according to kernel mode."
                                                    },
                         "sync_op_cycles":  {
-                                               "set_flag":  100,
-                                               "wait_flag":  250,
-                                               "_note":  "Inter-pipe AIC/AIV flag-sync cost in cycles (v3 profiling estimate). Consumed by HardwareConfig::getSyncOpCycles() in HIVMAnalysis estimateDuration(); when this section is absent the model falls back to the conservative defaults set_flag=1, wait_flag=2."
+                                               "set_flag":  1,
+                                               "wait_flag":  1,
+                                               "_note":  "Local pipeline flags lower to one-cycle BAR instructions in the retained final_ops msprof op-simulator traces. Cross-core wait latency remains event-driven in DES."
                                            }
                     },
-    "_v4_note":  "v4 points to scalar/sync-refined opcode calibration. Scalar ALU cycles are updated from remote NPU scalar_peak profiling; sync op lookup is fixed in HardwareConfig so sync costs are applied independent of executing pipe."
+    "_v4_note":  "v4 combines remote scalar/vector microbenchmarks with trace-observed sync instruction issue costs. Cross-core waiting time is modeled dynamically by DES event visibility."
 }

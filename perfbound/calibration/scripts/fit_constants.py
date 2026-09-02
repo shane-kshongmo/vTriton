@@ -70,6 +70,7 @@ class MSProfRow:
     core_id: int = 0
     task_type: str = ""          # "AI_CORE", "AI_CPU", "AIV", etc.
     start_time_us: float = 0.0   # Task Start Time(us)
+    task_wait_us: float = 0.0    # Queue/dispatch wait, not kernel task duration
     fixpipe_time_us: float = 0.0
     aiv_scalar_time_us: float = 0.0
     aicore_time_us: float = 0.0   # from aicore_time(us) column (MIX tasks)
@@ -115,6 +116,11 @@ def read_msprof_csv(csv_path: Path) -> List[MSProfRow]:
                     start_time_us=float(_first_present(
                         line,
                         ["start_time(us)", "Task Start Time(us)", "StartTime(us)"],
+                        "0",
+                    )),
+                    task_wait_us=float(_first_present(
+                        line,
+                        ["Task Wait Time(us)", "task_wait_time(us)", "task_wait_us"],
                         "0",
                     )),
                     fixpipe_time_us=float(_first_present(
@@ -266,6 +272,12 @@ def extract_vector_constant(csv_path: Path, op_name: str) -> CalibrationConstant
 
     Formula: P = (buffer_elements * N_iter) / vector_time_us / 1e3  [GFLOPS]
     """
+    if (csv_path.stem == "vector_peak_transcendental" and
+            op_name.lower() in {"exp", "log", "sqrt", "rsqrt"}):
+        raise ValueError(
+            "the composite Exp+Ln+Sqrt+Rsqrt benchmark cannot identify "
+            f"P_vector_{op_name}_sustained; use the isolated per-op CSV"
+        )
     rows = read_msprof_csv(csv_path)
     op_markers = {op_name.lower(), f"vector_{op_name.lower()}", csv_path.stem.lower()}
     vec_rows = [r for r in rows if r.op_name.lower() in op_markers]
@@ -657,8 +669,6 @@ def extract_all_constants(input_dir: Path) -> CalibrationDB:
     # Transcendental ops
     for op in ["exp", "log", "sqrt", "rsqrt"]:
         csv_path = input_dir / f"vector_peak_transcendental_{op}.csv"
-        if not csv_path.exists():
-            csv_path = input_dir / "vector_peak_transcendental.csv"
         if csv_path.exists():
             try:
                 const = extract_vector_constant(csv_path, op)
@@ -666,6 +676,25 @@ def extract_all_constants(input_dir: Path) -> CalibrationDB:
                 print(f"✓ {const.name}: {const.value:.2f} ± {const.ci_95:.2f} {const.unit}")
             except Exception as e:
                 print(f"✗ vector_{op}: {e}")
+        elif (input_dir / "vector_peak_transcendental.csv").exists():
+            print(
+                f"✗ vector_{op}: isolated CSV missing; the composite "
+                "Exp+Ln+Sqrt+Rsqrt timing cannot identify a per-op rate"
+            )
+
+    for op in ["exp", "log", "sqrt", "rsqrt"]:
+        op_name = f"{op}_fp32"
+        csv_path = input_dir / f"vector_peak_transcendental_{op_name}.csv"
+        if csv_path.exists():
+            try:
+                const = extract_vector_constant(csv_path, op_name)
+                constants[const.name] = const
+                print(
+                    f"✓ {const.name}: {const.value:.2f} ± "
+                    f"{const.ci_95:.2f} {const.unit}"
+                )
+            except Exception as e:
+                print(f"✗ vector_{op_name}: {e}")
 
     # MTE bandwidth constants (P0)
     for src, dst in [("gm", "ub"), ("ub", "gm"), ("gm", "l1"), ("l1", "l0a")]:

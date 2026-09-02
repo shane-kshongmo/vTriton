@@ -19,6 +19,14 @@
 #include "aclrtlaunch_vector_peak_elemwise_min.h"
 #include "aclrtlaunch_vector_peak_elemwise_mul.h"
 #include "aclrtlaunch_vector_peak_transcendental.h"
+#include "aclrtlaunch_vector_peak_transcendental_exp.h"
+#include "aclrtlaunch_vector_peak_transcendental_exp_fp32.h"
+#include "aclrtlaunch_vector_peak_transcendental_log.h"
+#include "aclrtlaunch_vector_peak_transcendental_log_fp32.h"
+#include "aclrtlaunch_vector_peak_transcendental_rsqrt.h"
+#include "aclrtlaunch_vector_peak_transcendental_rsqrt_fp32.h"
+#include "aclrtlaunch_vector_peak_transcendental_sqrt.h"
+#include "aclrtlaunch_vector_peak_transcendental_sqrt_fp32.h"
 
 namespace {
 
@@ -87,6 +95,22 @@ bool LaunchKernel(
         ACLRT_LAUNCH_KERNEL(vector_peak_elemwise_min)(kVectorBlockDim, stream, buffers.a, buffers.b, buffers.c);
     } else if (kernel == "vector_peak_transcendental") {
         ACLRT_LAUNCH_KERNEL(vector_peak_transcendental)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_exp") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_exp)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_log") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_log)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_sqrt") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_sqrt)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_rsqrt") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_rsqrt)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_exp_fp32") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_exp_fp32)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_log_fp32") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_log_fp32)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_sqrt_fp32") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_sqrt_fp32)(kVectorBlockDim, stream, buffers.a, buffers.c);
+    } else if (kernel == "vector_peak_transcendental_rsqrt_fp32") {
+        ACLRT_LAUNCH_KERNEL(vector_peak_transcendental_rsqrt_fp32)(kVectorBlockDim, stream, buffers.a, buffers.c);
     } else if (kernel == "scalar_peak") {
         ACLRT_LAUNCH_KERNEL(scalar_peak)(kVectorBlockDim, stream, buffers.c);
     } else if (kernel == "mte_gm_to_ub") {

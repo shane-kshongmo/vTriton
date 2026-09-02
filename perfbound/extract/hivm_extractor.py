@@ -239,6 +239,25 @@ def load_loop_diagnostics(path: Path | str) -> Optional[dict]:
     return data.get("loop_diagnostics")
 
 
+def load_des_metadata(path: Path | str) -> dict:
+    """Load bound-relevant top-level DES metadata with legacy defaults."""
+    with open(path) as f:
+        data = json.load(f)
+    coverage = data.get("model_coverage")
+    if not isinstance(coverage, dict):
+        coverage = {
+            "status": "legacy_unknown",
+            "outlined_calls": 0,
+            "summarized_outlined_calls": 0,
+            "zero_byte_transfers": 0,
+            "zero_work_scalar_ops": 0,
+        }
+    latency = data.get("latency_summary")
+    if not isinstance(latency, dict):
+        latency = {}
+    return {"model_coverage": coverage, "latency_summary": latency}
+
+
 def load_pipeline_depgraph(path: Path | str) -> List[OpRecord]:
     """Load PipelineScheduler::emitDependencyGraphJSON() into OpRecord list."""
     with open(path) as f:

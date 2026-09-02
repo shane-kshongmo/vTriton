@@ -48,6 +48,8 @@ class TimingResult(NamedTuple):
     t_us: float                      # median duration in microseconds
     n_invocations: int               # valid invocations used in median
     n_warmup_discarded: int          # warmup invocations discarded
+    median_task_wait_us: float = 0.0 # queue/dispatch wait, reported separately
+    metric: str = "msprof_task_duration"
 
 
 def parse_kernel_time_us(
@@ -65,7 +67,7 @@ def parse_kernel_time_us(
        (exact normalized match, not unrestricted substring).
     4. Raise ValueError if no rows remain.
     5. Sort by start_time_us. Group overlapping or near-overlapping rows into
-       invocations. Wall-clock latency per invocation = max duration_us across
+       invocations. Task duration per invocation = max duration_us across
        concurrent rows for that invocation (parallel device tasks should not
        be summed).
     6. Discard the first n_warmup invocations explicitly.
@@ -158,9 +160,11 @@ def parse_kernel_time_us(
 
     # Compute wall-clock latency per invocation (max duration across concurrent rows)
     per_invocation_durations = []
+    per_invocation_waits = []
     for inv in invocations:
         max_duration = max(r.duration_us for r in inv)
         per_invocation_durations.append(max_duration)
+        per_invocation_waits.append(max(r.task_wait_us for r in inv))
 
     # Return median
     t_us = statistics.median(per_invocation_durations)
@@ -169,6 +173,7 @@ def parse_kernel_time_us(
         t_us=t_us,
         n_invocations=len(per_invocation_durations),
         n_warmup_discarded=n_warmup_discarded,
+        median_task_wait_us=statistics.median(per_invocation_waits),
     )
 
 

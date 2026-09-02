@@ -79,6 +79,21 @@ def test_overlapping_rows_are_one_invocation(tmp_path):
     assert result.t_us == 105.0
 
 
+def test_task_wait_is_retained_but_not_added_to_task_duration(tmp_path):
+    csv_path = tmp_path / "wait.csv"
+    csv_path.write_text(
+        "Op Name,Task Type,Task Start Time(us),Task Duration(us),Task Wait Time(us)\n"
+        "kernel,AI_VECTOR_CORE,1000,12,220\n"
+        "kernel,AI_VECTOR_CORE,1400,14,210\n"
+    )
+
+    result = parse_kernel_time_us(csv_path, "kernel", n_warmup=0)
+
+    assert result.t_us == 13.0
+    assert result.median_task_wait_us == 215.0
+    assert result.metric == "msprof_task_duration"
+
+
 def test_no_rows_raises_valueerror():
     """ValueError when no matching rows."""
     with pytest.raises(ValueError, match="No AiCore rows"):

@@ -113,6 +113,243 @@ class TestTritonsimHivmCLI:
         ops = load_hivm_desgraph(out_file)
         assert len(ops) > 0, "Parsed operations must be non-empty"
 
+    def test_semantic_sidecar_adds_typed_work_and_completes_coverage(self, tmp_path):
+        """Pre-outline tensor work supplements, but does not replace, HIVM topology."""
+        semantic_file = tmp_path / "kernel.ttadapter.mlir"
+        semantic_file.write_text(
+            """
+module {
+  func.func @semantic_kernel() attributes {global_kernel = "local"} {
+    %empty = tensor.empty() : tensor<128xf32>
+    %result = math.exp %empty : tensor<128xf32>
+    return
+  }
+}
+"""
+        )
+        out_file = tmp_path / "semantic_des.json"
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(HIVM_ADD_KERNEL),
+            "--semantic-ir-file", str(semantic_file),
+            "--des-graph-file", str(out_file),
+        ]
+        if HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(HW_CONFIG)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr[:500]
+        data = json.loads(out_file.read_text())
+        coverage = data["model_coverage"]
+        assert coverage["status"] == "complete"
+        assert coverage["semantic_overlay"]["complete"] is True
+        synthetic = [
+            op for op in data["operations"]
+            if op.get("cost_source") == "ttadapter_semantic_overlay"
+        ]
+        assert any(op["name"] == "vexp" and op["elements"] == 128
+                   for op in synthetic)
+
+    def test_semantic_sidecar_rebuilds_vcall_timeline(self, tmp_path):
+        """Recovered vector work must be visible in the rescheduled trace."""
+        source = HIVM_ADD_KERNEL.read_text()
+        marker = "  hivm.hir.set_flag[<PIPE_V>, <PIPE_MTE2>, <EVENT_ID0>]\n"
+        call = (
+            "  func.call @missing_outlined_vf(%ub0) "
+            "{hivm.vector_function, no_inline} : "
+            "(memref<1024xf32, #hivm.address_space<ub>>) -> ()\n"
+        )
+        assert marker in source
+        npuir_file = tmp_path / "semantic_vcall.npuir.mlir"
+        npuir_file.write_text(source.replace(marker, call + call + marker, 1))
+
+        semantic_file = tmp_path / "semantic_vcall.ttadapter.mlir"
+        semantic_file.write_text(
+            """
+module {
+  func.func @semantic_kernel() attributes {global_kernel = "local"} {
+    %empty = tensor.empty() : tensor<128xf32>
+    %result = math.rsqrt %empty : tensor<128xf32>
+    return
+  }
+}
+"""
+        )
+        out_file = tmp_path / "semantic_vcall_des.json"
+        trace_file = tmp_path / "semantic_vcall_trace.json"
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(npuir_file),
+            "--semantic-ir-file", str(semantic_file),
+            "--scheduler", "des",
+            "--des-graph-file", str(out_file),
+            "--perfetto-trace-file", str(trace_file),
+        ]
+        if HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(HW_CONFIG)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr[:500]
+
+        data = json.loads(out_file.read_text())
+        calls = [op for op in data["operations"] if op["name"] == "vcall"]
+        assert len(calls) == 2
+        assert all(call["elements"] == 0 for call in calls)
+        assert all(call["duration"] > 0 for call in calls)
+        if HW_CONFIG.exists():
+            assert sum(call["duration"] for call in calls) == 15
+        assert all(call["end_cycle"] > call["start_cycle"] for call in calls)
+        assert {
+            call["cost_source"] for call in calls
+        } == {"ttadapter_semantic_projection"}
+
+        trace = json.loads(trace_file.read_text())
+        assert trace["metadata"] == {
+            "timing_coverage": "complete",
+            "semantic_placement": "weighted_vcall_heuristic",
+            "unscheduled_semantic_ops": 0,
+            "unplaced_semantic_vector_cycles": 0,
+        }
+        trace_calls = [
+            event for event in trace["traceEvents"]
+            if event.get("ph") == "X" and event.get("name") == "vcall"
+        ]
+        assert len(trace_calls) == 2
+        assert all(call["dur"] > 0 for call in trace_calls)
+        assert sum(call["args"]["cycles"] for call in trace_calls) == sum(
+            call["duration"] for call in calls
+        )
+        assert not any(
+            event.get("ph") == "X" and
+            event.get("args", {}).get("cost_source") ==
+            "ttadapter_semantic_overlay"
+            for event in trace["traceEvents"]
+        )
+
+    def test_static_semantic_projection_does_not_round_above_calibration(
+        self, tmp_path
+    ):
+        source = HIVM_ADD_KERNEL.read_text()
+        marker = "  hivm.hir.set_flag[<PIPE_V>, <PIPE_MTE2>, <EVENT_ID0>]\n"
+        looped_call = (
+            "  %c1 = arith.constant 1 : index\n"
+            "  %c4 = arith.constant 4 : index\n"
+            "  scf.for %i = %c0 to %c4 step %c1 {\n"
+            "    func.call @missing_outlined_vf(%ub0) "
+            "{hivm.vector_function, no_inline} : "
+            "(memref<1024xf32, #hivm.address_space<ub>>) -> ()\n"
+            "  }\n"
+        )
+        npuir_file = tmp_path / "static_semantic_vcall.npuir.mlir"
+        npuir_file.write_text(source.replace(marker, looped_call + marker, 1))
+        semantic_file = tmp_path / "static_semantic_vcall.ttadapter.mlir"
+        semantic_file.write_text(
+            """
+module {
+  func.func @semantic_kernel() attributes {global_kernel = "local"} {
+    %empty = tensor.empty() : tensor<128xf32>
+    %result = math.rsqrt %empty : tensor<128xf32>
+    return
+  }
+}
+"""
+        )
+        out_file = tmp_path / "static_semantic_vcall_des.json"
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(npuir_file),
+            "--semantic-ir-file", str(semantic_file),
+            "--scheduler", "static",
+            "--des-graph-file", str(out_file),
+        ]
+        if HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(HW_CONFIG)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr[:500]
+        data = json.loads(out_file.read_text())
+        calls = [
+            op for op in data["operations"]
+            if op["name"] == "vcall"
+        ]
+        assert len(calls) == 1
+        assert calls[0]["loop_multiplier"] == 4
+        assert 0 < calls[0]["duration"] * 4 <= 15
+        assert data["model_coverage"]["trace_timing_status"] == "partial"
+        assert data["model_coverage"]["unplaced_semantic_vector_cycles"] == 3
+
+    def test_unresolved_semantic_loop_keeps_coverage_partial(self, tmp_path):
+        """A sidecar cannot authorize headroom when its own trip count is unknown."""
+        semantic_file = tmp_path / "dynamic.ttadapter.mlir"
+        semantic_file.write_text(
+            """
+module {
+  func.func @semantic_kernel(%upper: index) attributes {global_kernel = "local"} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    scf.for %i = %c0 to %upper step %c1 {
+      %empty = tensor.empty() : tensor<128xf32>
+      %result = math.exp %empty : tensor<128xf32>
+    }
+    return
+  }
+}
+"""
+        )
+        out_file = tmp_path / "dynamic_semantic_des.json"
+        result = subprocess.run(
+            [
+                str(TRITONSIM_HIVM),
+                "--npuir-file", str(HIVM_ADD_KERNEL),
+                "--semantic-ir-file", str(semantic_file),
+                "--des-graph-file", str(out_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr[:500]
+        coverage = json.loads(out_file.read_text())["model_coverage"]
+        assert coverage["status"] == "conservative_partial"
+        assert coverage["trace_timing_status"] == "partial"
+        assert coverage["semantic_overlay"]["unresolved_loops"] == 1
+
+    def test_unresolved_but_model_equivalent_branch_is_complete(self, tmp_path):
+        """A predicate guarding only fusible fill semantics does not lose work."""
+        semantic_file = tmp_path / "equivalent_branch.ttadapter.mlir"
+        semantic_file.write_text(
+            """
+module {
+  func.func @semantic_kernel(%flag: i1) attributes {global_kernel = "local"} {
+    %zero = arith.constant 0.0 : f32
+    %empty = tensor.empty() : tensor<128xf32>
+    scf.if %flag {
+      %filled = linalg.fill ins(%zero : f32) outs(%empty : tensor<128xf32>) -> tensor<128xf32>
+    }
+    %result = math.exp %empty : tensor<128xf32>
+    return
+  }
+}
+"""
+        )
+        out_file = tmp_path / "equivalent_branch_des.json"
+        result = subprocess.run(
+            [
+                str(TRITONSIM_HIVM),
+                "--npuir-file", str(HIVM_ADD_KERNEL),
+                "--semantic-ir-file", str(semantic_file),
+                "--des-graph-file", str(out_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr[:500]
+        coverage = json.loads(out_file.read_text())["model_coverage"]
+        assert coverage["status"] == "complete"
+        assert coverage["semantic_overlay"]["model_equivalent_branches"] == 1
+        assert coverage["semantic_overlay"]["unresolved_branches"] == 0
+
     def test_non_scheduling_eviction_policy_attr_is_ignored(self, tmp_path):
         """NPUIR dump-only load attrs should not block DES modeling."""
         source = HIVM_ADD_KERNEL.read_text()
@@ -230,6 +467,160 @@ class TestTritonsimHivmCLI:
         assert len(vadds) == 4, "DES should replay the four static loop iterations"
         assert data.get("loop_diagnostics", {}).get("resolved", 0) >= 1
         assert "Loops:" in result.stdout
+
+    def test_unsigned_min_loop_bound_resolves(self, tmp_path):
+        """Unsigned min bounds emitted by autoblockify remain concrete."""
+        source = HIVM_ADD_KERNEL.read_text()
+        source = source.replace(
+            "  %c0 = arith.constant 0 : index\n",
+            (
+                "  %c0 = arith.constant 0 : index\n"
+                "  %c1 = arith.constant 1 : index\n"
+                "  %c2 = arith.constant 2 : index\n"
+                "  %c4 = arith.constant 4 : index\n"
+                "  %upper = arith.minui %c4, %c2 : index\n"
+            ),
+            1,
+        )
+        loop_start = (
+            "  hivm.hir.vadd ins(%ub0, %ub1 : "
+            "memref<1024xf32, #hivm.address_space<ub>>,"
+        )
+        source = source.replace(
+            loop_start,
+            "  scf.for %i = %c0 to %upper step %c1 {\n" + loop_start,
+            1,
+        )
+        loop_end = (
+            "      outs(%ub2 : memref<1024xf32, #hivm.address_space<ub>>)\n"
+        )
+        source = source.replace(loop_end, loop_end + "  }\n", 1)
+
+        npuir_file = tmp_path / "hivm_add_unsigned_min_loop.npuir.mlir"
+        npuir_file.write_text(source)
+        out_file = tmp_path / "hivm_add_unsigned_min_loop_des.json"
+        result = subprocess.run(
+            [
+                str(TRITONSIM_HIVM),
+                "--npuir-file", str(npuir_file),
+                "--scheduler", "des",
+                "--des-graph-file", str(out_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr[:500]
+
+        diagnostics = json.loads(out_file.read_text())["loop_diagnostics"]
+        assert diagnostics["total"] == 1
+        assert diagnostics["unresolved"] == 0
+        assert diagnostics["loops"][0]["trip_count"] == 2
+
+    def test_captured_bindings_use_user_argument_indices(self, tmp_path):
+        """Triton-captured argN values skip hidden HACC launch arguments."""
+        source = """\
+func.func @binding_kernel(
+    %arg0: i64 {hacc.arg_type = #hacc.arg_type<ffts_base_address>},
+    %arg1: memref<?xi8, #hivm.address_space<gm>> {hacc.arg_type = #hacc.arg_type<sync_block_lock>},
+    %arg2: memref<?xi8, #hivm.address_space<gm>> {hacc.arg_type = #hacc.arg_type<workspace>},
+    %arg3: memref<?xf16, #hivm.address_space<gm>>,
+    %arg4: memref<?xf16, #hivm.address_space<gm>>,
+    %arg5: f32,
+    %arg6: memref<?xi64, #hivm.address_space<gm>>,
+    %arg7: memref<?xi32, #hivm.address_space<gm>>,
+    %arg8: i32,
+    %arg9: i32,
+    %arg10: i32,
+    %arg11: i32) attributes {hacc.entry} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %0 = arith.muli %arg9, %arg10 : i32
+  %1 = arith.muli %0, %arg11 : i32
+  scf.for %i = %c0 to %1 step %c1 : i32 {
+    hivm.hir.pipe_barrier[<PIPE_ALL>]
+  }
+  return
+}
+"""
+        npuir_file = tmp_path / "captured_binding_indices.npuir.mlir"
+        npuir_file.write_text(source)
+        out_file = tmp_path / "captured_binding_indices_des.json"
+        result = subprocess.run(
+            [
+                str(TRITONSIM_HIVM),
+                "--npuir-file", str(npuir_file),
+                "--scheduler", "des",
+                "--des-graph-file", str(out_file),
+                "--arg-bindings", "arg5=16,arg6=1,arg7=64,arg8=1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr[:500]
+
+        diagnostics = json.loads(out_file.read_text())["loop_diagnostics"]
+        assert diagnostics["total"] == 1
+        assert diagnostics["unresolved"] == 0
+        assert diagnostics["loops"][0]["trip_count"] == 64
+
+        actual_out_file = tmp_path / "actual_binding_indices_des.json"
+        actual_result = subprocess.run(
+            [
+                str(TRITONSIM_HIVM),
+                "--npuir-file", str(npuir_file),
+                "--scheduler", "des",
+                "--des-graph-file", str(actual_out_file),
+                "--arg-bindings", "arg9=1,arg10=64,arg11=1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert actual_result.returncode == 0, actual_result.stderr[:500]
+        actual_diagnostics = json.loads(
+            actual_out_file.read_text()
+        )["loop_diagnostics"]
+        assert actual_diagnostics["unresolved"] == 0
+        assert actual_diagnostics["loops"][0]["trip_count"] == 64
+
+    def test_outlined_vector_call_emits_conservative_work_summary(self, tmp_path):
+        source = HIVM_ADD_KERNEL.read_text()
+        marker = "  hivm.hir.set_flag[<PIPE_V>, <PIPE_MTE2>, <EVENT_ID0>]\n"
+        call = (
+            "  func.call @missing_outlined_vf(%ub0) "
+            "{hivm.vector_function, no_inline} : "
+            "(memref<1024xf32, #hivm.address_space<ub>>) -> ()\n"
+        )
+        assert marker in source
+        npuir_file = tmp_path / "outlined_call.npuir.mlir"
+        npuir_file.write_text(source.replace(marker, call + marker, 1))
+        out_file = tmp_path / "outlined_call_des.json"
+
+        result = subprocess.run(
+            [
+                str(TRITONSIM_HIVM),
+                "--npuir-file", str(npuir_file),
+                "--scheduler", "des",
+                "--des-graph-file", str(out_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr[:500]
+
+        data = json.loads(out_file.read_text())
+        calls = [op for op in data["operations"] if op["name"] == "vcall"]
+        assert len(calls) == 1
+        assert calls[0]["pipe"] == "PIPE_V"
+        assert calls[0]["elements"] == 1024
+        assert calls[0]["duration"] > 0
+        assert data["model_coverage"]["outlined_calls"] == 1
+        assert data["model_coverage"]["summarized_outlined_calls"] == 1
+        assert data["model_coverage"]["status"] == "conservative_partial"
+        assert data["model_coverage"]["trace_timing_status"] == "partial"
 
     def test_unresolvable_loop_gets_sound_upper_bound_estimate(self, tmp_path):
         """A program-id/data-dependent scf.for bound (unresolvable to an
@@ -393,7 +784,11 @@ class TestTritonsimHivmCLI:
         for op in sync_ops:
             sync_durations.setdefault(op["name"], set()).add(op["duration"])
             assert "event_wait_cycles" in op
-        assert 100 in {op["dependency_latency"] for op in sync_ops if op["name"] == "set_flag"}
+        assert 1 in {
+            op["dependency_latency"]
+            for op in sync_ops
+            if op["name"] == "set_flag"
+        }
         assert all(
             op["issue_duration"] <= 32
             for op in sync_ops

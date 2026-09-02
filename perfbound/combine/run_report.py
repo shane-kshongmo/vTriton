@@ -7,8 +7,8 @@
 #     — consumes an existing des.json via extract_hivm
 #
 # The two configs are separate:
-#   hardware_config (configs/ascend_910b3_v4.json) → C++ tool stage
-#   calibration DB (load_default_calib_db)    → Python model stage
+#   hardware_config (configs/ascend_910b3_v4.json) → C++ tool stage + core counts
+#   calibration DB (load_default_calib_db)          → Python model rates
 #
 # CLI:
 #   python -m perfbound.combine.run_report --desgraph /tmp/kda_des.json --grid 128,32
@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import sys
@@ -25,14 +26,19 @@ from pathlib import Path
 from typing import Optional
 
 from ..analyze.des_event_wait_analyzer import analyze_des_event_wait
-from ..extract.hivm_extractor import extract_hivm, load_loop_diagnostics, HIVMExtract
+from ..extract.hivm_extractor import (
+    extract_hivm,
+    load_des_metadata,
+    load_loop_diagnostics,
+    HIVMExtract,
+)
 from ..extract.dsl_extractor import GridInfo
 from ..calibration.calib_loader import (
     DEFAULT_CALIB_PATH,
     load_calibration,
     load_default_calib_db,
 )
-from ..calibration.constants import CalibrationDB
+from ..calibration.constants import CalibrationDB, DType, VecOpType
 from ..model.bounds import compute_bounds
 from .bound_combiner import combine, worst_case_bound_us, BoundResult
 from .report import KernelReport
@@ -67,6 +73,97 @@ def _build_grid_info(
     )
 
 
+def _calib_with_hardware_core_config(
+    calib_db: CalibrationDB,
+    hardware_config: str | Path | None,
+) -> CalibrationDB:
+    """Overlay hardware topology and compatible model constants from config."""
+    if hardware_config is None:
+        return calib_db
+
+    with open(hardware_config) as f:
+        cfg = json.load(f)
+
+    parallelism = cfg.get("calibration", {}).get("parallelism", {})
+    aic_cores = parallelism.get("num_aic_cores")
+    aiv_cores = parallelism.get("num_aiv_cores")
+
+    # Accept already-normalized calibration-style JSON too; this keeps the
+    # option usable with either the hardware config or a serialized model DB.
+    core = cfg.get("core", {})
+    aic_cores = aic_cores if aic_cores is not None else core.get("aic_core_num")
+    aiv_cores = aiv_cores if aiv_cores is not None else core.get("aiv_core_num")
+
+    configured = copy.deepcopy(calib_db)
+    if aic_cores is not None:
+        configured.core.aic_core_num = int(aic_cores)
+    if aiv_cores is not None:
+        configured.core.aiv_core_num = int(aiv_cores)
+
+    startup = cfg.get("calibration", {}).get("startup_latencies", {})
+    startup_map = {
+        "vector_startup_cycles": "vector",
+        "mte2_startup_cycles": "mte2",
+        "mte3_startup_cycles": "mte3",
+        "cube_startup_cycles": "cube",
+        "fixpipe_startup_cycles": "fixpipe",
+        "mte1_startup_cycles": "mte1",
+    }
+    for source_name, model_name in startup_map.items():
+        if source_name in startup:
+            configured.startup_latency[model_name] = float(startup[source_name])
+
+    vector_cycles = cfg.get("calibration", {}).get(
+        "vector_op_cycles_per_vec_instruction", {}
+    )
+    cycle_map = {
+        "simple_ops_add_sub_mul_etc": (
+            VecOpType.ADD, VecOpType.SUB, VecOpType.MUL, VecOpType.MAX,
+            VecOpType.MIN, VecOpType.NEG, VecOpType.ABS, VecOpType.RELU,
+        ),
+        "exp": (VecOpType.EXP,),
+        "log": (VecOpType.LOG,),
+        "tanh": (VecOpType.TANH,),
+        "sigmoid": (VecOpType.SIGMOID,),
+        "sqrt": (VecOpType.SQRT,),
+        "rsqrt": (VecOpType.RSQRT,),
+        "div": (VecOpType.DIV,),
+        "brc": (VecOpType.BROADCAST,),
+        "broadcast": (VecOpType.BROADCAST,),
+        "cast": (VecOpType.CAST,),
+        "sel": (VecOpType.SELECT,),
+        "reduce_sum": (VecOpType.REDUCE_SUM,),
+        "reduce_max": (VecOpType.REDUCE_MAX,),
+        "reduce_min": (VecOpType.REDUCE_MIN,),
+        "reduce_prod": (VecOpType.REDUCE_PROD,),
+    }
+    for source_name, op_types in cycle_map.items():
+        cycles = vector_cycles.get(source_name)
+        if not isinstance(cycles, (int, float)):
+            continue
+        for op_type in op_types:
+            for dtype in (DType.FP16, DType.BF16, DType.FP32):
+                configured.vector.op_cycles[(op_type, dtype)] = float(cycles)
+
+    dtype_cycles = cfg.get("calibration", {}).get(
+        "vector_op_cycles_per_vec_instruction_by_dtype", {}
+    )
+    for source_name, by_dtype in dtype_cycles.items():
+        if source_name not in cycle_map or not isinstance(by_dtype, dict):
+            continue
+        for dtype_name, cycles in by_dtype.items():
+            if not isinstance(cycles, (int, float)):
+                continue
+            try:
+                dtype = DType.from_str(dtype_name)
+            except KeyError:
+                continue
+            for op_type in cycle_map[source_name]:
+                configured.vector.op_cycles[(op_type, dtype)] = float(cycles)
+
+    return configured
+
+
 def report_from_desgraph(
     des_json: str | Path,
     grid_dims: tuple[int, ...],
@@ -79,6 +176,8 @@ def report_from_desgraph(
     op_summary_csv: "str | Path | None" = None,
     op_name_filter: "str | None" = None,
     calibration_source: "str | Path | None" = None,
+    hardware_config: "str | Path | None" = None,
+    measured_metric: str = "msprof_task_duration",
 ) -> KernelReport:
     """Build a full A.5 report from an existing DES graph JSON.
 
@@ -86,7 +185,8 @@ def report_from_desgraph(
         des_json: Path to the DES graph JSON (from tritonsim-hivm --des-graph-file).
         grid_dims: Launch grid dimensions (e.g. (128, 32)).
         calib_db: Calibration DB.  Auto-loaded if None.
-        n_cores: Number of cores.
+        n_cores: Number of cores.  If None, inferred from op mix and core
+            counts in hardware_config/calib_db.
         occupancy: Grid occupancy fraction.
         load_balance: Load balance fraction.
         kernel_name: Kernel label.
@@ -99,6 +199,17 @@ def report_from_desgraph(
         calibration_source = calibration_source or DEFAULT_CALIB_PATH
     elif calibration_source is None:
         calibration_source = "provided CalibrationDB"
+    calib_db = _calib_with_hardware_core_config(calib_db, hardware_config)
+    if measured_metric not in {"msprof_task_duration", "event_elapsed"}:
+        raise ValueError(f"unsupported measured metric: {measured_metric}")
+    des_metadata = load_des_metadata(des_json)
+    latency_summary = des_metadata["latency_summary"]
+    launch_overhead_us = float(
+        latency_summary.get("kernel_launch_overhead_us", 0.0) or 0.0
+    )
+    task_measured_us = (
+        t_measured_us if measured_metric == "msprof_task_duration" else None
+    )
 
     extract = extract_hivm(des_json)
     grid_info = _build_grid_info(grid_dims, n_cores, occupancy, load_balance)
@@ -112,6 +223,7 @@ def report_from_desgraph(
     result = combine(
         pieces.grid, pieces.component, pieces.serial,
         kernel_name=kernel_name, extract=extract, calibration=calib_db,
+        launch_overhead_us=launch_overhead_us,
     )
 
     # Compute two-limit
@@ -121,13 +233,19 @@ def report_from_desgraph(
         extract=extract,
         calib_db=calib_db,
         t_bound_dsl_us=result.t_bound_us,
-        t_measured_us=t_measured_us,
+        t_measured_us=task_measured_us,
         n_cores=n_cores,
         total_programs=total_programs,
+        launch_overhead_us=launch_overhead_us,
     )
 
     report = KernelReport.from_bound(result, two_limit=two_limit)
     report.merge_calibration(calib_db, str(calibration_source))
+    report.merge_model_coverage(des_metadata["model_coverage"])
+    if task_measured_us is not None:
+        report.measurement_metric = "msprof_task_duration"
+    elif t_measured_us is not None:
+        report.merge_event_elapsed(t_measured_us, source="direct measurement")
 
     # Loop-resolution diagnostics: surface whether t_bound_us may be loose
     # due to unresolved (data-dependent) scf.for trip counts, and — when a
@@ -140,6 +258,7 @@ def report_from_desgraph(
             extract, loop_diagnostics, grid_info, calib_db,
             kernel_name=kernel_name, n_cores=n_cores,
             total_programs=total_programs,
+            launch_overhead_us=launch_overhead_us,
         )
         report.loop_resolution = {
             "total": loop_diagnostics.get("total", 0),
@@ -193,6 +312,9 @@ def report_from_npuir(
     op_name_filter: "str | None" = None,
     calibration_source: "str | Path | None" = None,
     des_json_path: "str | Path | None" = None,
+    semantic_ir_path: "str | Path | None" = None,
+    arg_bindings: str | None = None,
+    measured_metric: str = "msprof_task_duration",
 ) -> KernelReport:
     """Build a full A.5 report by first running tritonsim-hivm on an NPU IR file.
 
@@ -209,6 +331,8 @@ def report_from_npuir(
         python_path: Python interpreter for tritonsim-hivm.
         des_json_path: Where to keep the intermediate DES graph.  When None the
             graph goes to a scratch file that is removed before returning.
+        semantic_ir_path: Optional pre-outline TTAdapter MLIR sidecar.
+        arg_bindings: Dynamic integer bindings shared by HIVM and semantic IR.
 
     Returns:
         KernelReport.
@@ -235,6 +359,10 @@ def report_from_npuir(
     ]
     if hardware_config:
         cmd.extend(["--hardware-config", str(hardware_config)])
+    if semantic_ir_path:
+        cmd.extend(["--semantic-ir-file", str(semantic_ir_path)])
+    if arg_bindings:
+        cmd.extend(["--arg-bindings", arg_bindings])
     # Pass python interpreter if compiling from .py (not from existing .npuir.mlir)
     if python_path:
         cmd.extend(["--python", python_path])
@@ -254,6 +382,8 @@ def report_from_npuir(
             op_summary_csv=op_summary_csv,
             op_name_filter=op_name_filter,
             calibration_source=calibration_source,
+            hardware_config=hardware_config,
+            measured_metric=measured_metric,
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
@@ -277,8 +407,9 @@ def _cli():
 
     parser.add_argument("--grid", required=True,
                         help="Launch grid dimensions (e.g. '128,32')")
-    parser.add_argument("--cores", type=int, default=20,
-                        help="Number of cores (default: 20)")
+    parser.add_argument("--cores", type=int, default=None,
+                        help=("Number of cores override (default: auto from "
+                              "op mix and hardware config/calibration)"))
     parser.add_argument("--occupancy", type=float, default=1.0,
                         help="Grid occupancy fraction (default: 1.0)")
     parser.add_argument("--load-balance", type=float, default=1.0,
@@ -287,12 +418,26 @@ def _cli():
                         help="Kernel label")
     parser.add_argument("--hardware-config",
                         help="Path to hardware config JSON (for C++ tool)")
+    parser.add_argument(
+        "--semantic-ir",
+        help="Pre-outline TTAdapter MLIR used to recover typed semantic work",
+    )
+    parser.add_argument(
+        "--arg-bindings",
+        help="Dynamic integer bindings shared by HIVM and semantic IR",
+    )
     parser.add_argument("--tritonsim-hivm", default="tritonsim-hivm",
                         help="Path to tritonsim-hivm binary")
     parser.add_argument("--python", default=sys.executable,
                         help="Python interpreter for tritonsim-hivm")
     parser.add_argument("--measured-us", type=float, default=None,
-                        help="Measured kernel time in microseconds (from msprof)")
+                        help="Measured latency in microseconds")
+    parser.add_argument(
+        "--measured-metric",
+        choices=("msprof_task_duration", "event_elapsed"),
+        default="msprof_task_duration",
+        help="Metric represented by --measured-us",
+    )
     parser.add_argument("--measured-csv", default=None,
                         help="Path to msprof op_summary CSV (extracts timing + component match)")
     parser.add_argument("--measured-op-name", default=None,
@@ -323,6 +468,8 @@ def _cli():
             op_summary_csv=args.measured_csv,
             op_name_filter=args.measured_op_name,
             calibration_source=args.calibration,
+            hardware_config=args.hardware_config,
+            measured_metric=args.measured_metric,
         )
     else:
         report = report_from_npuir(
@@ -340,6 +487,9 @@ def _cli():
             op_summary_csv=args.measured_csv,
             op_name_filter=args.measured_op_name,
             calibration_source=args.calibration,
+            semantic_ir_path=args.semantic_ir,
+            arg_bindings=args.arg_bindings,
+            measured_metric=args.measured_metric,
         )
 
     print(report.to_text())
@@ -426,6 +576,7 @@ def _apply_csv_analysis(
         msprof_source=vr.msprof_source,
         n_invocations=vr.n_invocations,
         component_match=vr.component_match,
+        task_wait_us=vr.task_wait_us,
     )
 
     try:

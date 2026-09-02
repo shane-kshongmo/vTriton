@@ -81,9 +81,12 @@ class TestIdealizedExtract:
             OpRecord(op_id=1, op_name="matmul", component=Component.CUBE,
                      precision=Precision.FP16, pipe="Cube",
                      flops=1000, loop_multiplier=1, depends_on=[]),
+            OpRecord(op_id=2, op_name="vadd", component=Component.VECTOR,
+                     precision=Precision.FP16, pipe="Vector",
+                     elements=128, loop_multiplier=1, depends_on=[1]),
         ]
         handoffs = [
-            HandoffRecord(1, 1, Component.CUBE, Component.VECTOR, 1024),
+            HandoffRecord(1, 2, Component.CUBE, Component.VECTOR, 1024),
         ]
         extract = HIVMExtract(operations=ops, handoffs=handoffs)
         ideal = _build_idealized_extract(extract)

@@ -17,6 +17,7 @@ add_mlir_library(AscendModelAnalysis
   MLIRArithDialect
   MLIRFuncDialect
   MLIRIR
+  MLIRMathDialect
   MLIRParser
   MLIRSCFDialect
   MLIRSupport

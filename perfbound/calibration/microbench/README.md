@@ -25,7 +25,9 @@ This directory contains CCE microbenchmark kernels used to measure sustained har
 | Kernel | Purpose | Template | Expected Metric |
 |--------|---------|----------|-----------------|
 | `vector_peak_elemwise_{add,mul,max,min}.cce` | Vector elementwise throughput per op | 256 elements, 10000× repeat | P_vector[op] ≈ 18 TFLOPS FP16 |
-| `vector_peak_transcendental.cce` | Vector transcendental throughput (exp/log/sqrt/rsqrt) | 256 elements, 10000× repeat | P_vector[op] varies |
+| `vector_peak_transcendental_{exp,log,sqrt,rsqrt}.cce` | Isolated FP16 Vector transcendental throughput | 256 elements, 10000× repeat | P_vector[op] measured independently |
+| `vector_peak_transcendental_{exp,log,sqrt,rsqrt}_fp32.cce` | Isolated FP32 Vector transcendental throughput | 256 elements, 10000× repeat | P_vector[op,fp32] measured independently |
+| `vector_peak_transcendental.cce` | Composite exp→log→sqrt→rsqrt cross-check | 256 elements, 10000× repeat | Diagnostic only; never promoted to a per-op constant |
 
 ### Memory Transfer (MTE)
 
@@ -85,7 +87,7 @@ python3 scripts/cce_remote_bench.py \
   --output-dir bench_output
 ```
 
-This runs all 15 default calibration kernels with 45 raw repeats and `msprof`,
+This runs all 24 default calibration kernels with 45 raw repeats and `msprof`,
 producing one CSV per kernel plus per-K handoff CSVs in `./bench_output/`.
 Use `--msprof PATH` when multiple CANN profiler versions are installed.
 

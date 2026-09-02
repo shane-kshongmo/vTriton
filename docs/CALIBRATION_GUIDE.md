@@ -51,7 +51,8 @@
 | `microbench/vector_peak_elemwise_mul.cce` | Vector Mul | P_vector_mul_sustained | GFLOPS |
 | `microbench/vector_peak_elemwise_max.cce` | Vector Max | P_vector_max_sustained | GFLOPS |
 | `microbench/vector_peak_elemwise_min.cce` | Vector Min | P_vector_min_sustained | GFLOPS |
-| `microbench/vector_peak_transcendental.cce` | Vector 超越函数 | P_vector_*_sustained | GFLOPS |
+| `microbench/vector_peak_transcendental_{exp,log,sqrt,rsqrt}.cce` | 独立 Vector 超越函数 | P_vector_*_sustained | GFLOPS |
+| `microbench/vector_peak_transcendental.cce` | Exp→Ln→Sqrt→Rsqrt 组合交叉检查 | 仅诊断，不生成单算子常量 | GFLOPS |
 | `microbench/scalar_peak.cce` | Scalar ALU | P_scalar_add_sustained | GFLOPS |
 | `microbench/mte_gm_to_ub.cce` | GM→UB | BW_gm_to_ub_sustained | GB/s |
 | `microbench/mte_ub_to_gm.cce` | UB→GM | BW_ub_to_gm_sustained | GB/s |
@@ -259,7 +260,10 @@ pipeline_efficiency = real_overlap / model_overlap
 | `P_vector_mul_sustained` | ~14.6 GFLOPS | **不变** | 硬件上限固定 |
 | `P_vector_max_sustained` | ~16.2 GFLOPS | **不变** | 硬件上限固定 |
 | `P_vector_min_sustained` | ~16.2 GFLOPS | **不变** | 硬件上限固定 |
-| `P_vector_exp_sustained` 等 4 个超越函数 | ~3.33 GFLOPS | **不变** | 硬件上限固定 |
+| `P_vector_exp_sustained` | ~11.39 GFLOPS FP16 / ~11.40 FP32 | **不变** | 45 次独立单算子实测 |
+| `P_vector_log_sustained` | ~10.86 GFLOPS FP16 / ~10.86 FP32 | **不变** | 45 次独立单算子实测 |
+| `P_vector_sqrt_sustained` | ~11.12 GFLOPS FP16 / ~11.12 FP32 | **不变** | 45 次独立单算子实测 |
+| `P_vector_rsqrt_sustained` | ~16.78 GFLOPS FP16 / ~15.65 FP32 | **不变** | 45 次独立单算子实测 |
 | `P_scalar_add_sustained` | ~0.6 GFLOPS | **不变** | 硬件上限固定 |
 | `BW_gm_to_ub_sustained` | ~86.5 GB/s | **不变** | 硬件上限固定 |
 | `BW_ub_to_gm_sustained` | ~86.5 GB/s | **不变** | 硬件上限固定 |

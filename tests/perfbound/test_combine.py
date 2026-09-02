@@ -80,6 +80,17 @@ class TestCompositionSoundness:
         assert r.t_bound_us == pytest.approx(13.0)
         assert r.binding_tier.value == "component"
 
+    def test_launch_overhead_is_added_to_body_bound(self):
+        g = _grid(t_grid=5.0)
+        c = _comp(t_core=10.0)
+        s = _serial(t_mandatory=3.0)
+
+        result = combine(g, c, s, launch_overhead_us=2.5)
+
+        assert result.t_body_bound_us == pytest.approx(13.0)
+        assert result.t_launch_overhead_us == pytest.approx(2.5)
+        assert result.t_bound_us == pytest.approx(15.5)
+
     def test_soundness_formula_not_additive(self):
         """Verify we DON'T use the old max(a,b)+c form (which is larger)."""
         g = _grid(t_grid=10.0)
