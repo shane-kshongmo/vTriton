@@ -89,6 +89,216 @@ def test_incomplete_model_coverage_suppresses_headroom_and_recommendation():
     assert "incomplete" in report.recommended_action.lower()
 
 
+def test_modeling_output_ranks_opportunities_and_reports_sound_ceilings():
+    bound = _make_bound_result(t_bound_us=1000.0)
+    bound.attribution = Attribution(
+        gap1_wrong_unit_us=20.0,
+        gap1_frac=0.02,
+        gap2_coalescing_us=40.0,
+        gap2_frac=0.04,
+    )
+    report = KernelReport.from_bound(
+        bound,
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+            t_measured_us=5000.0,
+        ),
+    )
+    report.merge_model_coverage({
+        "status": "complete",
+        "trace_timing_status": "partial",
+        "semantic_overlay": {"applied": True, "complete": True},
+    })
+    report.calibration_p0_complete = True
+
+    output = report.to_dict()["modeling_output"]
+
+    assert output["status"] == "sound_theoretical_ceiling"
+    assert output["basis"] == [
+        "semantic_ir", "hivm_ir", "hardware_profile_values",
+        "perf_bound_theory"
+    ]
+    assert output["profile_inputs"]["task_duration_us"] == 5000.0
+    assert output["profile_inputs"]["measurement_metric"] == (
+        "msprof_task_duration"
+    )
+    assert output["simulator_trace"] == {
+        "role": "calibration_and_validation_only",
+        "used_as_kernel_model_input": False,
+    }
+    assert output["compiler_floor_shift_us"] == pytest.approx(200.0)
+    assert output["theoretical_ceilings"] == {
+        "to_realized_dsl_floor_us": 4000.0,
+        "to_idealized_hivm_floor_us": 4200.0,
+        "speedup_to_realized_dsl_floor_upper": 5.0,
+        "speedup_to_idealized_hivm_floor_upper": 6.25,
+    }
+    assert [item["name"] for item in output["opportunity_ranking"]] == [
+        "gap2_coalescing", "gap1_wrong_unit"
+    ]
+    assert "not additive" in output["opportunity_ranking_semantics"]
+    assert output["achievable_headroom"]["status"] == "not_established"
+    assert output["achievable_headroom"]["point_estimate_us"] is None
+    assert output["validity_gates"]["modeled_trace_timing_status"] == "partial"
+
+
+def test_modeling_output_suppresses_ranking_and_ceilings_when_incomplete():
+    report = KernelReport.from_bound(
+        _make_bound_result(t_bound_us=1000.0),
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+            t_measured_us=1200.0,
+        ),
+    )
+    report.merge_model_coverage({
+        "status": "conservative_partial",
+        "trace_timing_status": "partial",
+        "semantic_overlay": {"applied": True, "complete": False},
+    })
+
+    output = report.to_dict()["modeling_output"]
+
+    assert output["status"] == "model_incomplete"
+    assert output["opportunity_ranking"] == []
+    assert all(
+        value is None for value in output["theoretical_ceilings"].values()
+    )
+
+
+def test_modeling_output_requires_task_measurement_for_ceiling():
+    report = KernelReport.from_bound(
+        _make_bound_result(t_bound_us=1000.0),
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+        ),
+    )
+    report.merge_model_coverage({
+        "status": "complete",
+        "trace_timing_status": "complete",
+        "semantic_overlay": {"applied": True, "complete": True},
+    })
+    report.calibration_p0_complete = True
+
+    output = report.to_dict()["modeling_output"]
+
+    assert output["status"] == "measurement_required"
+    assert "hardware_profile_values" not in output["basis"]
+    assert output["compiler_floor_shift_us"] == pytest.approx(200.0)
+    assert all(
+        value is None for value in output["theoretical_ceilings"].values()
+    )
+
+
+def test_modeling_output_suppresses_ceiling_on_bound_violation():
+    report = KernelReport.from_bound(
+        _make_bound_result(t_bound_us=1000.0),
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+            t_measured_us=900.0,
+        ),
+    )
+    report.merge_model_coverage({
+        "status": "complete",
+        "trace_timing_status": "complete",
+        "semantic_overlay": {"applied": True, "complete": True},
+    })
+    report.calibration_p0_complete = True
+
+    output = report.to_dict()["modeling_output"]
+
+    assert output["status"] == "bound_violation"
+    assert output["validity_gates"]["bound_order_valid"] is False
+    assert output["opportunity_ranking"] == []
+    assert all(
+        value is None for value in output["theoretical_ceilings"].values()
+    )
+
+
+def test_modeling_output_is_prominent_in_text_report():
+    report = KernelReport.from_bound(
+        _make_bound_result(t_bound_us=1000.0),
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+            t_measured_us=1200.0,
+        ),
+    )
+    report.merge_model_coverage({
+        "status": "complete",
+        "trace_timing_status": "complete",
+        "semantic_overlay": {"applied": True, "complete": True},
+    })
+    report.calibration_p0_complete = True
+
+    text = report.to_text()
+
+    assert "Modeling Output" in text
+    assert "rank optimization opportunities" in text
+    assert "sound theoretical ceilings" in text
+    assert "hardware_profile_values" in text
+    assert "not a kernel model input" in text
+    assert "achievable point estimate: not established" in text
+
+
+def test_modeling_output_requires_known_complete_calibration():
+    report = KernelReport.from_bound(
+        _make_bound_result(t_bound_us=1000.0),
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+            t_measured_us=1200.0,
+        ),
+    )
+    report.merge_model_coverage({
+        "status": "complete",
+        "trace_timing_status": "complete",
+        "semantic_overlay": {"applied": True, "complete": True},
+    })
+
+    output = report.to_dict()["modeling_output"]
+
+    assert output["status"] == "calibration_unknown"
+    assert all(
+        value is None for value in output["theoretical_ceilings"].values()
+    )
+
+
+def test_modeling_output_requires_explicit_task_measurement_provenance():
+    report = KernelReport.from_bound(
+        _make_bound_result(t_bound_us=1000.0),
+        two_limit=TwoLimitResult(
+            kernel_name="test_kernel",
+            t_bound_hivm_us=800.0,
+            t_bound_dsl_us=1000.0,
+            t_measured_us=1200.0,
+        ),
+    )
+    report.merge_model_coverage({
+        "status": "complete",
+        "trace_timing_status": "complete",
+        "semantic_overlay": {"applied": True, "complete": True},
+    })
+    report.calibration_p0_complete = True
+    report.measurement_metric = None
+
+    output = report.to_dict()["modeling_output"]
+
+    assert output["status"] == "task_measurement_required"
+    assert all(
+        value is None for value in output["theoretical_ceilings"].values()
+    )
+
+
 def test_to_text_three_levels():
     """Reachability Hierarchy section present in text output."""
     br = _make_bound_result()

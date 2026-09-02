@@ -27,6 +27,23 @@ _RECOMMENDATIONS = {
     "gap4_intra_unit_exec": "Increase SIMD repeat/mask utilization",
 }
 
+_OPPORTUNITY_SCOPES = {
+    "grid": "launch_and_partitioning",
+    "gap1_wrong_unit": "compiler_or_dsl_placement",
+    "gap2_coalescing": "kernel_or_lowering_transfers",
+    "gap3_avoidable_serial": "compiler_or_kernel_overlap",
+    "gap4_intra_unit_exec": "kernel_intra_unit_utilization",
+}
+
+_MODELING_PURPOSE = (
+    "use semantic IR, HIVM IR, and hardware profiling values to rank "
+    "optimization opportunities and calculate sound theoretical ceilings"
+)
+_COUNTERFACTUAL_REQUIREMENT = (
+    "A correctness-verified counterfactual measurement is required before "
+    "claiming achievable headroom."
+)
+
 # Threshold below which all gaps are considered negligible ("at bound")
 _AT_BOUND_EPS = 1e-4
 
@@ -121,6 +138,170 @@ class KernelReport:
     # Recommendation
     recommended_action: str = "unknown"
 
+    def _build_modeling_output(self) -> dict:
+        """Build the canonical interpretation of the model's output.
+
+        Attribution ranks where to investigate. Measured-to-bound differences
+        are sound upper ceilings when coverage, calibration, and bound ordering
+        are valid. Neither is an achievable point estimate by itself.
+        """
+        coverage = self.model_coverage if isinstance(self.model_coverage, dict) else {}
+        coverage_status = coverage.get("status", "unknown")
+        trace_timing_status = coverage.get("trace_timing_status", "unknown")
+        semantic_overlay = coverage.get("semantic_overlay", {})
+        semantic_applied = (
+            isinstance(semantic_overlay, dict)
+            and bool(semantic_overlay.get("applied"))
+        )
+        basis = ["hivm_ir"]
+        if semantic_applied:
+            basis.insert(0, "semantic_ir")
+        if self.t_measured_us is not None or self.profile_diagnosis is not None:
+            basis.append("hardware_profile_values")
+        basis.append("perf_bound_theory")
+
+        bounds_available = (
+            self.t_bound_hivm_us is not None
+            and self.t_bound_dsl_us is not None
+            and self.t_bound_hivm_us > 0
+            and self.t_bound_dsl_us > 0
+        )
+        bound_order_valid: Optional[bool] = None
+        if bounds_available:
+            bound_order_valid = self.t_bound_hivm_us <= self.t_bound_dsl_us
+            if self.t_measured_us is not None:
+                bound_order_valid = (
+                    bound_order_valid
+                    and self.t_bound_dsl_us <= self.t_measured_us
+                )
+
+        calibration_valid = (
+            self.calibration_p0_complete is True
+            and not self.calibration_p0_violations
+        )
+        analytical_ready = (
+            coverage_status == "complete"
+            and bounds_available
+            and calibration_valid
+            and bound_order_valid is not False
+        )
+
+        if coverage_status != "complete":
+            status = (
+                "coverage_unknown"
+                if coverage_status == "unknown"
+                else "model_incomplete"
+            )
+        elif not bounds_available:
+            status = "bounds_unavailable"
+        elif self.calibration_p0_complete is None:
+            status = "calibration_unknown"
+        elif not calibration_valid:
+            status = "calibration_incomplete"
+        elif bound_order_valid is False:
+            status = "bound_violation"
+        elif self.t_measured_us is None:
+            status = "measurement_required"
+        elif self.measurement_metric != "msprof_task_duration":
+            status = "task_measurement_required"
+        else:
+            status = "sound_theoretical_ceiling"
+
+        opportunities = []
+        if analytical_ready:
+            ranked = sorted(
+                (
+                    (name, max(float(gap_us), 0.0))
+                    for name, gap_us in self.attribution_us.items()
+                    if float(gap_us) > _AT_BOUND_EPS
+                ),
+                key=lambda item: (-item[1], item[0]),
+            )
+            for rank, (name, gap_us) in enumerate(ranked, start=1):
+                opportunities.append({
+                    "rank": rank,
+                    "name": name,
+                    "modeled_gap_us": gap_us,
+                    "fraction_of_bound": self.attribution.get(name, 0.0),
+                    "scope": _OPPORTUNITY_SCOPES.get(name, "unknown"),
+                    "action": _RECOMMENDATIONS.get(
+                        name, "Profile to identify bottleneck"
+                    ),
+                })
+
+        compiler_floor_shift_us = None
+        if analytical_ready:
+            compiler_floor_shift_us = max(
+                self.t_bound_dsl_us - self.t_bound_hivm_us, 0.0
+            )
+
+        ceilings = {
+            "to_realized_dsl_floor_us": None,
+            "to_idealized_hivm_floor_us": None,
+            "speedup_to_realized_dsl_floor_upper": None,
+            "speedup_to_idealized_hivm_floor_upper": None,
+        }
+        if status == "sound_theoretical_ceiling":
+            ceilings = {
+                "to_realized_dsl_floor_us": max(
+                    self.t_measured_us - self.t_bound_dsl_us, 0.0
+                ),
+                "to_idealized_hivm_floor_us": max(
+                    self.t_measured_us - self.t_bound_hivm_us, 0.0
+                ),
+                "speedup_to_realized_dsl_floor_upper": (
+                    self.t_measured_us / self.t_bound_dsl_us
+                ),
+                "speedup_to_idealized_hivm_floor_upper": (
+                    self.t_measured_us / self.t_bound_hivm_us
+                ),
+            }
+
+        achievable_status = (
+            "estimated"
+            if self.recoverable_headroom_estimate_us is not None
+            else "not_established"
+        )
+        return {
+            "schema_version": "modeling_output_v1",
+            "purpose": _MODELING_PURPOSE,
+            "basis": basis,
+            "profile_inputs": {
+                "task_duration_us": self.t_measured_us,
+                "measurement_metric": self.measurement_metric,
+                "msprof_source": self.msprof_source,
+                "task_wait_us": self.task_wait_us,
+                "component_match": self.component_match,
+                "diagnosis": self.profile_diagnosis,
+                "dominant_component": self.profile_dominant_component,
+                "exposed_control_deficit_us": self.exposed_control_deficit_us,
+            },
+            "simulator_trace": {
+                "role": "calibration_and_validation_only",
+                "used_as_kernel_model_input": False,
+            },
+            "status": status,
+            "compiler_floor_shift_us": compiler_floor_shift_us,
+            "theoretical_ceilings": ceilings,
+            "opportunity_ranking": opportunities,
+            "opportunity_ranking_semantics": (
+                "Diagnostic priority only; modeled gaps are not additive or "
+                "independently attainable savings."
+            ),
+            "achievable_headroom": {
+                "status": achievable_status,
+                "point_estimate_us": self.recoverable_headroom_estimate_us,
+                "evidence_required": _COUNTERFACTUAL_REQUIREMENT,
+            },
+            "validity_gates": {
+                "model_coverage_status": coverage_status,
+                "modeled_trace_timing_status": trace_timing_status,
+                "calibration_p0_complete": self.calibration_p0_complete,
+                "measurement_metric": self.measurement_metric,
+                "bound_order_valid": bound_order_valid,
+            },
+        }
+
     def to_dict(self) -> dict:
         base = {
             "kernel_name": self.kernel_name,
@@ -173,6 +354,7 @@ class KernelReport:
                 "method": self.headroom_method,
                 "potential_speedup_upper": self.potential_speedup_upper,
             },
+            "modeling_output": self._build_modeling_output(),
             "loop_resolution": self.loop_resolution,
             "des_event_wait": self.des_event_wait,
             "recommended_action": self.recommended_action,
@@ -368,6 +550,65 @@ class KernelReport:
                 f"  End-to-end event elapsed: {self.event_elapsed_us:.2f} us "
                 "(not used for task-duration headroom)"
             )
+
+        modeling = self._build_modeling_output()
+        ceilings = modeling["theoretical_ceilings"]
+        lines.extend([
+            "",
+            "Modeling Output:",
+            f"  basis: {' + '.join(modeling['basis'])}",
+            f"  purpose: {modeling['purpose']}",
+            "  simulator trace: calibration/validation only; not a kernel model input",
+            f"  status: {modeling['status']}",
+        ])
+        profile_inputs = modeling["profile_inputs"]
+        if profile_inputs["task_duration_us"] is not None:
+            lines.append(
+                "  hardware profile task duration: "
+                f"{profile_inputs['task_duration_us']:.2f} us"
+            )
+        if modeling["compiler_floor_shift_us"] is not None:
+            lines.append(
+                "  modeled compiler floor shift: "
+                f"{modeling['compiler_floor_shift_us']:.2f} us"
+            )
+        if ceilings["to_realized_dsl_floor_us"] is not None:
+            lines.extend([
+                "  sound ceiling to realized DSL floor: "
+                f"{ceilings['to_realized_dsl_floor_us']:.2f} us "
+                f"({ceilings['speedup_to_realized_dsl_floor_upper']:.2f}x)",
+                "  sound ceiling to idealized HIVM floor: "
+                f"{ceilings['to_idealized_hivm_floor_us']:.2f} us "
+                f"({ceilings['speedup_to_idealized_hivm_floor_upper']:.2f}x)",
+            ])
+        else:
+            lines.append("  theoretical ceilings: suppressed by validity gates")
+        achievable = modeling["achievable_headroom"]
+        if achievable["point_estimate_us"] is None:
+            lines.append("  achievable point estimate: not established")
+        else:
+            lines.append(
+                "  achievable point estimate: "
+                f"{achievable['point_estimate_us']:.2f} us"
+            )
+        if modeling["opportunity_ranking"]:
+            lines.append("  ranked opportunities:")
+            for opportunity in modeling["opportunity_ranking"]:
+                lines.append(
+                    f"    {opportunity['rank']}. {opportunity['name']}: "
+                    f"{opportunity['modeled_gap_us']:.2f} us "
+                    f"({opportunity['scope']})"
+                )
+        else:
+            if modeling["status"] in {
+                "sound_theoretical_ceiling", "measurement_required"
+            }:
+                lines.append("  ranked opportunities: none above threshold")
+            else:
+                lines.append("  ranked opportunities: unavailable")
+        lines.append(
+            "  ranking semantics: diagnostic priority, not additive savings"
+        )
 
         if self.profile_diagnosis:
             lines.append(f"")

@@ -231,6 +231,24 @@ TTAdapter MLIR：
 `unplaced_semantic_vector_cycles`。只有 `trace_timing_status=complete` 时，
 才能把生成的时间线视为完整的逐流水线 trace。
 
+perfbound 的逐 kernel 模型输入是 semantic IR、HIVM IR 和硬件 profiling
+数值（`msprof_task_duration` 及可选的 utilization/profile breakdown）。模拟器
+trace 不作为逐 kernel 模型输入，只用于离线校准和结果验证。报告将组合分析
+结果统一放在 JSON 的 `modeling_output` 字段和文本的 `Modeling Output` 段中。
+该输出明确给出：
+
+- 基于 semantic IR、HIVM IR、硬件 profiling 数值和 perf-bound theory 的
+  优化机会排序；
+- `T_measured - T_bound_DSL` 与 `T_measured - T_bound_HIVM` 两个理论上限；
+- `T_bound_DSL - T_bound_HIVM` 表示的 compiler floor shift；
+- coverage、校准、task measurement 和 bound ordering 的有效性门槛；
+- achievable point estimate 是否已经由 correctness-verified counterfactual 建立。
+
+机会排序中的 gap 数值仅用于诊断优先级，不可相加，也不代表各项收益可独立
+实现。只有 `modeling_output.status=sound_theoretical_ceiling` 时才会输出理论
+headroom ceiling；在反事实版本通过正确性检查并完成硬件测量前，不声明
+achievable point estimate。
+
 通过 Python perfbound 入口运行时，对应参数名为 `--semantic-ir`：
 
 ```bash
@@ -239,8 +257,13 @@ python3 -m perfbound.combine.run_report \
   --semantic-ir /path/to/kernel.ttadapter.mlir \
   --hardware-config configs/ascend_910b3_v4.json \
   --arg-bindings arg9=1,arg10=128 \
-  --grid 128,32
+  --grid 128,32 \
+  --measured-csv /path/to/hardware/op_summary.csv \
+  --measured-op-name logical_kernel_name
 ```
+
+`--measured-csv` 必须是硬件 msprof profiling 输出，不是 `msprof op simulator`
+生成的 trace。模拟器数据应进入校准或独立的 model-versus-simulator 验证流程。
 
 使用 `tritonsim-hivm --triton-script` 时，如果没有显式指定
 `--semantic-ir-file`，工具会在本次临时 dump 目录中自动选择最新的
