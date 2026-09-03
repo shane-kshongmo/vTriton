@@ -93,6 +93,34 @@ class TestIdealizedExtract:
         # Cross-path handoff kept
         assert len(ideal.handoffs) == 1
 
+    def test_reassigned_op_rebuilds_handoff_components(self):
+        ops = [
+            OpRecord(
+                op_id=1, op_name="matmul", component=Component.VECTOR,
+                precision=Precision.FP16, pipe="Vector", flops=1024,
+            ),
+            OpRecord(
+                op_id=2, op_name="add", component=Component.VECTOR,
+                precision=Precision.FP16, pipe="Vector", elements=128,
+                depends_on=[1],
+            ),
+        ]
+        extract = HIVMExtract(
+            operations=ops,
+            handoffs=[
+                HandoffRecord(
+                    1, 2, Component.VECTOR, Component.VECTOR, 256
+                )
+            ],
+        )
+
+        ideal = _build_idealized_extract(extract)
+
+        assert ideal.operations[0].component == Component.CUBE
+        assert len(ideal.handoffs) == 1
+        assert ideal.handoffs[0].producer_component == Component.CUBE
+        assert ideal.handoffs[0].consumer_component == Component.VECTOR
+
 
 class TestTwoLimitRecomputation:
     """compute_two_limit recomputes bound from idealized extract."""

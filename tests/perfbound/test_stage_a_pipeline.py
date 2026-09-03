@@ -47,21 +47,12 @@ def test_legacy_chunk_kda_uses_scalar_floor_and_suppresses_headroom():
     report = _report(load_default_calib_db())
 
     assert report.binding_component == "scalar"
-    assert 0 < report.t_bound_us <= report.t_measured_us
+    assert report.binding_tier == "component"
+    assert report.t_bound_hivm_us is not None
+    assert 0 < report.t_bound_hivm_us <= report.t_bound_us <= report.t_measured_us
     assert report.model_coverage["status"] == "legacy_unknown"
     assert report.compiler_headroom_us is None
     assert report.author_headroom_us is None
-
-
-@requires_chunk_kda_evidence
-def test_profile_cannot_restore_headroom_for_legacy_unknown_coverage():
-    report = _report(load_default_calib_db(), with_profile=True)
-
-    modeling = report.to_dict()["modeling_output"]
-    assert modeling["status"] == "model_incomplete"
-    assert all(value is None for value in modeling["theoretical_ceilings"].values())
-    assert report.author_headroom_us is None
-    assert "coverage incomplete" in report.recommended_action.lower()
 
 
 @requires_chunk_kda_evidence

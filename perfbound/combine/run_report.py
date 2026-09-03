@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Optional
@@ -30,7 +29,6 @@ from ..extract.hivm_extractor import (
     extract_hivm,
     load_des_metadata,
     load_loop_diagnostics,
-    HIVMExtract,
 )
 from ..extract.dsl_extractor import GridInfo
 from ..calibration.calib_loader import (
@@ -42,7 +40,8 @@ from ..calibration.constants import CalibrationDB, DType, VecOpType
 from ..model.bounds import compute_bounds
 from .bound_combiner import combine, worst_case_bound_us, BoundResult
 from .report import KernelReport
-from .two_limit import compute_two_limit, TwoLimitResult
+from .report_compat import write_report_json
+from .two_limit import compute_two_limit
 
 
 def _parse_grid(grid_str: str) -> tuple[int, ...]:
@@ -449,8 +448,15 @@ def _cli():
     )
     parser.add_argument("--output-json",
                         help="Write report JSON to this path")
+    parser.add_argument(
+        "--legacy-report-aliases",
+        action="store_true",
+        help="Add deprecated v1 aliases to --output-json for migration",
+    )
 
     args = parser.parse_args()
+    if args.legacy_report_aliases and not args.output_json:
+        parser.error("--legacy-report-aliases requires --output-json")
     grid_dims = _parse_grid(args.grid)
 
     calib_db = load_calibration(args.calibration)
@@ -494,7 +500,11 @@ def _cli():
 
     print(report.to_text())
     if args.output_json:
-        report.to_json(args.output_json)
+        write_report_json(
+            report.to_dict(),
+            args.output_json,
+            legacy_aliases=args.legacy_report_aliases,
+        )
         print(f"\nJSON written to {args.output_json}")
 
 

@@ -429,6 +429,11 @@ Modeling Output:
 在拿到**正确性验证过的反事实硬件实测**之前，模型不声明 achievable point
 estimate。机会排序只表示诊断优先级，各 gap 不可相加，也不代表能独立兑现。
 
+旧版 `reachability`、`profile`、`headroom_assessment` 消费者可临时使用
+`--legacy-report-aliases`，或通过 `python -m perfbound.combine.report_compat`
+转换已有 v2 JSON。完整映射和弃用语义见
+[报告 schema 迁移指南](docs/REPORT_SCHEMA_MIGRATION.md)。
+
 #### 4. 校准溯源
 
 报告还会带上 `Calibration:` 段（来源、版本、目标硬件、P0 常量是否齐全、最大相对 CI）。
@@ -590,7 +595,9 @@ Python (perfbound) 测试套件位于 `tests/perfbound/`，`conftest.py` 会自�
 python -m pytest tests/perfbound/                       # 全部
 python -m pytest tests/perfbound/test_bounds.py         # 单文件
 python -m pytest tests/perfbound/ -k chunk_kda          # 按关键字筛选
-python -m pytest tests/hivm/                            # HIVM 同步 / 组件验证
+python -m pytest tests/hivm/                            # HIVM 验证器逻辑
+python3 scripts/validate_hivm_components.py <des.json> <kernel.npuir.mlir>
+python3 scripts/validate_hivm_sync.py <des.json> <kernel.npuir.mlir>
 ```
 
 启用 C++ 测试后可运行：

@@ -114,8 +114,10 @@ python -m pytest tests/perfbound/test_bounds.py           # one file
 python -m pytest tests/perfbound/test_bounds.py::test_xxx # one test
 python -m pytest tests/perfbound/ -k chunk_kda            # by keyword
 
-# HIVM sync/component tests
+# HIVM validator logic and artifact validation
 python -m pytest tests/hivm/
+python3 scripts/validate_hivm_components.py <des.json> <kernel.npuir.mlir>
+python3 scripts/validate_hivm_sync.py <des.json> <kernel.npuir.mlir>
 
 # C++ MLIR tests — enable then ctest
 cmake -B build -S . -DASCEND_MODEL_ENABLE_TESTS=ON ...     # add to your cmake line

@@ -440,23 +440,6 @@ def test_to_dict_is_violation_flag():
     assert d["modeling_output"]["validity_gates"]["bound_order_valid"] is False
 
 
-def test_to_dict_profile_source_and_invocations():
-    br = _make_bound_result()
-    two_limit = TwoLimitResult(
-        kernel_name="test_kernel",
-        t_bound_hivm_us=800.0,
-        t_bound_dsl_us=1000.0,
-        t_measured_us=1200.0,
-    )
-    report = KernelReport.from_bound(br, two_limit=two_limit)
-    report.msprof_source = "/tmp/op_summary.csv"
-    report.n_invocations = 12
-    d = report.to_dict()
-    profile = d["modeling_output"]["profile_inputs"]
-    assert profile["msprof_source"] == "/tmp/op_summary.csv"
-    assert profile["invocations"] == 12
-
-
 # ── merge_validation bridge tests ──────────────────────────────────────
 
 
@@ -489,6 +472,9 @@ def test_merge_validation_sets_provenance_fields():
     # author_headroom = t_measured - t_bound_dsl = 1500 - 1000 = 500
     assert report.author_headroom_us == 500.0
     data = report.to_dict()
+    assert data["modeling_output"]["profile_inputs"]["msprof_source"] == (
+        "/tmp/op_summary.csv"
+    )
     assert data["modeling_output"]["profile_inputs"]["task_wait_us"] == 215.0
     assert data["modeling_output"]["profile_inputs"]["component_match"] is True
     assert data["modeling_output"]["profile_inputs"]["invocations"] == 5

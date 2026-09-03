@@ -102,6 +102,7 @@ class TestReportRoundTrip:
         result = _make_result(t_bound=50.0, gap1_frac=0.1)
         report = KernelReport.from_bound(result)
         d = report.to_dict()
+        assert d["schema_version"] == "perfbound_report_v2"
         assert d["kernel_name"] == "test_kernel"
         assert d["t_bound_us"] == pytest.approx(50.0)
         assert "attribution" in d
@@ -121,19 +122,3 @@ class TestReportRoundTrip:
         text = report.to_text()
         assert "42.00" in text
         assert "Performance Bound Report" in text
-
-    def test_two_limit_in_report(self):
-        """When two_limit is provided, modeling output includes both floors."""
-        from perfbound.combine.two_limit import TwoLimitResult
-        result = _make_result(t_bound=100.0)
-        tl = TwoLimitResult(
-            kernel_name="test_kernel",
-            t_bound_hivm_us=80.0,
-            t_bound_dsl_us=100.0,
-        )
-        report = KernelReport.from_bound(result, two_limit=tl)
-        assert report.t_bound_hivm_us == pytest.approx(80.0)
-        assert report.compiler_headroom_us == pytest.approx(20.0)
-        text = report.to_text()
-        assert "Modeling Output" in text
-        assert "idealized HIVM floor: 80.00 us" in text

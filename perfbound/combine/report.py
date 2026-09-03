@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from ..calibration.constants import CalibrationDB
 
 
+REPORT_SCHEMA_VERSION = "perfbound_report_v2"
+
 _RECOMMENDATIONS = {
     "grid": "Fix grid partitioning — increase occupancy or load balance",
     "gap1_wrong_unit": "Fix DSL types — move ops to eligible unit",
@@ -298,6 +300,7 @@ class KernelReport:
 
     def to_dict(self) -> dict:
         return {
+            "schema_version": REPORT_SCHEMA_VERSION,
             "kernel_name": self.kernel_name,
             "t_bound_us": self.t_bound_us,
             "binding_tier": self.binding_tier,
