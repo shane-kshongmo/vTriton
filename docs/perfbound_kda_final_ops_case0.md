@@ -14,11 +14,10 @@
 - Simulator traces: calibration and validation evidence only; never used as
   per-kernel model input
 
-The immutable refreshed generated set is under
-`/tmp/kda_perfbound_refresh_20260903`; its reports and summary are also mirrored
-into `/tmp/kda_perfbound_analysis` beside the regenerated DES graphs. Each
-report records SHA-256 hashes for its DES graph, hardware profile, hardware
-config, and calibration database. The stale-report audit is
+The authoritative refreshed generated set is under
+`/tmp/kda_perfbound_refresh_20260903`. Each report records SHA-256 hashes for
+its DES graph, hardware profile, hardware config, and calibration database.
+The stale-report audit is
 `/tmp/kda_perfbound_refresh_20260903/stale_report_audit.json`.
 
 ## Profiling Method
@@ -104,8 +103,7 @@ rankings and ceilings are deliberately suppressed.
 
 ## Stale-Report Audit
 
-All 15 reports previously stored in `/tmp/kda_perfbound_analysis` were stale;
-that path has now been refreshed. The pre-refresh snapshot is
+All 15 pre-refresh reports were stale. Their snapshot is
 `/tmp/kda_perfbound_stale_snapshot_20260902`. Every old report had all of these
 issues:
 
@@ -124,9 +122,9 @@ Additional non-canonical artifacts:
 | `/tmp/kda_sim_trace_summary.json` | validation-only simulator artifact, not a model input |
 | `/tmp/kda_final_ops_hw_20260902_csv` | stale launch-mode profile pass contaminated by compilation/autotuning |
 
-Only the refreshed reports and their mirror in `/tmp/kda_perfbound_analysis`
-are authoritative for this run. Simulator-derived spans must not be substituted
-for the hardware task values recorded in `modeling_output.profile_inputs`.
+Only `/tmp/kda_perfbound_refresh_20260903` is authoritative for this run.
+Simulator-derived spans must not be substituted for the hardware task values
+recorded in `modeling_output.profile_inputs`.
 
 ## Remaining Risks
 
