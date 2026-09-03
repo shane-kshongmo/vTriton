@@ -142,7 +142,7 @@ compiler bug), tracked by xfail/spike tests.
 |------|------|--------|
 | A.6.1 | msprof CSV parser (AiCore filter, invocation grouping, max-per-invocation, warmup discard, median) | ✅ Done (13 tests) |
 | A.6.1 | Tri-state harness (`ValidationStatus`; infra errors excluded from soundness) | ✅ Done (7 tests) |
-| A.6.1 | Three-level reachability report (HIVM/DSL/measured + provenance, component match) | ✅ Done (11 tests) |
+| A.6.1 | Canonical modeling output (HIVM/DSL/profile values + validity gates) | ✅ Done |
 | A.6.2 | HIVM edit primitives + no-op guards + extract-reversibility check | ✅ Done (23 tests) |
 | A.6.2 | Output correctness verification (numpy allclose) | ✅ Done (10 tests) |
 | A.6.2 | Counterfactual orchestration (edit→compile→verify→delta, tri-state infra) | ✅ Done (19 tests) |
@@ -157,10 +157,10 @@ compiler bug), tracked by xfail/spike tests.
 
 | Step | Status |
 |------|--------|
-| `T_bound = max(T_grid_floor, T_core_floor) + T_serial_irreducible` | ✅ Done |
+| `T_bound = T_launch + max(T_grid_floor, T_core_floor + T_serial_irreducible)` | ✅ Done |
 | Five-way attribution (grid + gap1/2/3/4), Gap 3 from real handoff classification | ✅ Done |
 | Binding tier/component detection + text/JSON report | ✅ Done |
-| Two-limit (`T_bound_HIVM` vs `T_bound_DSL`) + reachability hierarchy (A.7) | ✅ Done — `two_limit.py` |
+| Two-limit (`T_bound_HIVM` vs `T_bound_DSL`) + canonical modeling output | ✅ Done — `two_limit.py`, `report.py` |
 | Real-kernel milestone (mixed-CV pipeline end-to-end) | ✅ Done |
 
 ---

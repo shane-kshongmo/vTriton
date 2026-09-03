@@ -153,13 +153,15 @@ class TestTwoLimitCompilerHeadroom:
         """Legacy coverage cannot support author-headroom claims."""
         report = self._report()
         assert report.author_headroom_us is None
-        assert report.headroom_status == "model_incomplete"
+        assert report.to_dict()["modeling_output"]["status"] == "model_incomplete"
 
     def test_compiler_headroom_is_small(self):
         """Incomplete inputs suppress numeric headroom instead of guessing."""
         report = self._report()
         assert report.compiler_headroom_us is None
-        assert report.recoverable_headroom_estimate_us is None
+        assert report.to_dict()["modeling_output"]["achievable_headroom"][
+            "point_estimate_us"
+        ] is None
 
     def test_dominant_gap_is_author_headroom(self):
         """No dominant-gap claim is made for legacy coverage."""
@@ -171,7 +173,7 @@ class TestTwoLimitCompilerHeadroom:
         """Coverage status explains why gap interpretation is unavailable."""
         report = self._report()
         assert report.model_coverage["status"] == "legacy_unknown"
-        assert "semantic work" in report.headroom_method.lower()
+        assert report.to_dict()["modeling_output"]["status"] == "model_incomplete"
 
     def test_binding_is_component_tier(self):
         """chunk_kda binds at Tier 2 (component level), not grid level."""
@@ -184,7 +186,7 @@ class TestTwoLimitCompilerHeadroom:
         """Scalar issue work, not an unverified gap, binds the legacy graph."""
         report = self._report()
         assert report.binding_component == "scalar"
-        assert report.headroom_status == "model_incomplete"
+        assert report.to_dict()["modeling_output"]["status"] == "model_incomplete"
 
 
 # ===========================================================================

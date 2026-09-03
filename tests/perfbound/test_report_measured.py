@@ -1,7 +1,6 @@
 # Tests for report.py three-level rendering (A.6.1)
 #
-# Validates KernelReport text rendering with Reachability Hierarchy,
-# bound violation labels, component match, and to_dict reachability block.
+# Validates canonical modeling output, bound gating, and profile provenance.
 #
 # Source spec: .omc/plans/a6_validation_harness.md §7
 
@@ -55,12 +54,19 @@ def test_event_elapsed_is_not_used_as_author_headroom():
         ),
     )
 
-    report.merge_event_elapsed(5000.0, source="triton.testing.do_bench")
+    report.merge_event_elapsed(5000.0)
 
     assert report.event_elapsed_us == 5000.0
     assert report.measurement_metric == "event_elapsed"
     assert report.t_measured_us is None
     assert report.author_headroom_us is None
+    data = report.to_dict()
+    assert data["modeling_output"]["screening_metrics"][
+        "event_elapsed_us"
+    ] == 5000.0
+    assert data["modeling_output"]["profile_inputs"][
+        "measurement_metric"
+    ] == "event_elapsed"
 
 
 def test_incomplete_model_coverage_suppresses_headroom_and_recommendation():
@@ -85,7 +91,7 @@ def test_incomplete_model_coverage_suppresses_headroom_and_recommendation():
     assert report.model_coverage["status"] == "conservative_partial"
     assert report.compiler_headroom_us is None
     assert report.author_headroom_us is None
-    assert report.headroom_status == "model_incomplete"
+    assert report.to_dict()["modeling_output"]["status"] == "model_incomplete"
     assert "incomplete" in report.recommended_action.lower()
 
 
@@ -116,6 +122,7 @@ def test_modeling_output_ranks_opportunities_and_reports_sound_ceilings():
     output = report.to_dict()["modeling_output"]
 
     assert output["status"] == "sound_theoretical_ceiling"
+    assert output["schema_version"] == "modeling_output_v1"
     assert output["basis"] == [
         "semantic_ir", "hivm_ir", "hardware_profile_values",
         "perf_bound_theory"
@@ -141,6 +148,10 @@ def test_modeling_output_ranks_opportunities_and_reports_sound_ceilings():
     assert "not additive" in output["opportunity_ranking_semantics"]
     assert output["achievable_headroom"]["status"] == "not_established"
     assert output["achievable_headroom"]["point_estimate_us"] is None
+    assert output["achievable_headroom"]["evidence_required"] == (
+        "A correctness-verified counterfactual measurement is required before "
+        "claiming achievable headroom."
+    )
     assert output["validity_gates"]["modeled_trace_timing_status"] == "partial"
 
 
@@ -300,8 +311,7 @@ def test_modeling_output_requires_explicit_task_measurement_provenance():
     )
 
 
-def test_to_text_three_levels():
-    """Reachability Hierarchy section present in text output."""
+def test_to_text_shows_canonical_modeling_bounds():
     br = _make_bound_result()
     two_limit = TwoLimitResult(
         kernel_name="test_kernel",
@@ -310,7 +320,9 @@ def test_to_text_three_levels():
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
     text = report.to_text()
-    assert "Reachability Hierarchy" in text
+    assert "Modeling Output" in text
+    assert "idealized HIVM floor: 800.00 us" in text
+    assert "realized DSL floor: 1000.00 us" in text
 
 
 def test_to_text_labels_author_value_as_residual_not_attainable_headroom():
@@ -322,9 +334,11 @@ def test_to_text_labels_author_value_as_residual_not_attainable_headroom():
         t_measured_us=5000.0,
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
+    report.merge_model_coverage({"status": "complete"})
+    report.calibration_p0_complete = True
     text = report.to_text()
-    assert "author residual" in text.lower()
-    assert "not proven attainable" in text.lower()
+    assert "sound ceiling to realized DSL floor: 4000.00 us" in text
+    assert "achievable point estimate: not established" in text
 
 
 def test_to_text_not_measured():
@@ -336,8 +350,10 @@ def test_to_text_not_measured():
         t_bound_dsl_us=1000.0,
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
+    report.merge_model_coverage({"status": "complete"})
+    report.calibration_p0_complete = True
     text = report.to_text()
-    assert "not yet measured" in text
+    assert "status: measurement_required" in text
 
 
 def test_to_text_bound_violation():
@@ -350,8 +366,10 @@ def test_to_text_bound_violation():
         t_measured_us=1100.0,  # T_bound > T_measured
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
+    report.merge_model_coverage({"status": "complete"})
+    report.calibration_p0_complete = True
     text = report.to_text()
-    assert "BOUND VIOLATION" in text
+    assert "status: bound_violation" in text
 
 
 def test_to_text_shows_source_and_n_invocations():
@@ -368,7 +386,7 @@ def test_to_text_shows_source_and_n_invocations():
     report.n_invocations = 12
     text = report.to_text()
     assert "source: /tmp/op_summary.csv" in text
-    assert "n=12 invocations" in text
+    assert "hardware profile invocations: 12" in text
 
 
 def test_to_text_shows_component_match():
@@ -383,15 +401,14 @@ def test_to_text_shows_component_match():
     report = KernelReport.from_bound(br, two_limit=two_limit)
     report.component_match = True
     text = report.to_text()
-    assert "match=✓" in text
+    assert "coarse task-category match: yes" in text
 
     report.component_match = False
     text = report.to_text()
-    assert "match=✗" in text
+    assert "coarse task-category match: no" in text
 
 
-def test_to_dict_reachability_key():
-    """to_dict()[reachability][t_bound_dsl_us] present."""
+def test_to_dict_modeling_bounds():
     br = _make_bound_result()
     two_limit = TwoLimitResult(
         kernel_name="test_kernel",
@@ -400,9 +417,10 @@ def test_to_dict_reachability_key():
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
     d = report.to_dict()
-    assert "reachability" in d
-    assert d["reachability"]["t_bound_dsl_us"] == 1000.0
-    assert "author_residual_us" in d["reachability"]
+    assert d["modeling_output"]["bounds"] == {
+        "hivm_floor_us": 800.0,
+        "dsl_floor_us": 1000.0,
+    }
 
 
 def test_to_dict_is_violation_flag():
@@ -415,12 +433,14 @@ def test_to_dict_is_violation_flag():
         t_measured_us=1100.0,
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
+    report.merge_model_coverage({"status": "complete"})
+    report.calibration_p0_complete = True
     d = report.to_dict()
-    assert d["reachability"]["is_violation"] is True
+    assert d["modeling_output"]["status"] == "bound_violation"
+    assert d["modeling_output"]["validity_gates"]["bound_order_valid"] is False
 
 
-def test_to_dict_msprof_source_and_n_invocations():
-    """reachability[msprof_source] and reachability[n_invocations] present."""
+def test_to_dict_profile_source_and_invocations():
     br = _make_bound_result()
     two_limit = TwoLimitResult(
         kernel_name="test_kernel",
@@ -432,8 +452,9 @@ def test_to_dict_msprof_source_and_n_invocations():
     report.msprof_source = "/tmp/op_summary.csv"
     report.n_invocations = 12
     d = report.to_dict()
-    assert d["reachability"]["msprof_source"] == "/tmp/op_summary.csv"
-    assert d["reachability"]["n_invocations"] == 12
+    profile = d["modeling_output"]["profile_inputs"]
+    assert profile["msprof_source"] == "/tmp/op_summary.csv"
+    assert profile["invocations"] == 12
 
 
 # ── merge_validation bridge tests ──────────────────────────────────────
@@ -457,14 +478,21 @@ def test_merge_validation_sets_provenance_fields():
         msprof_source="/tmp/op_summary.csv",
         n_invocations=5,
         component_match=True,
+        task_wait_us=215.0,
     )
 
     assert report.t_measured_us == 1500.0
     assert report.msprof_source == "/tmp/op_summary.csv"
     assert report.n_invocations == 5
     assert report.component_match is True
+    assert report.task_wait_us == 215.0
     # author_headroom = t_measured - t_bound_dsl = 1500 - 1000 = 500
     assert report.author_headroom_us == 500.0
+    data = report.to_dict()
+    assert data["modeling_output"]["profile_inputs"]["task_wait_us"] == 215.0
+    assert data["modeling_output"]["profile_inputs"]["component_match"] is True
+    assert data["modeling_output"]["profile_inputs"]["invocations"] == 5
+    assert "median task wait: 215.00 us" in report.to_text()
 
 
 # ── merge_profile tests ────────────────────────────────────────────────
@@ -538,15 +566,17 @@ def test_merge_profile_populates_fields():
     assert report.profile_dominant_component == "scalar"
     assert report.n_sync_ops == 402
     assert report.exposed_control_deficit_pts == pytest.approx(0.727)
-    assert report.headroom_status == "diagnostic_upper_bound"
-    assert report.recoverable_headroom_lower_us == 0.0
-    assert report.recoverable_headroom_upper_us == pytest.approx(4000.0)
-    assert report.recoverable_headroom_estimate_us is None
-    assert report.headroom_confidence == "low"
+    assert report.to_dict()["modeling_output"]["achievable_headroom"] == {
+        "status": "not_established",
+        "point_estimate_us": None,
+        "evidence_required": (
+            "A correctness-verified counterfactual measurement is required "
+            "before claiming achievable headroom."
+        ),
+    }
 
 
-def test_to_text_shows_profile_section():
-    """to_text includes Profile Diagnosis section after merge_profile."""
+def test_to_text_shows_profile_diagnosis_in_modeling_output():
     br = _make_bound_result()
     two_limit = TwoLimitResult(
         kernel_name="test_kernel",
@@ -557,12 +587,11 @@ def test_to_text_shows_profile_section():
     report = KernelReport.from_bound(br, two_limit=two_limit)
     report.merge_profile(_make_mock_profile())
     text = report.to_text()
-    assert "Profile Diagnosis" in text
+    assert "profile diagnosis:" in text
     assert "Insufficient Parallelism" in text
 
 
-def test_to_dict_includes_profile_block():
-    """to_dict includes profile key after merge_profile, None before."""
+def test_to_dict_includes_profile_data_in_modeling_output():
     br = _make_bound_result()
     two_limit = TwoLimitResult(
         kernel_name="test_kernel",
@@ -570,13 +599,14 @@ def test_to_dict_includes_profile_block():
         t_bound_dsl_us=1000.0,
     )
     report = KernelReport.from_bound(br, two_limit=two_limit)
-    assert report.to_dict().get("profile") is None
     report.merge_profile(_make_mock_profile())
     d = report.to_dict()
-    assert d["profile"]["diagnosis"] == "Insufficient Parallelism"
-    assert d["profile"]["n_sync_ops"] == 402
-    assert d["headroom_assessment"]["status"] == "unavailable"
-    assert d["headroom_assessment"]["point_estimate_us"] is None
+    profile = d["modeling_output"]["profile_inputs"]
+    assert profile["diagnosis"] == "Insufficient Parallelism"
+    assert profile["sync_operations"] == 402
+    assert "profile" not in d
+    assert "reachability" not in d
+    assert "headroom_assessment" not in d
 
 
 def test_merge_calibration_populates_provenance():

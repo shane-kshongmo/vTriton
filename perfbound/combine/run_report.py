@@ -245,7 +245,7 @@ def report_from_desgraph(
     if task_measured_us is not None:
         report.measurement_metric = "msprof_task_duration"
     elif t_measured_us is not None:
-        report.merge_event_elapsed(t_measured_us, source="direct measurement")
+        report.merge_event_elapsed(t_measured_us)
 
     # Loop-resolution diagnostics: surface whether t_bound_us may be loose
     # due to unresolved (data-dependent) scf.for trip counts, and — when a

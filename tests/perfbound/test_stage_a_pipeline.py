@@ -57,8 +57,9 @@ def test_legacy_chunk_kda_uses_scalar_floor_and_suppresses_headroom():
 def test_profile_cannot_restore_headroom_for_legacy_unknown_coverage():
     report = _report(load_default_calib_db(), with_profile=True)
 
-    assert report.headroom_status == "model_incomplete"
-    assert report.recoverable_headroom_upper_us is None
+    modeling = report.to_dict()["modeling_output"]
+    assert modeling["status"] == "model_incomplete"
+    assert all(value is None for value in modeling["theoretical_ceilings"].values())
     assert report.author_headroom_us is None
     assert "coverage incomplete" in report.recommended_action.lower()
 
@@ -84,16 +85,11 @@ def test_complete_pipeline_reports_provenance_and_honest_headroom():
         for item in data["calibration"]["fallbacks"]
     )
     assert data["model_coverage"]["status"] == "legacy_unknown"
-    assert data["reachability"]["author_residual_us"] is None
-    assert data["reachability"]["n_invocations"] == 5
-
-    assessment = data["headroom_assessment"]
-    assert assessment["status"] == "model_incomplete"
-    assert assessment["point_estimate_us"] is None
-    assert assessment["lower_us"] is None
-    assert assessment["upper_us"] is None
-    assert assessment["confidence"] == "none"
-    assert "semantic work" in assessment["method"].lower()
+    modeling = data["modeling_output"]
+    assert modeling["status"] == "model_incomplete"
+    assert modeling["profile_inputs"]["invocations"] == 5
+    assert modeling["achievable_headroom"]["point_estimate_us"] is None
+    assert all(value is None for value in modeling["theoretical_ceilings"].values())
 
 
 @requires_chunk_kda_evidence
