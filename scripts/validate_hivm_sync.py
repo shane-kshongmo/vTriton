@@ -7,7 +7,7 @@ sync_block_set / sync_block_wait, pipe_barrier) are correctly
 reflected in the tritonsim-opt DES JSON output.
 
 Usage:
-    python3 scripts/test_sync_verification.py docs/prefill_des.json kernel_001.npuir.mlir
+    python3 scripts/validate_hivm_sync.py docs/prefill_des.json kernel_001.npuir.mlir
 """
 import json
 import re
@@ -30,7 +30,7 @@ def load_mlir_sync_counts(path):
     }
 
 
-def test_static_event_pairs(ops):
+def check_static_event_pairs(ops):
     """Test 1: Every static set_flag must have a matching wait_flag
     with the same event_id and event_generation, in correct temporal order."""
     set_static = defaultdict(list)
@@ -51,11 +51,10 @@ def test_static_event_pairs(ops):
                                          gen, o["start_cycle"]))
 
     failures = []
-    for eid in sorted(set_static.keys()):
-        setters = set_static[eid]
+    for eid in sorted(set(set_static) | set(wait_static)):
+        setters = set_static.get(eid, [])
         waiters = wait_static.get(eid, [])
         # Group by (gen, core)
-        from itertools import groupby
         set_groups = defaultdict(list)
         wait_groups = defaultdict(list)
         for s_id, s_pipe, s_core, s_gen, s_cyc in setters:
@@ -92,7 +91,7 @@ def test_static_event_pairs(ops):
     return failures
 
 
-def test_sync_block_pairs(ops):
+def check_sync_block_pairs(ops):
     """Test 2: Every sync_block_set must have a matching sync_block_wait
     with same flag_id and event_generation."""
     set_flags = defaultdict(list)
@@ -114,8 +113,8 @@ def test_sync_block_pairs(ops):
 
     failures = []
     cross_core = 0
-    for fid in sorted(set_flags.keys()):
-        setters = set_flags[fid]
+    for fid in sorted(set(set_flags) | set(wait_flags)):
+        setters = set_flags.get(fid, [])
         waiters = wait_flags.get(fid, [])
         # Group by gen
         s_groups = defaultdict(list)
@@ -144,11 +143,17 @@ def test_sync_block_pairs(ops):
                 for _, w_c, _, _, _ in w_items:
                     if s_c != w_c:
                         cross_core += 1
+        for gen, w_items in w_groups.items():
+            if gen not in s_groups:
+                failures.append(
+                    f"orphan sync_block_wait: flag={fid} gen={gen} "
+                    f"({len(w_items)} waits, 0 sets)"
+                )
     return failures, cross_core
 
 
-def test_cross_core_flag_2(ops):
-    """Test 3: flag_2 specifically — CUBE MTE2_C → VECTOR PIPE_ALL cross-core sync."""
+def check_cross_core_flag_2(ops):
+    """Test 3: validate the flag_2 cross-core route when it is present."""
     f2_sets = []
     f2_waits = []
     for o in ops:
@@ -160,6 +165,8 @@ def test_cross_core_flag_2(ops):
                              o.get("event_generation", 0), o["start_cycle"]))
 
     failures = []
+    if f2_waits and not f2_sets:
+        failures.append("flag_2 has waits but no matching set")
     for s_id, s_c, s_p, s_gen, s_cyc in f2_sets:
         matched = [(w_id, w_c, w_p, w_cyc)
                    for w_id, w_c, w_p, w_g, w_cyc in f2_waits if w_g == s_gen]
@@ -173,7 +180,7 @@ def test_cross_core_flag_2(ops):
     return failures
 
 
-def test_pipe_barrier_coverage(ops):
+def check_pipe_barrier_coverage(ops):
     """Test 4: pipe_barrier must appear on data pipes (MTE2, MTE3, FIX, V, etc.)."""
     bars = [o for o in ops if o["name"] == "pipe_barrier"]
     valid_pipes = {"PIPE_MTE1", "PIPE_MTE2_C", "PIPE_MTE2_V", "PIPE_MTE3",
@@ -187,9 +194,9 @@ def test_pipe_barrier_coverage(ops):
     return failures, Counter(b["pipe"] for b in bars)
 
 
-def test_ssa_dynamic_events(ops):
+def check_ssa_dynamic_events(ops):
     """Test 5: SSA dynamic events — set_flag has empty event_id, wait_flag
-    resolves to ssa_producer_<N>. Verify consumer count matches expected."""
+    resolves to ssa_producer_<N>. Report producer and consumer counts."""
     ssa_waits = defaultdict(int)
     empty_eid_sets = 0
     for o in ops:
@@ -207,9 +214,8 @@ def test_ssa_dynamic_events(ops):
     }
 
 
-def test_mlir_des_ratio(mlir_counts, ops):
-    """Test 6: MLIR vs DES sync op ratio should be consistent (accounts
-    for loop unrolling and two kernels)."""
+def check_mlir_des_ratio(mlir_counts, ops):
+    """Report DES expansion ratios for sync operations present in MLIR."""
     des_counts = Counter(o["name"] for o in ops)
     ratios = {}
     for name in ["set_flag", "wait_flag", "sync_block_set", "sync_block_wait",
@@ -233,13 +239,10 @@ def main():
     total = 0
     passed = 0
 
-    def run(name, failures, is_list=True):
+    def run(name, failures):
         nonlocal all_pass, total, passed
         total += 1
-        if is_list:
-            ok = len(failures) == 0
-        else:
-            ok = True
+        ok = len(failures) == 0
         if ok:
             print(f"  [PASS] {name}")
             passed += 1
@@ -256,39 +259,36 @@ def main():
     print("=" * 60)
 
     # Test 1
-    f1 = test_static_event_pairs(ops)
+    f1 = check_static_event_pairs(ops)
     run("Static event set_flag/wait_flag pairs", f1)
 
     # Test 2
-    f2, cross_core = test_sync_block_pairs(ops)
+    f2, cross_core = check_sync_block_pairs(ops)
     run("sync_block_set/wait flag pairs", f2)
     print(f"        cross-core pairs: {cross_core}")
 
     # Test 3
-    f3 = test_cross_core_flag_2(ops)
-    run("Cross-core flag_2 (CUBE→VECTOR)", f3)
+    f3 = check_cross_core_flag_2(ops)
+    run("Cross-core flag_2 route when present", f3)
 
     # Test 4
-    f4, bar_pipes = test_pipe_barrier_coverage(ops)
+    f4, _ = check_pipe_barrier_coverage(ops)
     run("pipe_barrier pipe validity", f4)
 
     # Test 5
-    ssa = test_ssa_dynamic_events(ops)
+    ssa = check_ssa_dynamic_events(ops)
     total += 1
     print(f"  [INFO] SSA dynamic events: {ssa['empty_event_set_flags']} empty-eid producers"
           f" → {ssa['ssa_consumer_count']} unique ssa_producer_* consumers"
           f" ({ssa['ssa_total_consumers']} total)")
     passed += 1
 
-    # Test 6
-    ratios = test_mlir_des_ratio(mlir_counts, ops)
-    total += 1
-    consistent = all(0.5 < r < 50 for r in ratios.values())
-    print(f"  [{'PASS' if consistent else 'INFO'}] MLIR→DES ratio check")
+    # Expanded traces can legitimately have very large DES/MLIR ratios, so
+    # report these values as diagnostics rather than a pass/fail invariant.
+    ratios = check_mlir_des_ratio(mlir_counts, ops)
+    print("  [INFO] MLIR→DES expansion ratios")
     for name, r in ratios.items():
         print(f"        {name}: MLIR={mlir_counts[name]} DES={Counter(o['name'] for o in ops)[name]} ratio={r:.1f}x")
-    if consistent:
-        passed += 1
 
     # Summary
     print("\n" + "=" * 60)
@@ -302,23 +302,23 @@ def main():
         print(f"  {name}: {cnt}")
 
     pipe_dist = Counter(o["pipe"] for o in ops if o.get("is_sync"))
-    print(f"\n--- Sync pipe distribution ---")
+    print("\n--- Sync pipe distribution ---")
     for pipe, cnt in pipe_dist.most_common():
         print(f"  {pipe}: {cnt}")
 
     core_dist = Counter(o.get("core_type", "?") for o in ops)
-    print(f"\n--- Core type distribution ---")
+    print("\n--- Core type distribution ---")
     for core, cnt in core_dist.most_common():
         print(f"  {core}: {cnt}")
 
     # Known caveats
-    print(f"\n--- Known caveats ---")
-    print(f"  1. event_EVENT_ID2/3 gen≥2 set_flags may have orphan consumers"
-          f" — verify event_generation logic in HIVMAnalysis.cpp")
-    print(f"  2. SSA dynamic events (ssa_producer_*) lack static producer set_flag"
-          f" — expected behavior, consumers use SSA-based syncIdValue")
-    print(f"  3. Cross-kernel event name sharing (AIC+AIV both use EVENT_ID0-5)"
-          f" — each core has independent timeline, no actual conflict")
+    print("\n--- Known caveats ---")
+    print("  1. event_EVENT_ID2/3 gen≥2 set_flags may have orphan consumers"
+          " — verify event_generation logic in HIVMAnalysis.cpp")
+    print("  2. SSA dynamic events (ssa_producer_*) lack static producer set_flag"
+          " — expected behavior, consumers use SSA-based syncIdValue")
+    print("  3. Cross-kernel event name sharing (AIC+AIV both use EVENT_ID0-5)"
+          " — each core has independent timeline, no actual conflict")
 
     return 0 if all_pass else 1
 

@@ -111,6 +111,7 @@ struct ParsedOp {
   std::string receiverEvent;
   std::string eventId;
   mlir::Value syncIdValue;
+  bool syncIdIsFlag = false;
   HIVMPipe senderPipe = HIVMPipe::Unknown;
   HIVMPipe receiverPipe = HIVMPipe::Unknown;
 };
@@ -916,6 +917,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     parsed.eventId =
         stringifyTypedFlag(syncSet.getStaticFlagId());
     parsed.syncIdValue = syncSet.getDynamicFlagId();
+    parsed.syncIdIsFlag = true;
     parsed.op.pipe = parsed.senderPipe;
     return true;
   }
@@ -944,6 +946,7 @@ static bool populateTypedHivmOp(mlir::Operation *op, ParsedOp &parsed) {
     parsed.eventId =
         stringifyTypedFlag(syncWait.getStaticFlagId());
     parsed.syncIdValue = syncWait.getDynamicFlagId();
+    parsed.syncIdIsFlag = true;
     parsed.op.pipe = HIVMPipe::All;
     parsed.barrierPipes.push_back(HIVMPipe::All);
     return true;
@@ -1538,13 +1541,17 @@ static int64_t inferTransferPacketBytes(mlir::Value value,
 }
 
 static std::string canonicalizeSyncId(mlir::Value value,
-                                      const AnalysisState &state) {
+                                      const AnalysisState &state,
+                                      bool isFlag) {
   if (!value)
     return "";
 
   int64_t resolved = 0;
-  if (resolveMLIRValue(value, state, resolved))
-    return std::to_string(resolved);
+  if (resolveMLIRValue(value, state, resolved)) {
+    if (isFlag)
+      return "flag_" + std::to_string(resolved);
+    return "event_EVENT_ID" + std::to_string(resolved);
+  }
 
   auto producerIt = state.valueProducers.find(value);
   if (producerIt != state.valueProducers.end())
@@ -2479,7 +2486,8 @@ static void ingestParsedOp(const ParsedOp &parsed, AnalysisState &state,
   ParsedOp mutableParsed = parsed;
   if (mutableParsed.syncIdValue) {
     std::string canonicalSyncId =
-        canonicalizeSyncId(mutableParsed.syncIdValue, state);
+        canonicalizeSyncId(mutableParsed.syncIdValue, state,
+                           mutableParsed.syncIdIsFlag);
     if (!canonicalSyncId.empty())
       mutableParsed.op.eventId = canonicalSyncId;
   }

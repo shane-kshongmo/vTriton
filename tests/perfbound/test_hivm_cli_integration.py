@@ -113,6 +113,82 @@ class TestTritonsimHivmCLI:
         ops = load_hivm_desgraph(out_file)
         assert len(ops) > 0, "Parsed operations must be non-empty"
 
+    def test_static_and_resolved_dynamic_sync_flags_share_generations(
+        self, tmp_path
+    ):
+        """A dynamic flag value must match the equivalent static pre-signal."""
+        npuir_file = tmp_path / "dynamic_sync_flag.npuir.mlir"
+        npuir_file.write_text(
+            """
+module {
+  func.func @dynamic_sync_mix_aic() attributes {
+      hacc.entry,
+      hivm.func_core_type = #hivm.func_core_type<AIC>
+  } {
+    %c1 = arith.constant 1 : i64
+    hivm.hir.sync_block_set[<CUBE>, <PIPE_MTE1>, <PIPE_MTE3>] flag = 1
+    hivm.hir.sync_block_wait[<CUBE>, <PIPE_MTE3>, <PIPE_MTE1>] flag = 3
+    hivm.hir.sync_block_set[<CUBE>, <PIPE_MTE1>, <PIPE_MTE3>] flag = %c1
+    return
+  }
+  func.func @dynamic_sync_mix_aiv() attributes {
+      hacc.entry,
+      hivm.func_core_type = #hivm.func_core_type<AIV>
+  } {
+    %c0 = arith.constant 0 : i64
+    %c1 = arith.constant 1 : i64
+    hivm.hir.set_flag[<PIPE_V>, <PIPE_MTE3>, <EVENT_ID0>]
+    hivm.hir.wait_flag[<PIPE_V>, <PIPE_MTE3>, %c0]
+    hivm.hir.sync_block_wait[<VECTOR>, <PIPE_MTE1>, <PIPE_MTE3>] flag = %c1
+    hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE1>] flag = 3
+    return
+  }
+}
+"""
+        )
+        out_file = tmp_path / "dynamic_sync_flag.des.json"
+        cmd = [
+            str(TRITONSIM_HIVM),
+            "--npuir-file", str(npuir_file),
+            "--scheduler", "des",
+            "--des-graph-file", str(out_file),
+        ]
+        if HW_CONFIG.exists():
+            cmd.extend(["--hardware-config", str(HW_CONFIG)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(out_file.read_text())
+        assert data["schedule_truncated"] is False
+
+        operations = data["operations"]
+        cube_sets = [
+            op for op in operations
+            if op["name"] == "sync_block_set"
+            and op["core_type"] == "CUBE"
+            and op["event_id"] == "flag_1"
+        ]
+        vector_wait = next(
+            op for op in operations
+            if op["name"] == "sync_block_wait"
+            and op["core_type"] == "VECTOR"
+        )
+        assert len(cube_sets) == 2
+        assert cube_sets[0]["id"] in vector_wait["depends_on"]
+        assert cube_sets[1]["id"] not in vector_wait["depends_on"]
+
+        local_set = next(
+            op for op in operations
+            if op["name"] == "set_flag"
+            and op["event_id"] == "event_EVENT_ID0"
+        )
+        local_wait = next(
+            op for op in operations
+            if op["name"] == "wait_flag"
+            and op["event_id"] == "event_EVENT_ID0"
+        )
+        assert local_set["id"] in local_wait["depends_on"]
+
     def test_semantic_sidecar_adds_typed_work_and_completes_coverage(self, tmp_path):
         """Pre-outline tensor work supplements, but does not replace, HIVM topology."""
         semantic_file = tmp_path / "kernel.ttadapter.mlir"

@@ -8,7 +8,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from perfbound.combine.run_report import report_from_npuir
@@ -185,17 +184,24 @@ def test_bound_pipeline_real_path_calls_report_with_bindable_kwargs(tmp_path):
     captured: dict = {}
 
     def fake_report(**kwargs):
+        from perfbound.combine.report import KernelReport
+
         captured.update(kwargs)
-        return SimpleNamespace(to_json=lambda path: Path(path).write_text("{}"))
+        return KernelReport("seeded_serial", 1.0, "component")
 
     with patch("scripts.run_bound.subprocess.run"), patch(
         "scripts.run_bound.report_from_npuir", fake_report
     ):
-        run_bound_pipeline(plan, tritonsim_hivm="/bin/tritonsim-hivm")
+        run_bound_pipeline(
+            plan,
+            tritonsim_hivm="/bin/tritonsim-hivm",
+            legacy_report_aliases=True,
+        )
 
     # Bind against the real signature, not the stub: this is what caught the bug.
     inspect.signature(report_from_npuir).bind(**captured)
     assert captured["des_json_path"] == plan.des_json
+    assert "reachability" in json.loads(plan.report_json.read_text())
 
 
 def test_newest_npuir_selects_latest_file(tmp_path):

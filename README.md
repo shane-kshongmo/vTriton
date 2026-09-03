@@ -231,6 +231,24 @@ TTAdapter MLIR：
 `unplaced_semantic_vector_cycles`。只有 `trace_timing_status=complete` 时，
 才能把生成的时间线视为完整的逐流水线 trace。
 
+perfbound 的逐 kernel 模型输入是 semantic IR、HIVM IR 和硬件 profiling
+数值（`msprof_task_duration` 及可选的 utilization/profile breakdown）。模拟器
+trace 不作为逐 kernel 模型输入，只用于离线校准和结果验证。报告将组合分析
+结果统一放在 JSON 的 `modeling_output` 字段和文本的 `Modeling Output` 段中。
+该输出明确给出：
+
+- 基于 semantic IR、HIVM IR、硬件 profiling 数值和 perf-bound theory 的
+  优化机会排序；
+- `T_measured - T_bound_DSL` 与 `T_measured - T_bound_HIVM` 两个理论上限；
+- `T_bound_DSL - T_bound_HIVM` 表示的 compiler floor shift；
+- coverage、校准、task measurement 和 bound ordering 的有效性门槛；
+- achievable point estimate 是否已经由 correctness-verified counterfactual 建立。
+
+机会排序中的 gap 数值仅用于诊断优先级，不可相加，也不代表各项收益可独立
+实现。只有 `modeling_output.status=sound_theoretical_ceiling` 时才会输出理论
+headroom ceiling；在反事实版本通过正确性检查并完成硬件测量前，不声明
+achievable point estimate。
+
 通过 Python perfbound 入口运行时，对应参数名为 `--semantic-ir`：
 
 ```bash
@@ -239,8 +257,13 @@ python3 -m perfbound.combine.run_report \
   --semantic-ir /path/to/kernel.ttadapter.mlir \
   --hardware-config configs/ascend_910b3_v4.json \
   --arg-bindings arg9=1,arg10=128 \
-  --grid 128,32
+  --grid 128,32 \
+  --measured-csv /path/to/hardware/op_summary.csv \
+  --measured-op-name logical_kernel_name
 ```
+
+`--measured-csv` 必须是硬件 msprof profiling 输出，不是 `msprof op simulator`
+生成的 trace。模拟器数据应进入校准或独立的 model-versus-simulator 验证流程。
 
 使用 `tritonsim-hivm --triton-script` 时，如果没有显式指定
 `--semantic-ir-file`，工具会在本次临时 dump 目录中自动选择最新的
@@ -364,18 +387,26 @@ python scripts/run_bound.py --kernel vector_add --grid 128,32 --dry-run
 流水线产出 `<kernel>.report.json`；`KernelReport.to_text()`（`perfbound/combine/report.py`）给出等价的可读版本。
 以下为**示意输出**（数字仅用于说明格式），四块最值得看：
 
-#### 1. 三级可达性层次 — 差距该归谁
+#### 1. Modeling Output — 统一的模型结论
 
 ```
-Reachability Hierarchy:
-  1. Hardware floor  (T_bound_HIVM):  120.00 us
-  2. DSL bound       (T_bound_DSL):   180.00 us   [compiler headroom: 60.00 us]
-  3. Measured        (T_measured):    450.00 us   [author residual, not proven attainable: 270.00 us]
+Modeling Output:
+  basis: semantic_ir + hivm_ir + hardware_profile_values + perf_bound_theory
+  status: sound_theoretical_ceiling
+  idealized HIVM floor: 120.00 us
+  realized DSL floor: 180.00 us
+  hardware profile task duration: 450.00 us
+  modeled compiler floor shift: 60.00 us
+  sound ceiling to idealized HIVM floor: 330.00 us (3.75x)
+  achievable point estimate: not established
 ```
 
-- **compiler headroom** = `DSL − HIVM`：编译器（bishengir）实际生成的结构，比硬件本可允许的理想结构差多少。这部分你改 kernel 一般动不了。
-- **author residual** = `Measured − DSL`：实测比你自己写的 kernel 结构所允许的下界差多少——**这是通常你能动的部分**。
-- 若出现 `*** BOUND VIOLATION: T_bound > T_measured ***`，说明保守性被打破了：这是**模型 bug**，不是 kernel 变快了，请当作 issue 处理。
+- `DSL floor - HIVM floor` 是结构理想化带来的 modeled floor shift。
+- `task duration - floor` 是理论 headroom ceiling，不是承诺可实现的收益。
+- 只有 coverage、校准、`msprof_task_duration` 来源和 bound ordering 都通过，
+  `status` 才会是 `sound_theoretical_ceiling`。
+- `status=bound_violation` 表示模型下界高于硬件 task duration；此时不输出
+  ceiling 或机会排序，应作为模型 bug 处理。
 
 #### 2. 五路归因 — 差距在哪、先做哪件事
 
@@ -392,22 +423,11 @@ Reachability Hierarchy:
 若五类差距全部低于阈值，`recommended_action` 会直接告诉你 **"At component bound"**——
 没有可做的软件层优化了，只剩算法层重设计。
 
-#### 3. Attainable Headroom Assessment — 别把差距当成承诺的加速比
+#### 3. 有效性门槛 — 别把 ceiling 当成可兑现收益
 
-```
-Attainable Headroom Assessment:
-  status:     diagnostic_upper_bound
-  confidence: low
-  diagnostic range: 0.00..85.00 us
-  point estimate: unavailable
-```
-
-这是最容易误读的一块，请注意：**`Measured − T_bound` 是上界，不是"能省下来的时间"。**
-模型刻意不给点估计（`point estimate: unavailable`）——按 `headroom_method` 的说法，
-在拿到**正确性验证过的反事实实测 (counterfactual)** 之前，不对"可兑现的加速"作任何声明。
-差距里也可能有一部分根本兑现不了：它来自模型尚未建模的项（例如标量发射受限），
-是 bound 偏低造成的假象，而非真实可回收的时间。
-`status` / `confidence` 就是在标注这份不确定性，请照字面理解。
+`modeling_output.achievable_headroom.status` 默认是 `not_established`。
+在拿到**正确性验证过的反事实硬件实测**之前，模型不声明 achievable point
+estimate。机会排序只表示诊断优先级，各 gap 不可相加，也不代表能独立兑现。
 
 #### 4. 校准溯源
 
@@ -482,16 +502,14 @@ Attribution (absolute and fraction of T_bound):
   gap2_coalescing: 0.00 us (0.000)
   gap4_intra_unit_exec: 0.00 us (0.000)
 
-Reachability Hierarchy:
-  1. Hardware floor  (T_bound_HIVM):  1840.01 us
-  2. DSL bound       (T_bound_DSL):   1840.01 us   [compiler headroom: 0.00 us]
-  3. Measured        (T_measured):    3289.60 us   [author residual, not proven attainable: 1449.60 us]
-
-Attainable Headroom Assessment:
-  status:     unavailable
-  confidence: none
-  point estimate: unavailable
-  method: No correctness-verified counterfactual measurement is available.
+Modeling Output:
+  status: sound_theoretical_ceiling
+  idealized HIVM floor: 1840.01 us
+  realized DSL floor: 1840.01 us
+  hardware profile task duration: 3289.60 us
+  modeled compiler floor shift: 0.00 us
+  sound ceiling to idealized HIVM floor: 1449.59 us (1.79x)
+  achievable point estimate: not established
 
 Recommended action: Add ping-pong buffer to overlap this handoff
 ```
@@ -501,9 +519,9 @@ Recommended action: Add ping-pong buffer to overlap this handoff
 **① 卡在 Vector 上。** `Binding: component / vector`，Tier-2 (1840.01) 略高于 Tier-1 (1838.21)，
 两者几乎持平——说明网格切分没问题，瓶颈在单核 Vector 吞吐（就是 Stream B 那条 FMA 链）。
 
-**② 实测比下界慢了 1449.60 µs（44%）。** 这是 `author residual`。**但先别急着高兴**——
-注意 `Attainable Headroom Assessment` 明确写着 `status: unavailable` / `confidence: none`。
-模型在告诉你：*我不认为这 1449 µs 是你能拿回来的时间*。再看校准段的那条 warning：
+**② 实测到下界之间有 1449.59 µs 的理论 ceiling。** 但
+`achievable point estimate: not established` 明确表示模型没有证明这段时间能被
+拿回。再看校准段的 warning：
 
 > `P1 scalar_overhead_factor not calibrated — kernel-level bounds may be optimistic`
 
@@ -572,7 +590,9 @@ Python (perfbound) 测试套件位于 `tests/perfbound/`，`conftest.py` 会自�
 python -m pytest tests/perfbound/                       # 全部
 python -m pytest tests/perfbound/test_bounds.py         # 单文件
 python -m pytest tests/perfbound/ -k chunk_kda          # 按关键字筛选
-python -m pytest tests/hivm/                            # HIVM 同步 / 组件验证
+python -m pytest tests/hivm/                            # HIVM 验证器逻辑
+python3 scripts/validate_hivm_components.py <des.json> <kernel.npuir.mlir>
+python3 scripts/validate_hivm_sync.py <des.json> <kernel.npuir.mlir>
 ```
 
 启用 C++ 测试后可运行：

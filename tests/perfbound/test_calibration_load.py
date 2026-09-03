@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
-from perfbound.calibration.constants import CalibrationDB, DType
+from perfbound.calibration.constants import CalibrationDB, DType, VectorConfig
 
 
 def _get_calib_path() -> Path:
@@ -122,3 +122,23 @@ def test_calib_db_uses_measured_cce_provenance():
     assert all(const.ci_95 / const.value < 0.025 for const in measured.values() if const.value > 0)
     assert db.vector.scalar_throughput_measured is True
     assert db.constants["P_scalar_add_sustained"].value == pytest.approx(0.5998078861614121)
+
+
+def test_measured_scalar_constant_drives_bound_rate():
+    db = CalibrationDB.load(str(_get_calib_path()))
+
+    assert db.vector.get_scalar_throughput_ops_per_us("fp16") == pytest.approx(
+        db.constants["P_scalar_add_sustained"].value * 1000
+    )
+
+
+def test_unmeasured_scalar_uses_vector_upper_rate():
+    config = VectorConfig(
+        throughput_fp16_tflops=0.015,
+        scalar_throughput_fp16_tflops=0.0005,
+        scalar_throughput_measured=False,
+    )
+
+    assert config.get_scalar_throughput_ops_per_us("fp16") == pytest.approx(
+        config.throughput_fp16_tflops * 1e6
+    )

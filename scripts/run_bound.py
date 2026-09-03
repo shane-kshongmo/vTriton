@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from perfbound.calibration.calib_loader import load_calibration
 from perfbound.combine.run_report import report_from_npuir
+from perfbound.combine.report_compat import write_report_json
 from perfbound.experiments.artifacts import STAGEB_ROOT
 from perfbound.experiments.registry import get_kernel
 
@@ -174,6 +175,7 @@ def run_bound_pipeline(
     measured_csv: str | Path | None = None,
     measured_op_name: str | None = None,
     measured_us: float | None = None,
+    legacy_report_aliases: bool = False,
     dry_run: bool = False,
 ) -> dict:
     """Execute the bound pipeline, or return the plan when ``dry_run`` is true."""
@@ -234,7 +236,11 @@ def run_bound_pipeline(
         op_name_filter=measured_op_name,
         calibration_source=calibration,
     )
-    report.to_json(plan.report_json)
+    write_report_json(
+        report.to_dict(),
+        plan.report_json,
+        legacy_aliases=legacy_report_aliases,
+    )
     return {"dry_run": False, "plan": plan.to_dict(), "report_json": str(plan.report_json)}
 
 
@@ -254,6 +260,11 @@ def _cli() -> int:
     parser.add_argument("--measured-csv")
     parser.add_argument("--measured-op-name")
     parser.add_argument("--measured-us", type=float)
+    parser.add_argument(
+        "--legacy-report-aliases",
+        action="store_true",
+        help="Add deprecated v1 aliases to the generated report JSON",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -281,6 +292,7 @@ def _cli() -> int:
         measured_csv=args.measured_csv,
         measured_op_name=args.measured_op_name,
         measured_us=args.measured_us,
+        legacy_report_aliases=args.legacy_report_aliases,
         dry_run=args.dry_run,
     )
     print(json.dumps(result, indent=2))
