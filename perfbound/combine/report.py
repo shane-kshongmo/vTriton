@@ -208,7 +208,7 @@ class KernelReport:
             status = "sound_theoretical_ceiling"
 
         opportunities = []
-        if analytical_ready:
+        if status == "sound_theoretical_ceiling":
             ranked = sorted(
                 (
                     (name, max(float(gap_us), 0.0))
@@ -600,9 +600,7 @@ class KernelReport:
                     f"({opportunity['scope']})"
                 )
         else:
-            if modeling["status"] in {
-                "sound_theoretical_ceiling", "measurement_required"
-            }:
+            if modeling["status"] == "sound_theoretical_ceiling":
                 lines.append("  ranked opportunities: none above threshold")
             else:
                 lines.append("  ranked opportunities: unavailable")

@@ -190,6 +190,7 @@ def test_modeling_output_requires_task_measurement_for_ceiling():
     assert output["status"] == "measurement_required"
     assert "hardware_profile_values" not in output["basis"]
     assert output["compiler_floor_shift_us"] == pytest.approx(200.0)
+    assert output["opportunity_ranking"] == []
     assert all(
         value is None for value in output["theoretical_ceilings"].values()
     )
