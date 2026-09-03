@@ -1538,13 +1538,17 @@ static int64_t inferTransferPacketBytes(mlir::Value value,
 }
 
 static std::string canonicalizeSyncId(mlir::Value value,
-                                      const AnalysisState &state) {
+                                      const AnalysisState &state,
+                                      llvm::StringRef opName) {
   if (!value)
     return "";
 
   int64_t resolved = 0;
-  if (resolveMLIRValue(value, state, resolved))
-    return std::to_string(resolved);
+  if (resolveMLIRValue(value, state, resolved)) {
+    if (opName == "sync_block_set" || opName == "sync_block_wait")
+      return "flag_" + std::to_string(resolved);
+    return "event_EVENT_ID" + std::to_string(resolved);
+  }
 
   auto producerIt = state.valueProducers.find(value);
   if (producerIt != state.valueProducers.end())
@@ -2479,7 +2483,8 @@ static void ingestParsedOp(const ParsedOp &parsed, AnalysisState &state,
   ParsedOp mutableParsed = parsed;
   if (mutableParsed.syncIdValue) {
     std::string canonicalSyncId =
-        canonicalizeSyncId(mutableParsed.syncIdValue, state);
+        canonicalizeSyncId(mutableParsed.syncIdValue, state,
+                           mutableParsed.op.opName);
     if (!canonicalSyncId.empty())
       mutableParsed.op.eventId = canonicalSyncId;
   }
