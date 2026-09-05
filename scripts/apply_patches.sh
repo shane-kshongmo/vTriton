@@ -68,4 +68,10 @@ apply_patch \
   "${PATCH_DIR}/triton-ascend-llvm19-compat.patch" \
   "${PROJECT_ROOT}/thirdparty/triton-ascend"
 
+# Patch: Tiling candidate expansion V6.8.1
+# Source++ ranking, Safety gating, per-program workload,
+# and already-paid TTIR anchor refinement.
+apply_patch \
+  "${PATCH_DIR}/tiling-candidate-expansion-v6_8_1.patch" \
+  "${PROJECT_ROOT}/thirdparty/triton-ascend"
 echo "=== Patches done ==="
