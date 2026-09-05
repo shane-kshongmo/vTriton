@@ -168,6 +168,31 @@ def parse_collapse_shape(line):
     dim_strs = tokens[:-1]  # drop element type
     src_dims = [int(d) if d.strip().isdigit() else d.strip() for d in dim_strs]
 
+    # Source's own explicit strides, e.g. 'strided<[8, 1]>' or
+    # 'strided<[128, 1], offset: ?>' — present when the source is itself a
+    # subview/strided memref rather than a freshly-allocated dense buffer.
+    # None means no explicit annotation (plain dense/row-major memref).
+    src_strides = None
+    skey = 'strided<['
+    sp = inner.find(skey)
+    if sp != -1:
+        sstart = sp + len(skey)
+        send = inner.find(']', sstart)
+        if send != -1:
+            parts = [p.strip() for p in inner[sstart:send].split(',')]
+            parsed_strides = []
+            ok = True
+            for p in parts:
+                if p == '?':
+                    parsed_strides.append('?')
+                elif p.lstrip('-').isdigit():
+                    parsed_strides.append(int(p))
+                else:
+                    ok = False
+                    break
+            if ok and parsed_strides:
+                src_strides = parsed_strides
+
     # Reassociation [[...], [...]] — bracket-depth aware.
     rb = line.find('[[')
     if rb == -1:
@@ -193,7 +218,7 @@ def parse_collapse_shape(line):
             groups.append(idxs)
     if not groups:
         return None
-    return var, src_dims, groups
+    return var, src_dims, src_strides, groups
 
 
 def find_single_strided(result_part):
@@ -218,13 +243,24 @@ def find_single_strided(result_part):
         start = p + 1
 
 
-def compute_new_strides(src_dims, groups):
-    """Leading stride per reassociation group (1, or '?' for dynamic)."""
+def compute_new_strides(src_dims, src_strides, groups):
+    """Leading stride per reassociation group.
+
+    When the source memref carries its own explicit ``strided<[...]>``
+    annotation (e.g. it is a subview, not a freshly-allocated dense buffer),
+    the collapsed dim inherits that dimension's declared stride verbatim —
+    it must NOT be recomputed as if the source were densely packed.  Only
+    fall back to the dense-packing assumption (stride 1, or '?' when the
+    trailing size is dynamic) when the source has no explicit strides.
+    """
     new_strides = []
     for g in groups:
         ref = list(g)
         while len(ref) > 1 and src_dims[ref[-1]] == 1:
             ref.pop()
+        if src_strides is not None:
+            new_strides.append(src_strides[ref[-1]])
+            continue
         ld = src_dims[ref[-1]]
         if ld == '?' and len(ref) > 1:
             new_strides.append('?')
@@ -240,8 +276,8 @@ def fix_strides(lines):
         parsed = parse_collapse_shape(line)
         if parsed is None:
             continue
-        var, src_dims, groups = parsed
-        new_strides = compute_new_strides(src_dims, groups)
+        var, src_dims, src_strides, groups = parsed
+        new_strides = compute_new_strides(src_dims, src_strides, groups)
 
         into_pos = line.rfind(' into ')
         result_part = line[into_pos + 6:]

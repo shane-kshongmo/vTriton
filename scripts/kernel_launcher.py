@@ -179,7 +179,13 @@ def save_outputs(outputs: list, output_dir: str) -> list[Path]:
 
     saved = []
     for i, tensor in enumerate(outputs):
-        arr = tensor.numpy() if hasattr(tensor, 'numpy') else np.asarray(tensor)
+        if hasattr(tensor, 'numpy'):
+            # numpy has no native bfloat16; upcast so .numpy() doesn't raise.
+            if getattr(tensor, 'dtype', None) is not None and 'bfloat16' in str(tensor.dtype):
+                tensor = tensor.float()
+            arr = tensor.numpy()
+        else:
+            arr = np.asarray(tensor)
         npy_path = out_path / f"kernel_output_{i}.npy"
         np.save(npy_path, arr)
         saved.append(npy_path)
